@@ -4,7 +4,9 @@
 //! The glide runs on the volume's perceptual curve (the gain is the cube of
 //! a level that moves at a steady pace), so a fade down sounds even instead
 //! of dropping most of the way in its first moments. It never passes its
-//! target and lands on it exactly.
+//! target and lands on it exactly after the frames asked for: the level is
+//! worked out from where the glide began and how far along it is, never by
+//! adding small steps, which a slow glide in `f32` would round away.
 
 use crate::shared::volume_curve;
 
@@ -12,10 +14,13 @@ use crate::shared::volume_curve;
 pub(crate) struct Glide {
     /// Where the level is now (0..1); the gain is its cube.
     level: f32,
+    /// Where the glide began.
+    start: f32,
     /// Where it goes.
     target: f32,
-    /// How far it moves a frame.
-    step: f32,
+    /// The glide's length and the frames of it done.
+    frames: u64,
+    done: u64,
 }
 
 impl Default for Glide {
@@ -29,8 +34,10 @@ impl Glide {
     pub(crate) const fn new() -> Self {
         Self {
             level: 1.0,
+            start: 1.0,
             target: 1.0,
-            step: 0.0,
+            frames: 0,
+            done: 0,
         }
     }
 
@@ -38,11 +45,11 @@ impl Glide {
     /// wherever it is now; zero frames jumps there.
     pub(crate) fn set(&mut self, gain: f32, frames: u64) {
         self.target = level_of(gain);
+        self.start = self.level;
+        self.frames = frames;
+        self.done = 0;
         if frames == 0 {
             self.level = self.target;
-            self.step = 0.0;
-        } else {
-            self.step = ((self.target - self.level).abs() / frames as f32).max(f32::MIN_POSITIVE);
         }
     }
 
@@ -53,10 +60,16 @@ impl Glide {
 
     /// One frame on; the gain for that frame.
     pub(crate) fn advance(&mut self) -> f32 {
-        if self.level < self.target {
-            self.level = (self.level + self.step).min(self.target);
-        } else if self.level > self.target {
-            self.level = (self.level - self.step).max(self.target);
+        if self.level != self.target {
+            self.done = (self.done + 1).min(self.frames);
+            self.level = if self.done >= self.frames {
+                self.target
+            } else {
+                let along = self.done as f64 / self.frames as f64;
+                let level = f64::from(self.start) + f64::from(self.target - self.start) * along;
+                // Within the two ends, whatever the rounding.
+                (level as f32).clamp(self.start.min(self.target), self.start.max(self.target))
+            };
         }
         self.gain()
     }
@@ -95,8 +108,8 @@ mod tests {
         let mut g = Glide::new();
         g.set(0.18, 480);
         let gains = run(&mut g, 10_000);
-        // The frames it was given (one more where rounding left a hair).
-        assert!((480..=481).contains(&gains.len()), "{}", gains.len());
+        // The frames it was given (a few fewer where rounding lands early).
+        assert!((470..=480).contains(&gains.len()), "{}", gains.len());
         assert!(gains.windows(2).all(|w| w[1] <= w[0]), "never goes back up");
         assert!(gains.iter().all(|&x| x >= 0.18 - 1e-6), "never passes the target");
         assert!((g.gain() - 0.18).abs() < 1e-5, "{}", g.gain());
@@ -115,7 +128,7 @@ mod tests {
         // Restored from where it got to, not from the bottom.
         g.set(1.0, 450);
         let gains = run(&mut g, 10_000);
-        assert!(gains.len() <= 451);
+        assert!(gains.len() <= 450);
         assert!(gains[0] >= halfway);
         assert!(gains.windows(2).all(|w| w[1] >= w[0]));
         assert!(gains.iter().all(|&x| x <= 1.0));
@@ -134,6 +147,25 @@ mod tests {
         assert_eq!(g.gain(), 0.0);
         g.set(f32::NAN, 0);
         assert_eq!(g.gain(), 1.0);
+    }
+
+    #[test]
+    fn a_slow_shallow_glide_still_moves_and_lands_in_time() {
+        // 0.99 over 5 s at 48 kHz: a step per frame far below an f32 ulp
+        // near 1, which adding steps would round away for good.
+        let frames = 5 * 48_000;
+        let mut g = Glide::new();
+        g.set(0.99, frames);
+        let gains = run(&mut g, 2 * frames as usize);
+        assert!(!g.moving(), "it stopped");
+        assert!(gains.len() as u64 <= frames, "{} frames", gains.len());
+        assert!(gains.len() as u64 > frames - 1000, "it took its time: {} frames", gains.len());
+        assert!((g.gain() - 0.99).abs() < 1e-5, "{}", g.gain());
+        assert!(gains.windows(2).all(|w| w[1] <= w[0]));
+        assert!(gains.iter().all(|&x| x >= 0.99 - 1e-5 && x <= 1.0));
+        // Halfway it is about halfway (on the level's scale).
+        let mid = gains[gains.len() / 2];
+        assert!(mid < 0.9999 && mid > 0.991, "{mid}");
     }
 
     #[test]
