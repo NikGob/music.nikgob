@@ -1,4 +1,4 @@
-//! The tools: 17 in four groups of rights, each a thin call (or a few)
+//! The tools: 18 in four groups of rights, each a thin call (or a few)
 //! into the REST API. A session sees only the tools its token can use:
 //! «Только чтение» the reading ones, «Управление» also the player's,
 //! «Полный» all of them. Answers are compact JSON (no covers, no nulls,
@@ -89,7 +89,7 @@ pub const TOOLS: &[ToolDef] = &[
         name: "outputs_list",
         title: "Audio outputs",
         contour: Contour::Read,
-        description: "The audio outputs the player can use, with their ids and which one is in use. Pass an id (or part of a name) to output_select or player_play.output.",
+        description: "The audio outputs the player can use, with their ids and which one is in use, then the other devices of the home online (kind node, id node:<id>, whether they play). Pass an id (or part of a name) to output_select or player_play.output; a node's id to target_switch.",
         schema: schema_empty,
     },
     ToolDef {
@@ -119,6 +119,13 @@ pub const TOOLS: &[ToolDef] = &[
         contour: Contour::Control,
         description: "Switch where the sound goes: an id from outputs_list, a part of a device name, or `local:default` for the system default.",
         schema: schema_output,
+    },
+    ToolDef {
+        name: "target_switch",
+        title: "Play on another device",
+        contour: Contour::Control,
+        description: "Play on another device of the home, like Spotify Connect. target: a node id from outputs_list (`node:<id>`), a device's name, or `this` to bring the music back here. mode: transfer (default) moves the queue, the track and its position there and pauses here; attach only drives what that device already plays, moving nothing.",
+        schema: schema_target,
     },
     ToolDef {
         name: "library_feedback",
@@ -340,6 +347,16 @@ fn schema_queue() -> Value {
 
 fn schema_output() -> Value {
     obj(json!({"output": {"type": "string"}}), &["output"])
+}
+
+fn schema_target() -> Value {
+    obj(
+        json!({
+            "target": {"type": "string", "description": "`node:<id>` from outputs_list, a device's name, or `this`."},
+            "mode": {"type": "string", "enum": ["transfer", "attach"]}
+        }),
+        &["target"],
+    )
 }
 
 fn schema_feedback() -> Value {
@@ -585,6 +602,10 @@ pub async fn call<B: Backend>(b: &B, name: &str, args: &Value) -> Out {
         "player_control" => control(b, args).await,
         "queue_modify" => queue(b, args).await,
         "output_select" => send(b, ApiRequest::put("/v1/player/output", json!({"output": need(args, "output")?}))).await,
+        "target_switch" => {
+            let attach = text(args, "mode").as_deref() == Some("attach");
+            send(b, ApiRequest::put("/v1/player/output", json!({"output": need(args, "target")?, "attach": attach}))).await
+        }
         "library_feedback" => {
             let body = json!({"action": need(args, "action")?, "kind": need(args, "kind")?, "id": need(args, "id")?});
             send(b, ApiRequest::post("/v1/library/feedback", body)).await
@@ -974,15 +995,15 @@ mod tests {
     }
 
     #[test]
-    fn the_seventeen_tools_in_their_groups() {
-        assert_eq!(TOOLS.len(), 17);
+    fn the_eighteen_tools_in_their_groups() {
+        assert_eq!(TOOLS.len(), 18);
         let names: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
         let mut sorted = names.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 17, "names are unique");
+        assert_eq!(sorted.len(), 18, "names are unique");
         let count = |c: Contour| TOOLS.iter().filter(|t| t.contour == c).count();
-        assert_eq!((count(Contour::Read), count(Contour::Control), count(Contour::Library), count(Contour::Destructive)), (7, 4, 3, 3));
+        assert_eq!((count(Contour::Read), count(Contour::Control), count(Contour::Library), count(Contour::Destructive)), (7, 5, 3, 3));
         for t in TOOLS {
             let s = (t.schema)();
             assert_eq!(s["type"], "object", "{}", t.name);
@@ -998,11 +1019,13 @@ mod tests {
         assert_eq!(read.len(), 7);
         assert!(read.contains(&"status_get".to_owned()) && !read.contains(&"player_play".to_owned()));
         let control = names(Some(ApiPreset::Control));
-        assert_eq!(control.len(), 11);
+        assert_eq!(control.len(), 12);
+        assert!(control.contains(&"target_switch".to_owned()));
+        assert!(!read.contains(&"target_switch".to_owned()));
         assert!(control.contains(&"player_control".to_owned()) && !control.contains(&"library_feedback".to_owned()));
         assert!(!control.contains(&"library_trash".to_owned()));
-        assert_eq!(names(Some(ApiPreset::Full)).len(), 17);
-        assert_eq!(names(None).len(), 17, "unknown: everything, the API decides");
+        assert_eq!(names(Some(ApiPreset::Full)).len(), 18);
+        assert_eq!(names(None).len(), 18, "unknown: everything, the API decides");
         let trash = list(Some(ApiPreset::Full)).into_iter().find(|t| t["name"] == "library_trash").unwrap();
         assert_eq!(trash["annotations"]["destructiveHint"], true);
         assert_eq!(trash["annotations"]["readOnlyHint"], false);
@@ -1029,6 +1052,7 @@ mod tests {
             ("outputs_list", json!({}), vec!["GET /v1/outputs"]),
             ("player_play", json!({"query": "Любимые", "output": "pi"}), vec!["POST /v1/player/play"]),
             ("output_select", json!({"output": "local:default"}), vec!["PUT /v1/player/output"]),
+            ("target_switch", json!({"target": "node:abc"}), vec!["PUT /v1/player/output"]),
             ("queue_modify", json!({"action": "enqueue", "track_ids": ["a"]}), vec!["POST /v1/queue"]),
             ("queue_modify", json!({"action": "remove", "entry": 4}), vec!["DELETE /v1/queue/4"]),
             ("queue_modify", json!({"action": "jump", "entry": 4}), vec!["POST /v1/queue/4/play"]),
@@ -1058,6 +1082,12 @@ mod tests {
         call(&fake, "player_play", &json!({"query": "radiohead", "kind": "artist", "shuffle": false, "output": "pi"})).await.unwrap();
         let body = fake.seen.lock().unwrap()[0].body.clone().unwrap();
         assert_eq!(body, json!({"query": "radiohead", "kind": "artist", "shuffle": false, "output": "pi"}));
+        let fake = Fake::default();
+        call(&fake, "target_switch", &json!({"target": "node:abc", "mode": "attach"})).await.unwrap();
+        call(&fake, "target_switch", &json!({"target": "this"})).await.unwrap();
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(seen[0].body.clone().unwrap(), json!({"output": "node:abc", "attach": true}));
+        assert_eq!(seen[1].body.clone().unwrap(), json!({"output": "this", "attach": false}));
         let fake = Fake::default();
         call(&fake, "library_trash", &json!({"track_ids": ["a", " "], "confirm_token": "tok"})).await.unwrap();
         let body = fake.seen.lock().unwrap()[0].body.clone().unwrap();
