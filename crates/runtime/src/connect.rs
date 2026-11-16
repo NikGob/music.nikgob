@@ -769,7 +769,11 @@ impl Worker {
         let current = st.current.as_ref().map(|z| row_of(z));
         let prev: Vec<nikgob_view::QueueEntry> = st.prev.iter().map(entry).collect();
         let next: Vec<nikgob_view::QueueEntry> = st.next.iter().map(entry).collect();
-        let duration = st.duration_ms.map(Duration::from_millis).or_else(|| current.as_ref().and_then(|c| c.duration));
+        let duration = st
+            .duration_ms
+            .or_else(|| st.current.as_ref().and_then(|z| z.duration_ms))
+            .map(Duration::from_millis)
+            .or_else(|| current.as_ref().and_then(|c| c.duration));
         let link = t.link;
         let anchor = Duration::from_millis(st.position_ms);
         let (status, position, at, rate) = if link == RemoteLink::Live {
