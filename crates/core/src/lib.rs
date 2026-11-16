@@ -9,6 +9,7 @@ pub mod lyrics;
 pub mod model;
 pub mod names;
 pub mod quality;
+pub mod releases;
 pub mod settings;
 pub mod source;
 pub mod streaming;
