@@ -29,6 +29,7 @@ mod visualizer;
 mod zoom;
 
 pub mod now_playing;
+pub use pages::brand;
 
 use std::collections::HashMap;
 

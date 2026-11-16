@@ -2,9 +2,12 @@
 name = "nikgob-runtime"
 description = "Wires library, playback, import and downloads to the view model: executes UI commands, publishes state."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

@@ -5,10 +5,13 @@ exclude = ["vendor"]
 default-members = ["crates/app"]
 
 [workspace.package]
-version = "0.0.5"
+version = "0.1.0"
+authors = ["NikGob <https://github.com/NikGob>"]
 edition = "2024"
 rust-version = "1.98"
 license = "PolyForm-Strict-1.0.0"
+homepage = "https://github.com/NikGob/music.nikgob"
+repository = "https://github.com/NikGob/music.nikgob"
 publish = false
 
 [workspace.dependencies]

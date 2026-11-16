@@ -65,6 +65,7 @@ impl Keeper {
     }
 
     pub fn apply(&self, builder: egui::ViewportBuilder) -> egui::ViewportBuilder {
+        #[cfg(feature = "dev")]
         if let Some(size) = crate::shot::window_size() {
             return builder.with_inner_size(size);
         }

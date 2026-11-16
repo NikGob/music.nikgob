@@ -2,9 +2,12 @@
 name = "nikgob-indexer-prowlarr"
 description = "Indexer implementation backed by Prowlarr's native API. The only crate that knows about Prowlarr."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

@@ -89,6 +89,8 @@ impl Settings {
             if link(ui, "set-all", (0, 1), Icon::Settings, "Все настройки", None) {
                 page.nav = Some(Route::Settings);
             }
+            ui.add_space(16.0);
+            nikgob_md3e::screens::brand::made_by(ui, ui.max_rect().x_range());
             ui.add_space(24.0);
         });
         page

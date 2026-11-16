@@ -2,9 +2,12 @@
 name = "nikgob-sc-widget"
 description = "SoundCloud's official player (the embed widget in a hidden webview of a child process) for tracks SoundCloud only streams with DRM, its sound captured into our engine like Spotify Soloist's."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

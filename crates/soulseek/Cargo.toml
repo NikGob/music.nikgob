@@ -2,9 +2,12 @@
 name = "nikgob-soulseek"
 description = "Soulseek client written for the player: server, peers, distributed search, transfers and sharing; embedded or as a headless service with an HTTP API."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [[bin]]

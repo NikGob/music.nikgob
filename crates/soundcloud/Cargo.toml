@@ -2,9 +2,12 @@
 name = "nikgob-soundcloud"
 description = "SoundCloud (api-v2 with the web player's client id and the user's own sign-in) as a StreamService: catalogue, account data, AAC streams from HLS."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

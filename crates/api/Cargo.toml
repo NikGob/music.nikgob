@@ -2,9 +2,12 @@
 name = "nikgob-api"
 description = "The player's local REST API: control, queue, outputs, library, media with Range, events (SSE), Swagger UI; tokens with presets, kept hashed."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

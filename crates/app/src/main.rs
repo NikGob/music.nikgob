@@ -10,20 +10,26 @@
 
 mod autostart;
 mod cover_cache;
+#[cfg(any(feature = "dev", test))]
 mod demo;
 mod desktop;
 mod icon_art;
 mod fallback_fonts;
+#[cfg(feature = "dev")]
 mod frames;
 mod geometry;
 mod logfile;
 mod memory;
 mod pacing;
+#[cfg(feature = "dev")]
 mod profile;
 mod quit;
+#[cfg(feature = "dev")]
 mod shot;
+#[cfg(feature = "dev")]
 mod shot_fakes;
 mod streams;
+#[cfg(feature = "dev")]
 mod sweep;
 mod sysmotion;
 mod titlebar;
@@ -154,9 +160,9 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
         prefs.sound_device = nikgob_view::SoundDevice::Cpu;
     }
     prefs.upgrade_lyrics(lyrics_rev);
-    // The owner's own build opens the settings in «Подробно» the first
-    // time; a handout build in «Просто».
-    nikgob_view::presets::upgrade(&mut prefs, settings_rev, option_env!("NIKGOB_RELEASE").is_none());
+    // A developer build opens the settings in «Подробно» the first time;
+    // a normal/release build in «Просто».
+    nikgob_view::presets::upgrade(&mut prefs, settings_rev, nikgob_md3e::screens::brand::own_build());
     Ok(prefs)
 }
 
@@ -245,8 +251,10 @@ struct Core {
     desktop: desktop::Desktop,
     analyzer: Option<nikgob_playback::AnalyzerSlot>,
     commands: Vec<Command>,
+    #[cfg(feature = "dev")]
     shot: Option<shot::Shot>,
     /// `NIKGOB_FRAMES`: the frame-time log.
+    #[cfg(feature = "dev")]
     frames: Option<frames::Frames>,
     quit: bool,
     /// A screenshot run's `reopen`: the window closes and a new one opens.
@@ -317,10 +325,13 @@ impl Core {
 /// («Открыть», «Сбросить») the app does itself.
 fn send_commands(runtime: &Runtime, commands: &mut Vec<Command>) {
     commands.retain(|c| match c {
+        #[cfg(feature = "dev")]
         Command::DevProfile(action) => {
             profile::act(*action);
             false
         }
+        #[cfg(not(feature = "dev"))]
+        Command::DevProfile(_) => false,
         _ => true,
     });
     runtime.send_all(commands.drain(..));
@@ -407,12 +418,16 @@ struct Window {
 
 impl eframe::App for Window {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        raw_input.time = Some(self.core.started.elapsed().as_secs_f64());
+        let wall = self.core.started.elapsed().as_secs_f64();
+        #[cfg(feature = "dev")]
+        let wall = self.core.shot.as_mut().and_then(|s| s.synthetic_time(wall)).unwrap_or(wall);
+        raw_input.time = Some(wall);
         // egui makes the font atlas as wide as the largest texture the GPU
         // takes (16384) and lets it grow as tall before starting over: up to
         // a gigabyte in memory, and on the GPU again. Nothing here needs
         // textures that large (covers stop at 4096).
         raw_input.max_texture_side = Some(raw_input.max_texture_side.unwrap_or(MAX_TEXTURE_SIDE).min(MAX_TEXTURE_SIDE));
+        #[cfg(feature = "dev")]
         if let Some(s) = self.core.shot.as_mut() {
             s.raw_input(raw_input);
         }
@@ -420,12 +435,23 @@ impl eframe::App for Window {
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.core.pacer.begin();
+        #[cfg(feature = "dev")]
         if let Some(f) = self.core.frames.as_mut() {
             f.begin();
             f.caused_by(ctx);
         }
         // A screenshot run stays off the screen on purpose.
-        if !std::mem::replace(&mut self.recovery_checked, true) && !shot::offscreen() {
+        let offscreen = {
+            #[cfg(feature = "dev")]
+            {
+                shot::offscreen()
+            }
+            #[cfg(not(feature = "dev"))]
+            {
+                false
+            }
+        };
+        if !std::mem::replace(&mut self.recovery_checked, true) && !offscreen {
             fastframe_shell::window::recover_offscreen(ctx, frame);
         }
         if self.motion_checked.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
@@ -526,7 +552,10 @@ impl eframe::App for Window {
             let state = core.runtime.state();
             drop(lock);
             // Screenshot runs may lay states the demo cannot reach over it.
+            #[cfg(feature = "dev")]
             let faked = core.shot.as_ref().and_then(|s| s.overlay(&state));
+            #[cfg(not(feature = "dev"))]
+            let faked: Option<nikgob_view::ViewState> = None;
             let draw = nikgob_md3e::prof::scope("frame");
             core.ui.frame(ui, faked.as_ref().unwrap_or(&*state), &mut core.commands);
             drop(draw);
@@ -536,6 +565,7 @@ impl eframe::App for Window {
                 ui.ctx().copy_text(c.text.clone());
             }
             self.titlebar.sync(ui.ctx(), frame, state.prefs.theme);
+            #[cfg(feature = "dev")]
             if let Some(s) = core.shot.as_mut() {
                 if s.frame(ui.ctx(), &mut core.ui, &state, &mut core.commands) {
                     core.quit = true;
@@ -565,6 +595,7 @@ impl eframe::App for Window {
         if let Some(t) = core.show_at.take() {
             log::info!("window: shown from the tray, first frame drawn in {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
         }
+        #[cfg(feature = "dev")]
         if let Some(f) = core.frames.as_mut() {
             let atlas = ui.ctx().fonts(|f| f.font_image_size());
             f.end(frame.info().cpu_usage, core.shot.as_ref().map_or("live", |s| s.label()), atlas);
@@ -584,6 +615,7 @@ impl eframe::App for Window {
             core.pacer.idle();
         } else if !wait.is_zero() {
             std::thread::sleep(wait);
+            #[cfg(feature = "dev")]
             if let Some(f) = core.frames.as_mut() {
                 f.slept(wait);
             }
@@ -620,6 +652,10 @@ fn main() -> eframe::Result {
     // The allocator's options before anything else allocates much.
     memory::tune();
     LAUNCHED.get_or_init(Instant::now);
+    if std::env::args().nth(1).is_some_and(|a| a == "--version" || a == "-V") {
+        println!("music.nikgob {} (https://github.com/NikGob/music.nikgob)", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
     // `nikgob mcp`: only the MCP server on stdin/stdout for an agent on
     // this computer; it talks to the running player over its API. No
     // window, no lock, no log file; stdout is the protocol, logs go to
@@ -650,10 +686,16 @@ fn main() -> eframe::Result {
             std::process::exit(code);
         }
     }
-    // The developer profile (`--demo-profile`): its own folder, slot and
-    // library, beside the real player.
+    // The developer profile (`--demo-profile`, `--features dev`): its own
+    // folder, slot and library, beside the real player.
+    #[cfg(feature = "dev")]
     let profile = profile::requested();
+    #[cfg(not(feature = "dev"))]
+    let profile = false;
+    #[cfg(feature = "dev")]
     let slot = if profile { profile::slot() } else { fastframe_instance::Slot::new("music.nikgob") };
+    #[cfg(not(feature = "dev"))]
+    let slot = fastframe_instance::Slot::new("music.nikgob");
     // `--quit`: the running player (or profile) quits as from the tray's
     // «Выход» (its session saved) and this launch waits until it is gone,
     // so a script can replace the exe or restart it; nothing else starts.
@@ -665,6 +707,7 @@ fn main() -> eframe::Result {
     memory::start();
     // `--sweep-list out.json`: the settings sweep's list of every row, from
     // the code and the prefs of `NIKGOB_DATA` (or the defaults); no window.
+    #[cfg(feature = "dev")]
     if let Some(path) = sweep::list_path() {
         // The prefs the run itself starts from: the data dir's (the demo's
         // own dir with `NIKGOB_DEMO`), read as the app reads them — a dir
@@ -696,17 +739,27 @@ fn main() -> eframe::Result {
         fallback_fonts::faces();
     });
     let devices = std::thread::spawn(|| nikgob_audio::output_device_names().unwrap_or_default());
+    #[allow(unused_mut)]
     let mut paths = paths();
     // `NIKGOB_DATA=dir`: a demo run on a library already in `dir` (a copy
     // of a real one, say) instead of the generated one.
+    #[cfg(feature = "dev")]
     let data_dir_asked = std::env::var_os("NIKGOB_DATA").map(PathBuf::from).filter(|_| !profile);
+    #[cfg(feature = "dev")]
     let demo = !profile && (std::env::var_os("NIKGOB_DEMO").is_some() || data_dir_asked.is_some());
+    #[cfg(not(feature = "dev"))]
+    let demo = false;
     // Demo runs and the profile live beside the real app: no autostart, no
     // start in the tray.
     let beside = demo || profile;
+    #[cfg(feature = "dev")]
+    let sweeping = sweep::active();
+    #[cfg(not(feature = "dev"))]
+    let sweeping = false;
     // A settings sweep writes the prefs of the library it runs on: never
     // the real profile's.
-    if sweep::active() && !demo {
+    #[cfg(feature = "dev")]
+    if sweeping && !demo {
         log::error!("sweep: runs only on a copy (NIKGOB_DATA=dir) or the demo (NIKGOB_DEMO=1)");
         eprintln!("the settings sweep runs only with NIKGOB_DATA=<a copy> or NIKGOB_DEMO=1");
         std::process::exit(2);
@@ -746,6 +799,7 @@ fn main() -> eframe::Result {
             }
         }
     };
+    #[cfg(feature = "dev")]
     if demo {
         let dir = data_dir_asked.clone().unwrap_or_else(|| std::env::temp_dir().join("nikgob-demo"));
         // A demo library from an older seed (duplicate artists, old covers)
@@ -762,6 +816,7 @@ fn main() -> eframe::Result {
         // The real services keep what is typed in next to the demo library.
         paths.settings = streams::real_in_demo().then(|| dir.join("settings.toml"));
     }
+    #[cfg(feature = "dev")]
     if profile {
         let dir = profile::dir();
         profile::prepare(&dir);
@@ -772,7 +827,8 @@ fn main() -> eframe::Result {
     }
     // A sweep on a copy of the profile plays its file-less tracks as the
     // profile does, so the screens show a track running.
-    if sweep::active() {
+    #[cfg(feature = "dev")]
+    if sweeping {
         nikgob_playback::play_missing_files_silent();
     }
     // Next to the library in use: a demo's crash stays in the demo's dir.
@@ -792,9 +848,11 @@ fn main() -> eframe::Result {
             std::process::exit(1);
         }
     };
+    #[cfg(feature = "dev")]
     if demo && data_dir_asked.is_none() {
         demo::seed(&library, &paths.root.join("Music"));
     }
+    #[cfg(feature = "dev")]
     if profile {
         profile::seed_if_empty(&library, &paths.root);
         // «Сбросить»: seeded, and nothing else.
@@ -820,11 +878,14 @@ fn main() -> eframe::Result {
     let settings = settings.unwrap_or_default();
     let secrets = settings.streaming.clone();
     let data_dir = paths.db.parent().map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
+    #[cfg(feature = "dev")]
     let streams = if demo {
         streams::demo(&data_dir, &secrets)
     } else {
         streams::real(&data_dir, &secrets)
     };
+    #[cfg(not(feature = "dev"))]
+    let streams = streams::real(&data_dir, &secrets);
     let relogin = streams::relogin(&streams, &secrets);
     stage("streams");
     prefs.first_run = first_run_at_start(&prefs, &library, &streams, &secrets, beside);
@@ -885,7 +946,7 @@ fn main() -> eframe::Result {
         cfg.fallback_seed_argb = prefs.fallback_seed;
         // A demo with the real services asks the real online metadata too
         // (covers, lyrics, the graph of similar music).
-        let offline = (demo && !streams::real_in_demo()) || std::env::var_os("NIKGOB_OFFLINE").is_some() || sweep::active();
+        let offline = (demo && !streams::real_in_demo()) || std::env::var_os("NIKGOB_OFFLINE").is_some() || sweeping;
         cfg.fetch_lyrics = !offline;
         cfg.fetch_cover_online = !offline;
         let mut meta = nikgob_runtime::MetadataConfig::new(settings.metadata.contact);
@@ -906,7 +967,7 @@ fn main() -> eframe::Result {
             // The profile neither downloads nor seeds torrents.
             torrent_offline: demo || profile,
             // A sweep neither downloads nor runs the lyrics models.
-            models_dir: (!sweep::active()).then(|| paths.db.with_file_name("models")),
+            models_dir: (!sweeping).then(|| paths.db.with_file_name("models")),
         }
     };
     // The demo's discovery and the services' suggestions ask the fake
@@ -924,6 +985,7 @@ fn main() -> eframe::Result {
         StreamSchedule::default()
     };
     // `--sweep` / `--sweep-baseline`: the settings sweep drives the window.
+    #[cfg(feature = "dev")]
     let sweep_shot = sweep::shot(&prefs);
     let runtime = Runtime::start_scheduled(
         RuntimeConfig {
@@ -941,7 +1003,7 @@ fn main() -> eframe::Result {
     );
     // It listens only once switched on in Settings → Межсеть; a settings
     // sweep never starts it.
-    let api = if sweep::active() {
+    let api = if sweeping {
         None
     } else {
         let media_roots = vec![covers_dir.clone()];
@@ -956,7 +1018,7 @@ fn main() -> eframe::Result {
     // The owner's devices: on unless `[mesh] enabled = false`; never in a
     // settings sweep, nor in a demo unless NIKGOB_MESH is set (a demo would
     // show up on the home network as another device).
-    let mesh = if sweep::active() || (demo && std::env::var_os("NIKGOB_MESH").is_none()) {
+    let mesh = if sweeping || (demo && std::env::var_os("NIKGOB_MESH").is_none()) {
         None
     } else {
         let ctx = nikgob_mesh::MeshContext {
@@ -1003,10 +1065,18 @@ fn main() -> eframe::Result {
         runtime.add_source(s);
     }
     stage("runtime");
+    #[allow(unused_mut)]
     let mut ui = Md3eUi::new();
     // A screenshot run off the screen never covers the user's screen.
-    ui.set_fullscreen_allowed(!shot::offscreen());
-    ui.set_synthetic_levels(std::env::var_os("NIKGOB_VIZ_SYNTH").is_some());
+    #[cfg(feature = "dev")]
+    {
+        ui.set_fullscreen_allowed(!shot::offscreen());
+        ui.set_synthetic_levels(std::env::var_os("NIKGOB_VIZ_SYNTH").is_some());
+    }
+    #[cfg(feature = "dev")]
+    let geom_path = shot::window_size().is_none().then(|| paths.prefs.with_file_name("window.json"));
+    #[cfg(not(feature = "dev"))]
+    let geom_path = Some(paths.prefs.with_file_name("window.json"));
     let core = Core {
         ui,
         mesh,
@@ -1015,7 +1085,9 @@ fn main() -> eframe::Result {
         desktop: desktop::Desktop::start(wake),
         analyzer: links.map(|l| l.analyzer),
         commands: Vec::new(),
+        #[cfg(feature = "dev")]
         shot: shot::Shot::from_env().or(sweep_shot),
+        #[cfg(feature = "dev")]
         frames: frames::Frames::from_env(),
         quit: false,
         reopen: false,
@@ -1031,16 +1103,16 @@ fn main() -> eframe::Result {
         autostart: autostart::Keeper::new(autostart_system),
         show_asked,
         quit_asked,
-        geometry: geometry::Keeper::load(
-            shot::window_size().is_none().then(|| paths.prefs.with_file_name("window.json")),
-        ),
+        geometry: geometry::Keeper::load(geom_path),
     };
 
     stage("desktop");
     Shell::new(core, &waker).start_hidden(start_hidden).run(|lease| {
         let covers_dir = covers_dir.clone();
         let covers_wake = waker.clone();
+        #[allow(unused_mut)]
         let mut viewport = lease.peek(|core| core.geometry.apply(egui::ViewportBuilder::default()));
+        #[cfg(feature = "dev")]
         if shot::offscreen() {
             viewport = viewport.with_position(shot::OFFSCREEN).with_active(false).with_taskbar(false);
         }
@@ -1364,7 +1436,7 @@ mod prefs_tests {
             assert!(old.contains_key(key) || NEW.contains(&key.as_str()), "{key}");
         }
         assert_eq!(read.settings_rev, SETTINGS_REV);
-        assert_eq!(read.settings_deep, option_env!("NIKGOB_RELEASE").is_none());
+        assert_eq!(read.settings_deep, nikgob_md3e::screens::brand::own_build());
         let kept: Vec<_> = read.custom_presets.keys().copied().collect();
         assert_eq!(kept, [Area::Recs, Area::Lyrics, Area::Track, Area::Sources, Area::Seeding, Area::Load]);
         // «Свои» gives the same values back.

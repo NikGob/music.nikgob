@@ -2,10 +2,18 @@
 name = "nikgob"
 description = "music.nikgob desktop player."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
+
+[features]
+# Developer and demo tools (--demo-profile, demo-catalog.json, NIKGOB_DEMO,
+# screenshot/sweep runner, «Для разработчика»). Excluded from release builds.
+dev = ["nikgob-core/fake", "nikgob-md3e/dev"]
 
 [[bin]]
 name = "nikgob"
@@ -17,7 +25,7 @@ mimalloc = { version = "0.1", default-features = false }
 # mimalloc's options, its per-thread collect and its process numbers (the
 # same library the allocator above links; v3, as the `v2` feature is off).
 libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended"] }
-nikgob-core = { workspace = true, features = ["fake"] }
+nikgob-core.workspace = true
 nikgob-md3e.workspace = true
 nikgob-view.workspace = true
 nikgob-runtime = { path = "../runtime" }
@@ -58,6 +66,7 @@ log.workspace = true
 env_logger.workspace = true
 
 [dev-dependencies]
+nikgob-core = { workspace = true, features = ["fake"] }
 tempfile = "3"
 
 [lints]

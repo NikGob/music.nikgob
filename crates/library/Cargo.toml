@@ -2,9 +2,12 @@
 name = "nikgob-library"
 description = "Library database: SQLite schema, catalog, search, playlists, likes, history, userdata export/import."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

@@ -16,10 +16,12 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 nixos=0
+dev=0
 for arg in "$@"; do
   case "$arg" in
     --nixos) nixos=1 ;;
-    *) echo "usage: $0 [--nixos]" >&2; exit 2 ;;
+    --dev) dev=1 ;;
+    *) echo "usage: $0 [--nixos] [--dev]" >&2; exit 2 ;;
   esac
 done
 
@@ -38,8 +40,15 @@ remap="--remap-path-prefix=$root=nikgob"
 remap="$remap --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=cargo"
 remap="$remap --remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=rustup"
 
-echo "music.nikgob $version: building"
-(cd "$root" && RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$remap" NIKGOB_RELEASE=1 nice -n 19 cargo build --release --locked -p nikgob)
+extra=()
+suffix="$version"
+if [ "$dev" = 1 ]; then
+  extra=(--features dev)
+  suffix="$version-dev"
+fi
+
+echo "music.nikgob $suffix: building"
+(cd "$root" && RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$remap" nice -n 19 cargo build --release --locked -p nikgob "${extra[@]}")
 bin="$target/release/nikgob"
 [ -x "$bin" ] || { echo "no binary at $bin" >&2; exit 1; }
 
@@ -48,14 +57,16 @@ trap 'rm -rf "$stage"' EXIT
 
 # The tarball: unpack anywhere and run ./nikgob, or copy the files where the
 # README says.
-name="music.nikgob-$version-linux-x86_64"
+name="music.nikgob-$suffix-linux-x86_64"
 mkdir -p "$stage/$name"
 install -m755 "$bin" "$stage/$name/nikgob"
 strip --strip-unneeded "$stage/$name/nikgob"
+install -m644 "$root/LICENSE.md" "$stage/$name/"
 install -m644 "$root/packaging/music.nikgob.desktop" "$stage/$name/"
 install -m644 "$root/packaging/icons/music.nikgob-256.png" "$stage/$name/music.nikgob.png"
 cat > "$stage/$name/README" <<EOF
-music.nikgob $version for Linux (x86_64)
+music.nikgob $suffix for Linux (x86_64)
+Made by NikGob — https://github.com/NikGob/music.nikgob
 
 Run ./nikgob. To have it in the application menu, copy
   nikgob                to ~/.local/bin/
@@ -84,9 +95,9 @@ echo "  $out/$name.tar.gz"
 # The pacman package of the same binary.
 pkg="$stage/pkg"
 mkdir -p "$pkg"
-pkgver="${version//-/_}"
+pkgver="${suffix//-/_}"
 sed "s/^pkgver=.*/pkgver=$pkgver/" "$root/packaging/arch/PKGBUILD" > "$pkg/PKGBUILD"
-cp "$stage/$name/nikgob" "$root/packaging/music.nikgob.desktop" "$pkg/"
+cp "$stage/$name/nikgob" "$root/LICENSE.md" "$root/packaging/music.nikgob.desktop" "$pkg/"
 cp "$root"/packaging/icons/music.nikgob-*.png "$pkg/"
 (
   cd "$pkg"

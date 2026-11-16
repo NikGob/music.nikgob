@@ -1,7 +1,7 @@
 //! Content pages and the menus and dialogs they open.
 
 mod add_device;
-mod brand;
+pub mod brand;
 pub(super) mod detail;
 mod dialogs;
 mod downloads;

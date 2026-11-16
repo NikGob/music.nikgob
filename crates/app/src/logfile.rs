@@ -66,14 +66,17 @@ const HEX_KEPT: usize = 6;
 /// Where the log lives: next to the library (the demo's dir in demo mode,
 /// the developer profile's in the profile).
 pub fn dir() -> PathBuf {
-    if crate::profile::requested() {
-        return crate::profile::dir();
-    }
-    if let Some(dir) = std::env::var_os("NIKGOB_DATA") {
-        return PathBuf::from(dir);
-    }
-    if std::env::var_os("NIKGOB_DEMO").is_some() {
-        return std::env::temp_dir().join("nikgob-demo");
+    #[cfg(feature = "dev")]
+    {
+        if crate::profile::requested() {
+            return crate::profile::dir();
+        }
+        if let Some(dir) = std::env::var_os("NIKGOB_DATA") {
+            return PathBuf::from(dir);
+        }
+        if std::env::var_os("NIKGOB_DEMO").is_some() {
+            return std::env::temp_dir().join("nikgob-demo");
+        }
     }
     directories::ProjectDirs::from("dev", "nikgob", "music.nikgob")
         .map_or_else(|| PathBuf::from("."), |d| d.data_dir().to_owned())
@@ -108,11 +111,13 @@ static CAPTURED: Mutex<Option<Vec<String>>> = Mutex::new(None);
 const CAPTURE_MAX: usize = 200;
 
 /// Starts keeping warnings and errors.
+#[cfg(feature = "dev")]
 pub fn capture_start() {
     *CAPTURED.lock().unwrap_or_else(PoisonError::into_inner) = Some(Vec::new());
 }
 
 /// The warnings and errors since the last take (and goes on keeping them).
+#[cfg(feature = "dev")]
 pub fn capture_take() -> Vec<String> {
     CAPTURED.lock().unwrap_or_else(PoisonError::into_inner).as_mut().map(std::mem::take).unwrap_or_default()
 }

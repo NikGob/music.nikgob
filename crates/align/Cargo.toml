@@ -2,9 +2,12 @@
 name = "nikgob-align"
 description = "Lyrics against a song's audio: vocal separation, CTC forced alignment, the fit check of a fetched text and Whisper recognition, on ONNX Runtime loaded at run time (CPU or DirectML); the models' downloads."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

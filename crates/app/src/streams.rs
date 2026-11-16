@@ -26,14 +26,19 @@
 //! (the contact from the demo dir's `settings.toml`), so real results can be
 //! looked at without touching the user's library or accounts.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use nikgob_core::settings::StreamingSettings;
+use nikgob_core::streaming::{Account, LoginInput, Service, StreamService};
+
+#[cfg(any(feature = "dev", test))]
+use std::path::PathBuf;
+#[cfg(any(feature = "dev", test))]
 use nikgob_core::streaming::{
-    Account, AudioStream, BoxFuture, EntityKind, FakeService, LikedHead, LoginInput, LoginPrompt,
-    Played, SearchKind, Service, SoloistAction, SoloistPhase, SoloistStatus, StreamAlbum, StreamArtist, StreamError,
-    StreamPlaylist, StreamSearch, StreamService, StreamTrack,
+    AudioStream, BoxFuture, EntityKind, FakeService, LikedHead, LoginPrompt, Played, SearchKind,
+    SoloistAction, SoloistPhase, SoloistStatus, StreamAlbum, StreamArtist, StreamError, StreamPlaylist,
+    StreamSearch, StreamTrack,
 };
 
 pub type Services = Vec<Arc<dyn StreamService>>;
@@ -79,6 +84,7 @@ pub fn shutdown() {
 /// The demo Spotify's Soloist (`NIKGOB_DEMO_SOLOIST`: `absent`, `offer`,
 /// `downloading`, `key`, `pairing`, `ready`, `off`, `failed`), for
 /// screenshots of its setup.
+#[cfg(any(feature = "dev", test))]
 fn demo_soloist(base: FakeService) -> FakeService {
     let Ok(mode) = std::env::var("NIKGOB_DEMO_SOLOIST") else {
         return base;
@@ -147,8 +153,20 @@ pub fn real(data_dir: &Path, secrets: &StreamingSettings) -> Services {
     out
 }
 
+pub fn real_in_demo() -> bool {
+    #[cfg(feature = "dev")]
+    {
+        std::env::var_os("NIKGOB_DEMO_REAL_STREAMS").is_some()
+    }
+    #[cfg(not(feature = "dev"))]
+    {
+        false
+    }
+}
+
 /// What the demo runs: the fakes (accounts per `NIKGOB_DEMO_ACCOUNTS`) or,
 /// with `NIKGOB_DEMO_REAL_STREAMS`, the real services in `demo_dir`.
+#[cfg(any(feature = "dev", test))]
 pub fn demo(demo_dir: &Path, secrets: &StreamingSettings) -> Services {
     if real_in_demo() {
         return real(demo_dir, secrets);
@@ -168,10 +186,7 @@ pub fn demo(demo_dir: &Path, secrets: &StreamingSettings) -> Services {
         .collect()
 }
 
-pub fn real_in_demo() -> bool {
-    std::env::var_os("NIKGOB_DEMO_REAL_STREAMS").is_some()
-}
-
+#[cfg(any(feature = "dev", test))]
 fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
     // The songs «Найти песню…» finds for the demo's AIYOU clip.
     let base = match service {
@@ -245,11 +260,13 @@ fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
 
 /// A fake whose account always reads `account` (a login frozen in the
 /// middle, a failure), for screenshots of those states.
+#[cfg(any(feature = "dev", test))]
 struct Shown {
     inner: FakeService,
     account: Account,
 }
 
+#[cfg(any(feature = "dev", test))]
 impl StreamService for Shown {
     fn service(&self) -> Service {
         self.inner.service()

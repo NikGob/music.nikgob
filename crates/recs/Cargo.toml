@@ -2,9 +2,12 @@
 name = "nikgob-recs"
 description = "Recommendations: bliss sound analysis from PCM, the library's vector index, the taste model and the engine of mixes, moods, radio and discovery. Pure logic, no database or network."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

@@ -2,9 +2,12 @@
 name = "nikgob-deezer"
 description = "The Deezer catalogue (public API, no key, no login) as a StreamService: search, albums, artists, playlists, ISRCs. No sound: its tracks play from YouTube Music."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

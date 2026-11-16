@@ -2,9 +2,12 @@
 name = "nikgob-shapes"
 description = "Rounded polygons and shape morphing (port of androidx.graphics.shapes) plus the Material shape library."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

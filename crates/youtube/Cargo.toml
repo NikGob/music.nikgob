@@ -2,9 +2,12 @@
 name = "nikgob-youtube"
 description = "YouTube Music streaming service (RustyPipe): catalog, account data, audio streams, saving audio as Ogg Opus."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

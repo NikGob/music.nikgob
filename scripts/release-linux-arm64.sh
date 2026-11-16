@@ -91,7 +91,7 @@ remap="$remap --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=cargo"
 remap="$remap --remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=rustup"
 
 echo "nikgobd $version for $triple (glibc $glibc): building"
-(cd "$root" && RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$remap" NIKGOB_RELEASE=1 \
+(cd "$root" && RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$remap" \
   nice -n 19 cargo zigbuild --release --locked -p nikgobd --target "$triple.$glibc")
 bin="$target/$triple/release/nikgobd"
 [ -x "$bin" ] || { echo "no binary at $bin" >&2; exit 1; }
@@ -108,10 +108,12 @@ if command -v llvm-strip >/dev/null; then
 else
   echo "  (llvm-strip missing: the binary keeps its symbols)"
 fi
+install -m644 "$root/LICENSE.md" "$stage/$name/"
 install -m644 "$root/packaging/linux/nikgobd.toml" "$stage/$name/"
 install -m644 "$root/packaging/linux/nikgobd.service" "$stage/$name/"
 {
   echo "nikgobd $version for Linux (aarch64, glibc $glibc or newer)"
+  echo "Made by NikGob — https://github.com/NikGob/music.nikgob"
   echo
   cat "$root/packaging/linux/README"
 } > "$stage/$name/README"

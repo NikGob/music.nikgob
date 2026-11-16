@@ -2,9 +2,12 @@
 name = "nikgob-sources"
 description = "Download sources behind the core's Source trait (torrents through the indexer, khinsider, free FLAC services, Subsonic servers, Dogmazic, SoundCloud originals), query variants, matching and the one quality policy that picks among them."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

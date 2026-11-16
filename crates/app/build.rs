@@ -17,7 +17,43 @@ fn main() {
     fs::write(&ico, ico_file(&[16, 20, 24, 32, 40, 48, 64, 96, 128, 256])).expect("write the icon");
     let rc = out.join("app.rc");
     let path = ico.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
-    fs::write(&rc, format!("1 ICON \"{path}\"\n")).expect("write the resource script");
+    let ver = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".into());
+    let major: u16 = env::var("CARGO_PKG_VERSION_MAJOR").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let minor: u16 = env::var("CARGO_PKG_VERSION_MINOR").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let patch: u16 = env::var("CARGO_PKG_VERSION_PATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let rc_body = format!(
+        "#pragma code_page(65001)\n\
+1 ICON \"{path}\"\n\
+1 VERSIONINFO\n\
+FILEVERSION {major},{minor},{patch},0\n\
+PRODUCTVERSION {major},{minor},{patch},0\n\
+FILEFLAGSMASK 0x3fL\n\
+FILEFLAGS 0x0L\n\
+FILEOS 0x40004L\n\
+FILETYPE 0x1L\n\
+FILESUBTYPE 0x0L\n\
+BEGIN\n\
+    BLOCK \"StringFileInfo\"\n\
+    BEGIN\n\
+        BLOCK \"040904b0\"\n\
+        BEGIN\n\
+            VALUE \"CompanyName\", \"NikGob\"\n\
+            VALUE \"FileDescription\", \"music.nikgob\"\n\
+            VALUE \"FileVersion\", \"{ver}\"\n\
+            VALUE \"InternalName\", \"nikgob\"\n\
+            VALUE \"LegalCopyright\", \"Copyright (c) 2026 NikGob (https://github.com/NikGob)\"\n\
+            VALUE \"OriginalFilename\", \"nikgob.exe\"\n\
+            VALUE \"ProductName\", \"music.nikgob\"\n\
+            VALUE \"ProductVersion\", \"{ver}\"\n\
+        END\n\
+    END\n\
+    BLOCK \"VarFileInfo\"\n\
+    BEGIN\n\
+        VALUE \"Translation\", 0x0409, 1200\n\
+    END\n\
+END\n"
+    );
+    fs::write(&rc, rc_body).expect("write the resource script");
     embed_resource::compile(&rc, embed_resource::NONE).manifest_optional().expect("embed the icon");
 }
 

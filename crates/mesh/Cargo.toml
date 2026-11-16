@@ -2,9 +2,12 @@
 name = "nikgob-mesh"
 description = "The owner's devices: node keys, the ring of trusted devices, pairing (ticket or code, SPAKE2), discovery on the home network (mDNS), connections (iroh, LAN only), presence and the HTTP tunnel to a device's API."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

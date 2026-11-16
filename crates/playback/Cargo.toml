@@ -2,9 +2,12 @@
 name = "nikgob-playback"
 description = "The player's engine as the runtime drives it: nikgob-audio behind the runtime's Playback, streams opened through their services, device switches, the duck; Spotify Soloist and SoundCloud's player as live sources where the app runs them."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [features]

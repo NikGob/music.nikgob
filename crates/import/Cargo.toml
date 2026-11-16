@@ -2,9 +2,12 @@
 name = "nikgob-import"
 description = "Import pipeline: probe, fingerprint, identify, quality check, convert to Opus, tag, lay out on disk, derive palette."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

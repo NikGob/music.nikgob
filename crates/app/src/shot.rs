@@ -104,6 +104,8 @@ pub struct Shot {
     /// slow frame then says nothing about the app).
     last_tick: Option<std::time::Instant>,
     saved: bool,
+    /// Fixed-rate synthetic clock `(time_s, dt_s)` set by `clock:fps`.
+    clock: Option<(f64, f64)>,
 }
 
 fn nums(arg: &str) -> Vec<f32> {
@@ -164,6 +166,7 @@ impl Shot {
             jpeg_quality: 90,
             last_tick: None,
             saved: false,
+            clock: None,
         })
     }
 
@@ -188,7 +191,20 @@ impl Shot {
             jpeg_quality,
             last_tick: None,
             saved: false,
+            clock: None,
         }
+    }
+
+    /// Advances and returns the synthetic frame clock when `clock:fps` is
+    /// active, holding steady during screenshot readback passes.
+    pub fn synthetic_time(&mut self, wall: f64) -> Option<f64> {
+        let (t, dt) = self.clock.as_mut()?;
+        if *t == 0.0 {
+            *t = wall;
+        } else if !self.requested {
+            *t += *dt;
+        }
+        Some(*t)
     }
 
     /// The view state with the `fake:` steps so far laid over it, if any.
@@ -693,6 +709,38 @@ impl Shot {
                 self.snap = Some(PathBuf::from(arg));
                 self.requested = true;
                 ctx.send_viewport_cmd(ViewportCommand::Screenshot(UserData::default()));
+                self.wait = 0;
+            }
+            "clock" => {
+                if let Ok(fps) = arg.parse::<f64>()
+                    && fps > 0.0
+                {
+                    let cur = self.clock.map_or(0.0, |(t, _)| t);
+                    self.clock = Some((cur, 1.0 / fps));
+                }
+                self.wait = 0;
+            }
+            "record" => {
+                // `record:dir,count[,stride]` queues `count` sequential PNG snaps.
+                let mut parts = arg.rsplitn(3, ',');
+                if let (Some(p1), Some(p2)) = (parts.next(), parts.next()) {
+                    let (dir, count, stride) = match parts.next() {
+                        Some(d) => (d, p2.trim().parse::<usize>().unwrap_or(30), p1.trim().parse::<u32>().unwrap_or(1)),
+                        None => (p2, p1.trim().parse::<usize>().unwrap_or(30), 1),
+                    };
+                    let dir = PathBuf::from(dir.trim());
+                    let _ = std::fs::create_dir_all(&dir);
+                    let existing = std::fs::read_dir(&dir)
+                        .map(|rd| rd.filter_map(Result::ok).filter(|e| e.path().extension().is_some_and(|x| x == "png")).count())
+                        .unwrap_or(0);
+                    for i in (0..count).rev() {
+                        if stride > 1 {
+                            self.steps.insert(0, format!("wait:{}", stride - 1));
+                        }
+                        let file = dir.join(format!("frame_{:04}.png", existing + i));
+                        self.steps.insert(0, format!("snap:{}", file.display()));
+                    }
+                }
                 self.wait = 0;
             }
             // `settings:sources` opens Settings on that tab / row

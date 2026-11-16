@@ -2,9 +2,12 @@
 name = "nikgob-mcp"
 description = "The player's MCP server: tools, resources and prompts over the local REST API, served on stdio (`nikgob mcp`) and inside the API on /mcp (Streamable HTTP)."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [lib]

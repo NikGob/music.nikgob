@@ -2,9 +2,12 @@
 name = "nikgob-core"
 description = "Player core: library, playback state, commands and events. Knows nothing about UI."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [features]

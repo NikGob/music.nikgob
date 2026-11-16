@@ -189,6 +189,7 @@ fn make_photo(path: &Path, rgb: [u8; 3], seed: u32) {
 }
 
 /// Marker file of the current seed; bump to reseed old demo libraries.
+#[allow(dead_code)]
 pub const VERSION: &str = "seed-v17";
 
 /// The intro, instrumental gap and long line exercise both lyrics layouts.
@@ -210,6 +211,7 @@ const DEMO_TTML: &str = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="h
 <p begin="22.000" end="23.900" ttm:agent="v1">Тишина</p>
 </div></body></tt>"#;
 
+#[allow(dead_code)]
 pub fn seed(lib: &Library, root: &Path) {
     seed_with(lib, root, true);
 }

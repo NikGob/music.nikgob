@@ -2,9 +2,12 @@
 name = "nikgob-mobile"
 description = "The phone app: its interface (one column under the thumb, Metrolist's layouts around our Главная) and, on the PC, nikgob-phone running it in a phone-size window over the real player."
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [lib]

@@ -19,25 +19,21 @@ const VERSION_GAP: f32 = 4.0;
 /// One breath of the loading mark (seconds).
 const BREATH: f64 = 1.8;
 
-/// What the build calls itself: the version for a handout build (made by
-/// scripts/release.ps1, which sets `NIKGOB_RELEASE`), «admin» for the
-/// owner's own builds.
+/// What the build calls itself: the package version in normal/release
+/// builds, «admin» in developer builds (`--features dev`).
 pub fn version() -> &'static str {
-    match option_env!("NIKGOB_RELEASE") {
-        Some(_) => env!("CARGO_PKG_VERSION"),
-        None => "admin",
-    }
+    if own_build() { "admin" } else { env!("CARGO_PKG_VERSION") }
 }
 
-/// The version as the foot of Настройки names it: «Версия 0.0.5»,
+/// The version as the foot of Настройки names it: «Версия 0.1.0»,
 /// «Версия admin».
 pub fn version_label() -> String {
     format!("Версия {}", version())
 }
 
-/// The owner's own build (not a handout one): developer rows show.
+/// A developer build (`--features dev`): developer rows show.
 pub fn own_build() -> bool {
-    option_env!("NIKGOB_RELEASE").is_none()
+    cfg!(feature = "dev")
 }
 
 /// The sun over the label, centred in `rect`'s width from its top;
