@@ -236,12 +236,7 @@ impl Shot {
         out: &mut Vec<Command>,
     ) -> bool {
         // Saved?
-        let image = ctx.input(|i| {
-            i.raw.events.iter().find_map(|e| match e {
-                Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
+        let image = nikgob_md3e::shot::taken(ctx);
         // A sweep times its frames (a frame that saved a picture is slow
         // on purpose and does not count).
         let now = std::time::Instant::now();
@@ -250,17 +245,10 @@ impl Shot {
         }
         self.last_tick = Some(now);
         if let Some(img) = image {
-            let [w, h] = img.size;
-            let raw: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
             let to = self.snap.take();
-            match image::RgbaImage::from_raw(w as u32, h as u32, raw) {
-                Some(buf) => {
-                    let path = to.as_ref().unwrap_or(&self.path);
-                    if let Err(e) = save(buf, path, self.jpeg_quality) {
-                        log::warn!("shot: cannot save the screenshot to {}: {e}", path.display());
-                    }
-                }
-                None => log::warn!("shot: the screenshot is not {w}×{h}"),
+            let path = to.as_ref().unwrap_or(&self.path);
+            if let Err(e) = nikgob_md3e::shot::save(&img, path, self.jpeg_quality) {
+                log::warn!("shot: cannot save the screenshot to {}: {e}", path.display());
             }
             self.saved = true;
             if to.is_some() {
@@ -883,15 +871,4 @@ impl Shot {
         }
         false
     }
-}
-
-/// Saves a picture: PNG, or JPEG (without alpha) at `quality` for `.jpg`.
-fn save(buf: image::RgbaImage, path: &std::path::Path, quality: u8) -> image::ImageResult<()> {
-    let jpeg = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
-    if !jpeg {
-        return buf.save(path);
-    }
-    let rgb = image::DynamicImage::ImageRgba8(buf).to_rgb8();
-    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
-    image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality).encode_image(&rgb)
 }

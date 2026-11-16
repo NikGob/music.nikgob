@@ -1,0 +1,82 @@
+[package]
+name = "nikgob-mobile"
+description = "The phone app: its interface (one column under the thumb, Metrolist's layouts around our Главная) and, on the PC, nikgob-phone running it in a phone-size window over the real player."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# The phone on the PC: a portrait window over the runtime, the engine, the
+# API and the mesh (as a phone). The Android shell uses the library only.
+[[bin]]
+name = "nikgob-phone"
+path = "src/bin/nikgob-phone/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = ["desktop"]
+desktop = [
+    "nikgob-core/fake",
+    "dep:eframe",
+    "dep:env_logger",
+    "dep:directories",
+    "dep:serde_json",
+    "dep:image",
+    "dep:nikgob-runtime",
+    "dep:nikgob-playback",
+    "dep:nikgob-library",
+    "dep:nikgob-audio",
+    "dep:nikgob-api",
+    "dep:nikgob-mesh",
+    "dep:nikgob-recs",
+    "dep:nikgob-youtube",
+    "dep:nikgob-deezer",
+    "dep:fastframe-fonts",
+]
+
+[dependencies]
+nikgob-core.workspace = true
+nikgob-view.workspace = true
+nikgob-md3e.workspace = true
+nikgob-motion.workspace = true
+nikgob-shapes.workspace = true
+egui.workspace = true
+log.workspace = true
+
+# nikgob-phone only.
+eframe = { workspace = true, optional = true }
+env_logger = { workspace = true, optional = true }
+directories = { version = "6", optional = true }
+serde_json = { version = "1", optional = true }
+# The demo library's covers (the app's demo seed).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
+# The phone's player: no mimalloc (the runtime's default feature), no
+# Soloist or SoundCloud's player.
+nikgob-runtime = { path = "../runtime", default-features = false, optional = true }
+nikgob-playback = { path = "../playback", default-features = false, optional = true }
+nikgob-library = { path = "../library", optional = true }
+nikgob-audio = { path = "../audio", optional = true }
+nikgob-api = { path = "../api", optional = true }
+nikgob-mesh = { path = "../mesh", optional = true }
+nikgob-recs = { path = "../recs", optional = true }
+nikgob-youtube = { path = "../youtube", optional = true }
+nikgob-deezer = { path = "../deezer", optional = true }
+# The installed faces for the scripts Roboto Flex does not draw (Japanese
+# titles), as fastframe chooses them.
+fastframe-fonts = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The window on Wayland and X11 (the workspace's eframe has winit's Linux
+# backends off).
+eframe = { workspace = true, optional = true, features = ["wayland", "x11"] }
+
+[dev-dependencies]
+nikgob-core = { workspace = true, features = ["fake"] }
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -4,6 +4,7 @@
 pub mod anim;
 pub mod button;
 pub mod group;
+pub mod nav_bar;
 pub mod paint;
 pub mod rail;
 pub mod slider;
@@ -11,6 +12,7 @@ pub mod toolbar;
 
 pub use button::{Button, Glyph, IconButton, IconWidth, Shape, Size, Style};
 pub use group::{ButtonGroup, ConnectedGroup, Item};
+pub use nav_bar::{NavBar, NavBarItem};
 pub use paint::Radii;
 pub use rail::{NavRail, RailItem};
 pub use slider::{Slider, SliderOutput, Wave, wavy_progress, wavy_progress_indeterminate, wavy_progress_on};

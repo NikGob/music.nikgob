@@ -10,7 +10,9 @@ publish.workspace = true
 [dependencies]
 nikgob-core.workspace = true
 nikgob-view.workspace = true
-nikgob-runtime = { path = "../runtime" }
+# Without the runtime's defaults: the binaries choose them (the phone runs
+# without mimalloc).
+nikgob-runtime = { path = "../runtime", default-features = false }
 nikgob-library = { path = "../library" }
 nikgob-metadata = { path = "../metadata" }
 # The sound vectors of similar tracks (the recommendations' index).

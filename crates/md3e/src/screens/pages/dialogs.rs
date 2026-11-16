@@ -6,6 +6,8 @@
 use std::path::PathBuf;
 
 use nikgob_view::Command;
+#[cfg(target_os = "android")]
+use crate::no_rfd as rfd;
 
 #[derive(Clone, Copy)]
 enum Kind {

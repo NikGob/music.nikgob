@@ -10,6 +10,8 @@ use nikgob_view::{
 };
 
 use super::{PageState, widgets};
+#[cfg(target_os = "android")]
+use crate::no_rfd as rfd;
 use crate::{
     Icon, Theme, TypeRole,
     components::{

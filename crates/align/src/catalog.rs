@@ -80,7 +80,8 @@ macro_rules! hf {
     };
 }
 
-#[cfg(not(target_os = "linux"))]
+/// The Windows build with DirectML (an amd64 wheel: x86_64 Windows only).
+#[cfg(all(windows, target_arch = "x86_64"))]
 pub const RUNTIME: ModelSpec = ModelSpec {
     id: ModelId::Runtime,
     dir: "runtime-1.24.4",
@@ -97,10 +98,11 @@ pub const RUNTIME: ModelSpec = ModelSpec {
     }],
 };
 
-/// ONNX Runtime has a build here: Windows (DirectML) and Linux on x86_64.
-/// Elsewhere (Linux on ARM, a Raspberry Pi) there is no runtime to download,
-/// so no model is offered or downloaded and what needs one is not available.
-pub const RUNTIME_AVAILABLE: bool = cfg!(any(not(target_os = "linux"), target_arch = "x86_64"));
+/// ONNX Runtime has a build here: Windows (DirectML) and Linux, both on
+/// x86_64. Elsewhere (Linux on ARM, a Raspberry Pi, Android, macOS) there is
+/// no runtime to download, so no model is offered or downloaded and what
+/// needs one is not available.
+pub const RUNTIME_AVAILABLE: bool = cfg!(all(target_arch = "x86_64", any(windows, target_os = "linux")));
 
 /// The same version's CPU build: DirectML is Windows' own, and the wheel's
 /// manylinux library needs nothing past glibc and libstdc++.
@@ -122,7 +124,7 @@ pub const RUNTIME: ModelSpec = ModelSpec {
 
 /// No build for this machine ([`RUNTIME_AVAILABLE`]): nothing to download,
 /// never the x86_64 wheel.
-#[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
+#[cfg(not(all(target_arch = "x86_64", any(windows, target_os = "linux"))))]
 pub const RUNTIME: ModelSpec = ModelSpec {
     id: ModelId::Runtime,
     dir: "runtime-1.24.4",
@@ -628,10 +630,13 @@ mod tests {
             assert!(matches!(c.download(ModelId::SoundEffnet, &mut |_, _| true), Err(Error::Unavailable(_))));
             assert!(!c.ready(ModelId::Runtime));
         }
-        // An x86_64 wheel is only ever the runtime of an x86_64 build.
+        // An x86_64 wheel is only ever the runtime of an x86_64 build, and
+        // Windows' own only of Windows.
         for f in RUNTIME.files {
-            assert!(!f.url.contains("x86_64") || cfg!(target_arch = "x86_64"), "{}", f.url);
+            assert!(!(f.url.contains("x86_64") || f.url.contains("amd64")) || cfg!(target_arch = "x86_64"), "{}", f.url);
+            assert!(!f.url.contains("win_amd64") || cfg!(windows), "{}", f.url);
         }
+        assert_eq!(RUNTIME_AVAILABLE, cfg!(any(all(windows, target_arch = "x86_64"), all(target_os = "linux", target_arch = "x86_64"))));
     }
 
     #[test]

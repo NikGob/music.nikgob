@@ -646,10 +646,12 @@ mod tests {
     /// The process's private bytes (Windows) or mimalloc's estimate of its
     /// commit (elsewhere), in MB.
     #[allow(unsafe_code)]
+    #[cfg_attr(not(feature = "mimalloc"), allow(unused_mut, unused_variables))]
     fn private_mb() -> f64 {
         let (mut rss, mut commit) = (0usize, 0usize);
         // SAFETY: mimalloc writes the counters it is given and ignores the
         // null ones.
+        #[cfg(feature = "mimalloc")]
         unsafe {
             libmimalloc_sys::mi_process_info(
                 std::ptr::null_mut(),

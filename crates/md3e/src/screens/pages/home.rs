@@ -30,7 +30,7 @@ mod row;
 pub use empty::EMPTY_LINE;
 use crate::{
     Icon, Theme, TypeRole,
-    components::{Button, FilterChip, Size, Style, anim},
+    components::{Button, FilterChip, IconButton, Size, Style, anim},
     fit::Fit,
 };
 
@@ -94,6 +94,12 @@ pub const OF_DAY_STRETCH: f32 = 560.0;
 /// The shortcuts go at most this many to a row (the runtime makes eight:
 /// two rows of four).
 pub const SHORTCUTS_PER_LINE: usize = 4;
+/// Below this width (a phone's column) the shortcuts stand as Metrolist's
+/// quick picks: [`SHORTCUT_COMPACT_H`] high, [`COMPACT_GAP`] apart, a line
+/// each for the name and what it is.
+pub const COMPACT_BELOW: f32 = 480.0;
+pub const SHORTCUT_COMPACT_H: f32 = 56.0;
+pub const COMPACT_GAP: f32 = 8.0;
 
 /// How many shortcuts the page shows: six in rows of three, eight in rows
 /// of four on a wide window (one constant to change).
@@ -169,6 +175,17 @@ impl Grid {
         let (row, k) = (i / per_line, i % per_line);
         Rect::from_min_size(pos2(self.left + k as f32 * (w + GUTTER), top + row as f32 * (h + gap)), vec2(w, h))
     }
+}
+
+/// The place of shortcut `i` of `per_line` on a narrow page
+/// ([`COMPACT_BELOW`]): [`COMPACT_GAP`] apart both ways, the row as wide as
+/// the column.
+pub fn compact_cell(grid: Grid, i: usize, per_line: usize, top: f32) -> Rect {
+    let per_line = per_line.max(1);
+    let w = (grid.width - COMPACT_GAP * (per_line - 1) as f32) / per_line as f32;
+    let (row, k) = (i / per_line, i % per_line);
+    let pitch = SHORTCUT_COMPACT_H + COMPACT_GAP;
+    Rect::from_min_size(pos2(grid.left + k as f32 * (w + COMPACT_GAP), top + row as f32 * pitch), vec2(w, SHORTCUT_COMPACT_H))
 }
 
 /// The rows a list of `n` items takes, `per_line` to a row.
@@ -456,11 +473,15 @@ fn fading_sections(ui: &Ui, stage: &Stage, available: &[Section], order: &[(Sect
 }
 
 /// The header of the page: «Доброй ночи, Ник» and at the right «Только
-/// скачанное»; a long name ends in «…» before the chip.
+/// скачанное»; a long name ends in «…» before the chip. On a column too
+/// narrow for both (a phone's) the chip is its icon alone, a toggle.
 fn header(ui: &mut Ui, row: Rect, state: &ViewState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let on = state.prefs.mixes_downloaded_only;
-    let chip = FilterChip::new("Только скачанное", on).icon(Icon::DownloadDone).id_salt("home-downloaded-only");
+    let greeting = greeting_line(state.home.greeting_hour, &state.prefs.user_name);
+    let label = "Только скачанное";
+    let text_w = |t: &str, role: TypeRole| crate::typography::layout(ui.painter(), role.style().job(t, s.on_surface)).size().x;
+    let folded = chip_folds(row.width(), text_w(greeting.as_str(), TypeRole::HeadlineMedium), text_w(label, TypeRole::LabelLarge));
     let mut right = ui.new_child(
         UiBuilder::new()
             .max_rect(row)
@@ -468,17 +489,30 @@ fn header(ui: &mut Ui, row: Rect, state: &ViewState, out: &mut Vec<Command>) {
             .id_salt("home-header-right"),
     );
     right.spacing_mut().item_spacing.x = 8.0;
-    let chip = right.add(chip);
+    let chip = if folded {
+        right.add(IconButton::new(Icon::DownloadDone).style(Style::Outlined).selected(on).id_salt("home-downloaded-only"))
+    } else {
+        right.add(FilterChip::new(label, on).icon(Icon::DownloadDone).id_salt("home-downloaded-only"))
+    };
     let downloaded_clicked = chip.clicked();
-    let mut job = TypeRole::HeadlineMedium
-        .style()
-        .job(greeting_line(state.home.greeting_hour, &state.prefs.user_name), s.on_surface);
+    let mut job = TypeRole::HeadlineMedium.style().job(greeting, s.on_surface);
     job.wrap = egui::text::TextWrapping::truncate_at_width((chip.rect.left() - row.left() - 16.0).max(48.0));
     let g = crate::typography::layout(ui.painter(), job);
     ui.painter().galley(pos2(row.left(), row.center().y - g.size().y / 2.0), g, s.on_surface);
     if downloaded_clicked {
         out.push(downloaded_only(!on));
     }
+}
+
+/// «Только скачанное» as a chip (its icon, 8 + 18 + 8, and 16 after its
+/// words) takes this much more than its words.
+const CHIP_EXTRA: f32 = 50.0;
+
+/// The header's chip is its icon alone when the greeting `greeting_w`
+/// wide and the chip with its words `label_w` wide do not fit `row_w`
+/// side by side, 16 apart.
+pub fn chip_folds(row_w: f32, greeting_w: f32, label_w: f32) -> bool {
+    greeting_w + 16.0 + label_w + CHIP_EXTRA > row_w
 }
 
 /// Whether the queue plays «Моя волна» started from `preset` (`None`: the
@@ -504,13 +538,26 @@ fn wave_command(ours: bool, playing: bool, preset: Option<nikgob_view::MixKey>) 
 /// the field's row (56), 16 below — the old 164 less the line that
 /// explained where the name goes.
 const NAME_PROMPT_H: f32 = 140.0;
+/// The field is at least this wide beside the buttons; a narrower card
+/// (a phone's) puts the buttons on a row of their own under it, this much
+/// more of the card.
+const NAME_FIELD_MIN: f32 = 160.0;
+const NAME_BUTTONS_H: f32 = 48.0;
+
+/// The buttons go under the field: the card's room `inner_w` less the
+/// buttons' `buttons_w` leaves the field less than [`NAME_FIELD_MIN`].
+pub fn name_buttons_below(inner_w: f32, buttons_w: f32) -> bool {
+    inner_w - buttons_w < NAME_FIELD_MIN
+}
 
 /// The first start's question under the greeting: how to call the user,
 /// «Готово» or «Пропустить» (asked no more either way).
 fn name_prompt(ui: &mut Ui, grid: Grid, pages: &mut PageState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let w = grid.width.min(560.0);
-    let h = NAME_PROMPT_H;
+    let buttons = Button::new("Пропустить").natural_width(ui) + Button::new("Готово").natural_width(ui) + 16.0;
+    let below = name_buttons_below(w - 40.0, buttons);
+    let h = NAME_PROMPT_H + if below { NAME_BUTTONS_H } else { 0.0 };
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
     let card = Rect::from_min_size(pos2(grid.left, rect.top()), vec2(w, h));
     crate::components::paint::container(
@@ -524,23 +571,47 @@ fn name_prompt(ui: &mut Ui, grid: Grid, pages: &mut PageState, out: &mut Vec<Com
     c.spacing_mut().item_spacing.y = 4.0;
     c.label(TypeRole::TitleMedium.style().rich("Как к тебе обращаться?", s.on_surface));
     c.add_space(12.0);
+    if below {
+        let field = crate::components::TextField::new(&mut pages.name_draft, "Имя")
+            .width(c.available_width())
+            .id_salt("home-name-field")
+            .show(&mut c);
+        let name = nikgob_view::user_name(&pages.name_draft);
+        c.add_space(8.0);
+        let (skip, done) = c
+            .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let done = ui.add(Button::new("Готово").style(Style::Filled).enabled(!name.is_empty()).id_salt("home-name-done")).clicked();
+                let skip = ui.add(Button::new("Пропустить").style(Style::Text).id_salt("home-name-skip")).clicked();
+                (skip, done)
+            })
+            .inner;
+        name_answer(pages, name, skip, done || field.submitted, out);
+        return;
+    }
     c.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        let buttons = Button::new("Пропустить").natural_width(ui) + Button::new("Готово").natural_width(ui) + 16.0;
         let field = crate::components::TextField::new(&mut pages.name_draft, "Имя")
             .width((ui.available_width() - buttons).max(120.0))
             .id_salt("home-name-field")
             .show(ui);
         let name = nikgob_view::user_name(&pages.name_draft);
-        if ui.add(Button::new("Пропустить").style(Style::Text).id_salt("home-name-skip")).clicked() {
-            out.push(Command::SetPref(nikgob_view::PrefPatch::NamePrompt(false)));
-        }
+        let skip = ui.add(Button::new("Пропустить").style(Style::Text).id_salt("home-name-skip")).clicked();
         let done = ui.add(Button::new("Готово").style(Style::Filled).enabled(!name.is_empty()).id_salt("home-name-done")).clicked();
-        if (done || field.submitted) && !name.is_empty() {
-            out.push(Command::SetPref(nikgob_view::PrefPatch::UserName(name)));
-            pages.name_synced = false;
-        }
+        name_answer(pages, name, skip, done || field.submitted, out);
     });
+}
+
+/// What the name card was answered: «Пропустить» (`skip`) asks no more,
+/// «Готово» or Enter (`done`) keeps `name` when there is one.
+fn name_answer(pages: &mut PageState, name: String, skip: bool, done: bool, out: &mut Vec<Command>) {
+    if skip {
+        out.push(Command::SetPref(nikgob_view::PrefPatch::NamePrompt(false)));
+    }
+    if done && !name.is_empty() {
+        out.push(Command::SetPref(nikgob_view::PrefPatch::UserName(name)));
+        pages.name_synced = false;
+    }
 }
 
 /// «Только скачанное» switched to `on`.
@@ -574,7 +645,12 @@ fn shortcuts(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, o
     let per = grid.shortcuts_per_line();
     let count = state.home.shortcuts.len().min(shortcuts_shown(per));
     let items = &state.home.shortcuts[..count];
-    let h = lines(count, per) as f32 * (SHORTCUT_H + 8.0) - 8.0;
+    let compact = grid.width < COMPACT_BELOW;
+    let h = if compact {
+        lines(count, per) as f32 * (SHORTCUT_COMPACT_H + COMPACT_GAP) - COMPACT_GAP
+    } else {
+        lines(count, per) as f32 * (SHORTCUT_H + 8.0) - 8.0
+    };
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
     let mut nav = None;
     // Every shortcut the page has, not only the ones that fit: a page
@@ -589,7 +665,7 @@ fn shortcuts(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, o
     }
     entering(ui, rect, n, "shortcuts", |ui| {
         for (i, sc) in items.iter().enumerate() {
-            let cell = grid.cell(i, per, rect.top(), SHORTCUT_H, 8.0);
+            let cell = if compact { compact_cell(grid, i, per, rect.top()) } else { grid.cell(i, per, rect.top(), SHORTCUT_H, 8.0) };
             changes.card(ui, i, cell, i, |ui, old| match old {
                 Some(old) => {
                     let _ = cards::shortcut(ui, cell, old, state, i, &mut Vec::new());
@@ -766,17 +842,24 @@ fn lane_key(l: &LaneCard) -> u64 {
 fn mixes(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
     let lanes: Vec<&LaneCard> = state.home.lanes.iter().collect();
     let local_only = state.prefs.mixes_downloaded_only;
-    let total = HEADER_H + HEADER_GAP + mix_card_h(grid);
+    let s = Theme::get(ui.ctx()).scheme;
+    let g = crate::typography::layout(ui.painter(), TypeRole::TitleLarge.style().job("Миксы для тебя", s.on_surface));
+    let labels = ["Только моё", "С новым"];
+    let gw: f32 = labels.iter().map(|l| Button::new(*l).size(Size::S).natural_width(ui)).sum::<f32>() + 2.0;
+    // «Только моё | С новым» at the right of the title, or on a row of its
+    // own under it where both do not fit (a phone's column).
+    let below = g.size().x + 16.0 + gw > grid.width;
+    let extra = if below { HEADER_H } else { 0.0 };
+    let total = HEADER_H + extra + HEADER_GAP + mix_card_h(grid);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), total), Sense::hover());
     let mut nav = None;
     entering(ui, rect, n, "mixes", |ui| {
-        let s = Theme::get(ui.ctx()).scheme;
-        let g = crate::typography::layout(ui.painter(), TypeRole::TitleLarge.style().job("Миксы для тебя", s.on_surface));
         ui.painter().galley(pos2(grid.left, rect.top() + (HEADER_H - g.size().y) / 2.0), g, s.on_surface);
-        // «Только моё | С новым»: a connected group at the right.
-        let labels = ["Только моё", "С новым"];
-        let gw: f32 = labels.iter().map(|l| Button::new(*l).size(Size::S).natural_width(ui)).sum::<f32>() + 2.0;
-        let group = Rect::from_min_size(pos2(grid.left + grid.width - gw, rect.top()), vec2(gw, HEADER_H));
+        let group = if below {
+            Rect::from_min_size(pos2(grid.left, rect.top() + HEADER_H), vec2(gw, HEADER_H))
+        } else {
+            Rect::from_min_size(pos2(grid.left + grid.width - gw, rect.top()), vec2(gw, HEADER_H))
+        };
         let mut gui = ui.new_child(UiBuilder::new().max_rect(group).id_salt("home-mixes-group"));
         let with_new = state.prefs.mixes_with_new && !local_only;
         let disabled: &[usize] = if local_only { &[0, 1] } else { &[] };
@@ -784,7 +867,8 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: 
         if let Some(p) = picked {
             out.push(Command::SetPref(nikgob_view::PrefPatch::MixesWithNew(p == 1)));
         }
-        nav = mix_row(ui, grid, rect, "mixes", liked_playlist(state), &lanes, live, state, out);
+        let cards = Rect::from_min_max(pos2(rect.left(), rect.top() + extra), rect.max);
+        nav = mix_row(ui, grid, cards, "mixes", liked_playlist(state), &lanes, live, state, out);
     });
     nav
 }

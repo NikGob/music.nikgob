@@ -12,6 +12,8 @@ use nikgob_view::{
 };
 
 use super::super::PageState;
+#[cfg(target_os = "android")]
+use crate::no_rfd as rfd;
 use super::super::settings_help::{self, SettingId as Id};
 use super::rows::{self, Note, Num, dimmed, group, item, row, row_note, segments, switch};
 use crate::{
