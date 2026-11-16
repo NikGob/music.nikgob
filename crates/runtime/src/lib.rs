@@ -2778,10 +2778,7 @@ impl Worker {
     /// owner's and an agent's do; a guest's never, the voice assistant's
     /// are background (as in the history the mixes are made of).
     fn queue_teaches(&self) -> bool {
-        !matches!(
-            self.queue_actor,
-            Some(nikgob_core::settings::ApiActor::Guest | nikgob_core::settings::ApiActor::Assistant)
-        )
+        teaches_live_recs(self.queue_actor)
     }
 
     /// The app closes: the playing (or paused) track ends as it is.
@@ -4648,9 +4645,27 @@ fn youtube_refused_midway(message: &str) -> bool {
     (m.contains("refused") || m.contains("http 403")) && !streams::resolve::video_refused(message)
 }
 
+/// Whether the plays of a queue started by `actor` (`None`: the owner, in
+/// the window) teach the live recommendations ([`Worker::queue_teaches`]).
+pub(crate) fn teaches_live_recs(actor: Option<nikgob_core::settings::ApiActor>) -> bool {
+    !matches!(actor, Some(nikgob_core::settings::ApiActor::Guest | nikgob_core::settings::ApiActor::Assistant))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An assistant's or a guest's queue teaches the live recommendations
+    /// nothing; the owner's and an agent's do.
+    #[test]
+    fn only_the_owners_queues_teach_live_recs() {
+        use nikgob_core::settings::ApiActor;
+        assert!(teaches_live_recs(None));
+        assert!(teaches_live_recs(Some(ApiActor::Owner)));
+        assert!(teaches_live_recs(Some(ApiActor::Agent)));
+        assert!(!teaches_live_recs(Some(ApiActor::Assistant)));
+        assert!(!teaches_live_recs(Some(ApiActor::Guest)));
+    }
 
     fn ms(v: u64) -> Duration {
         Duration::from_millis(v)
