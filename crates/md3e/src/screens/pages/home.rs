@@ -100,6 +100,13 @@ pub const SHORTCUTS_PER_LINE: usize = 4;
 pub const COMPACT_BELOW: f32 = 480.0;
 pub const SHORTCUT_COMPACT_H: f32 = 56.0;
 pub const COMPACT_GAP: f32 = 8.0;
+/// Between the phone's mix cards.
+pub const COMPACT_MIX_GAP: f32 = 8.0;
+/// A mix card on a [`COMPACT_MIX_PAGE`]-wide phone page: about 2.2 in view,
+/// the next one peeking.
+pub const COMPACT_MIX_W: f32 = 160.0;
+/// The page [`COMPACT_MIX_W`] is measured on (the phone's 392 preset).
+pub const COMPACT_MIX_PAGE: f32 = 392.0;
 
 /// How many shortcuts the page shows: six in rows of three, eight in rows
 /// of four on a wide window (one constant to change).
@@ -186,6 +193,24 @@ pub fn compact_cell(grid: Grid, i: usize, per_line: usize, top: f32) -> Rect {
     let (row, k) = (i / per_line, i % per_line);
     let pitch = SHORTCUT_COMPACT_H + COMPACT_GAP;
     Rect::from_min_size(pos2(grid.left + k as f32 * (w + COMPACT_GAP), top + row as f32 * pitch), vec2(w, SHORTCUT_COMPACT_H))
+}
+/// A mix card's width on a phone page `page_w` wide (edge to edge). 160 at
+/// 392, so with a 16 dp inset and [`COMPACT_MIX_GAP`] about 2.2 cards show.
+pub fn compact_mix_w(page_w: f32) -> f32 {
+    (COMPACT_MIX_W * page_w / COMPACT_MIX_PAGE).max(1.0)
+}
+
+/// How many of those cards a page `page_w` wide shows, the first inset
+/// `margin`, [`COMPACT_MIX_GAP`] between them.
+pub fn compact_mix_shown(page_w: f32, card_w: f32, margin: f32) -> f32 {
+    let step = card_w + COMPACT_MIX_GAP;
+    if step <= 0.0 { 0.0 } else { (page_w - margin) / step }
+}
+
+/// Left of mix card `i`, the row pulled `offset` toward the later cards,
+/// the first starting at `origin` (the page's margin) when `offset` is 0.
+pub fn compact_mix_left(origin: f32, i: usize, card_w: f32, offset: f32) -> f32 {
+    origin + i as f32 * (card_w + COMPACT_MIX_GAP) - offset
 }
 
 /// The rows a list of `n` items takes, `per_line` to a row.
@@ -376,9 +401,7 @@ pub fn show_on(ui: &mut Ui, state: &ViewState, pages: &mut PageState, stage: &St
     // line. With «Только скачанное» on the page keeps its header, so the
     // chip that emptied it can be turned off again.
     if h.library_empty && !local_only {
-        if asks_name(&state.prefs) {
-            name_prompt(ui, grid, pages, out);
-        }
+        ask_name(ui, grid, state, pages, out, false);
         empty::show(ui, grid, state, pages, true, out);
         return None;
     }
@@ -397,10 +420,7 @@ pub fn show_on(ui: &mut Ui, state: &ViewState, pages: &mut PageState, stage: &St
     let row = Rect::from_min_size(pos2(grid.left, row.top()), vec2(grid.width, HEADER_H));
     entering(ui, row, n, "greeting", |ui| header(ui, row, state, out));
     n += 1;
-    if asks_name(&state.prefs) {
-        ui.add_space(8.0);
-        name_prompt(ui, grid, pages, out);
-    }
+    ask_name(ui, grid, state, pages, out, true);
 
     let available = sections(h, liked_playlist(state).is_some(), local_only);
     // Nothing to show of what there is (nothing downloaded under «Только
@@ -613,6 +633,55 @@ fn name_answer(pages: &mut PageState, name: String, skip: bool, done: bool, out:
         pages.name_synced = false;
     }
 }
+/// The phone's shell is drawing: the name is a dialog over the app, not
+/// one this page opens on top of that.
+fn phone_shell(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(Id::new("md3e-phone-shell"))).unwrap_or(false)
+}
+
+/// The phone sets this at the start of a frame ([`crate::screens::phone`]).
+pub(crate) fn mark_phone(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(Id::new("md3e-phone-shell"), true));
+}
+
+/// The name, when it is still wanted: the card on a wide column, nothing
+/// here on a narrow one (the phone asks over the app; a narrow window asks
+/// with the same dialog). `spaced`: 8 under the greeting, as the card had.
+fn ask_name(ui: &mut Ui, grid: Grid, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>, spaced: bool) {
+    if !asks_name(&state.prefs) {
+        return;
+    }
+    if grid.width < COMPACT_BELOW {
+        if !phone_shell(ui.ctx()) {
+            name_dialog(ui.ctx(), &state.prefs, pages, out);
+        }
+        return;
+    }
+    if spaced {
+        ui.add_space(8.0);
+    }
+    name_prompt(ui, grid, pages, out);
+}
+
+/// «Как к тебе обращаться?» over the app: the field, «Пропустить»,
+/// «Готово», the same commands as the card ([`name_answer`]). Esc and the
+/// scrim ask no more, as «Пропустить» does (the dialog has no other close).
+pub(crate) fn name_dialog(ctx: &egui::Context, prefs: &nikgob_view::Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+    if !asks_name(prefs) {
+        return;
+    }
+    let mut open = true;
+    let answered = crate::components::TextInputDialog::new("home-name-dialog", "Как к тебе обращаться?", "Имя")
+        .buttons("Готово", "Пропустить")
+        .show(ctx, &mut open, &mut pages.name_draft);
+    match answered {
+        Some(crate::components::dialog::TextInputResult::Confirmed) => {
+            name_answer(pages, nikgob_view::user_name(&pages.name_draft), false, true, out);
+        }
+        Some(crate::components::dialog::TextInputResult::Cancelled) => name_answer(pages, String::new(), true, false, out),
+        None => {}
+    }
+}
 
 /// «Только скачанное» switched to `on`.
 fn downloaded_only(on: bool) -> Command {
@@ -721,8 +790,19 @@ fn song_s(state: &ViewState) -> f32 {
 }
 
 /// A mix card's height on `grid`: its cover and the lines under it.
+/// A narrow column uses the phone's large cards ([`compact_mix_w`]).
+fn mix_section_h(ui: &Ui, grid: Grid) -> f32 {
+    if grid.width < COMPACT_BELOW { compact_mix_w(phone_page_w(ui, grid)) + cards::MIX_TEXT_H } else { mix_card_h(grid) }
+}
+
 fn mix_card_h(grid: Grid) -> f32 {
     grid.tile(grid.cards_per_line()) + cards::MIX_TEXT_H
+}
+
+/// The phone's page width, when its shell stored the edges; otherwise the
+/// column (a narrow window is its own page).
+fn phone_page_w(ui: &Ui, grid: Grid) -> f32 {
+    ui.ctx().data(|d| d.get_temp::<Rect>(Id::new("phone-home-edges"))).map(|e| e.width()).filter(|w| *w > 1.0).unwrap_or(grid.width)
 }
 
 /// The row `name` of «Любимые» (`liked`, first) and the mixes `lanes`
@@ -761,6 +841,9 @@ fn mix_row(
             .chain(lanes.iter().map(|l| MixItem::Lane((*l).clone())))
             .collect()
     });
+    if grid.width < COMPACT_BELOW {
+        return compact_mix_row(ui, grid, rect, name, liked, lanes, first, wave_at, with_new, live, state, changes, out);
+    }
     let pitch = grid.tile(per) + GUTTER;
     let at = row::Row {
         name,
@@ -815,6 +898,154 @@ fn mix_row(
     nav
 }
 
+/// «Миксы для тебя» on a phone: large cards, 8 apart, the first at the
+/// page's margin, the row scrolling to the screen's edges on the same
+/// spring as the wide page's rows. About 2.2 cards show, the next peeking.
+#[allow(clippy::too_many_arguments)]
+fn compact_mix_row(
+    ui: &mut Ui,
+    grid: Grid,
+    rect: Rect,
+    name: &str,
+    liked: Option<&PlaylistCard>,
+    lanes: &[&LaneCard],
+    first: usize,
+    wave_at: usize,
+    with_new: bool,
+    live: bool,
+    state: &ViewState,
+    changes: refresh::Changes<MixItem>,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
+    let h = &state.home;
+    let page_w = phone_page_w(ui, grid);
+    let card_w = compact_mix_w(page_w);
+    let card_h = card_w + cards::MIX_TEXT_H;
+    let pitch = card_w + COMPACT_MIX_GAP;
+    let n = first + lanes.len();
+    // The last card rests at the right margin; while it moves, cards paint
+    // through the margins to the screen's edges.
+    let max = row::Scroll::max(n, pitch, COMPACT_MIX_GAP, grid.width);
+    let top = rect.top() + HEADER_H + HEADER_GAP;
+    let ctx = ui.ctx().clone();
+    let edges = ctx.data(|d| d.get_temp::<Rect>(Id::new("phone-home-edges")));
+    let x = edges.map(|e| e.x_range()).unwrap_or(ui.clip_rect().x_range());
+    let view = Rect::from_x_y_ranges(x.clone(), top..=top + card_h);
+    let id = Id::new(("home-mix-phone", name));
+    let mut scroll: row::Scroll = if live { ctx.data(|d| d.get_temp(id)).unwrap_or_default() } else { row::Scroll::default() };
+    let repitched = live && scroll.repitch(pitch, max);
+    scroll.clamp(max);
+    let now = anim::now(&ctx);
+    let spring_id = id.with("x");
+    let seen = anim::peek_f32(&ctx, spring_id).unwrap_or(scroll.offset);
+    let mut by_hand = false;
+    let hovered = live && ctx.input(|i| i.pointer.interact_pos()).is_some_and(|p| view.contains(p));
+    if live && max > 0.0 {
+        if hovered {
+            let turn = ctx.input_mut(|i| {
+                let turn = row::Turn::of(&i.events);
+                i.smooth_scroll_delta.x = 0.0;
+                if i.modifiers.shift {
+                    i.smooth_scroll_delta.y = 0.0;
+                }
+                turn
+            });
+            if turn.cards != 0.0 {
+                scroll.end_turn();
+                scroll.step(turn.cards as i64, pitch, max);
+            }
+            if turn.parts != 0.0 && scroll.parts(turn.parts, turn.smallest, pitch, max, now, seen) {
+                by_hand = true;
+            }
+            if turn.points != 0.0 {
+                if !scroll.loose() {
+                    scroll.take_from(seen, max);
+                }
+                scroll.end_turn();
+                scroll.glide(turn.points, max, now);
+                by_hand = true;
+            }
+        }
+        let (pressed, down, at) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.interact_pos()));
+        if pressed && hovered && let Some(p) = at {
+            scroll.take_from(seen, max);
+            scroll.end_turn();
+            scroll.press(p.x);
+        }
+        if down {
+            if let Some(p) = at
+                && scroll.drag(p.x, max, now)
+            {
+                by_hand = true;
+            }
+        } else {
+            // A fling goes on about two cards, then rests on a card's edge.
+            scroll.release(pitch, max, 2, now);
+        }
+        if !by_hand && scroll.loose() && !scroll.settle(now, pitch, max) {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(0.05));
+        }
+    }
+    let shown = if !live {
+        0.0
+    } else if by_hand || repitched {
+        anim::snap_f32(&ctx, spring_id, scroll.offset);
+        scroll.offset
+    } else {
+        anim::f32(&ctx, spring_id, scroll.offset, Theme::get(&ctx).motion.default_spatial).clamp(0.0, max)
+    };
+    let shown = row::on_pixel(shown, ctx.pixels_per_point());
+    let clip = Rect::from_x_y_ranges(x, ui.clip_rect().y_range());
+    let mut child = ui.new_child(UiBuilder::new().max_rect(clip).id_salt(("home-mix-phone-ui", name)));
+    child.set_clip_rect(clip);
+    let mut nav = None;
+    for i in 0..n {
+        let cell = Rect::from_min_size(pos2(compact_mix_left(grid.left, i, card_w, shown), top), vec2(card_w, card_h));
+        if cell.right() <= clip.left() || cell.left() >= clip.right() {
+            continue;
+        }
+        changes.card(&mut child, i, cell, i, |ui, old| {
+            match old {
+                Some(MixItem::Liked(p)) => {
+                    let _ = cards::liked_playlist(ui, cell, p, false, state.player.status, 0.0, &mut Vec::new());
+                    return;
+                }
+                Some(MixItem::Lane(l)) => {
+                    let click = cards::MixClick::of(&state.prefs, l.key);
+                    let _ = cards::mix(ui, cell, l, with_new, false, false, state.player.status, click, None, &mut Vec::new());
+                    return;
+                }
+                Some(MixItem::Wave) => {
+                    cards::wave(ui, cell, false, false, state.player.status, &mut Vec::new());
+                    return;
+                }
+                None => {}
+            }
+            if let Some(p) = liked.filter(|_| i == 0) {
+                nav = cards::liked_playlist(ui, cell, p, liked_playing(state, p), state.player.status, song_s(state), out).or(nav.take());
+                return;
+            }
+            if i == wave_at {
+                let (ours, playing) = wave_playing(state, None);
+                cards::wave(ui, cell, playing, ours, state.player.status, out);
+                return;
+            }
+            let l = lanes[i - first];
+            let can_blend = l.blend_base.is_some_and(|b| h.blend_profiles.iter().any(|p| p.key != b));
+            let click = cards::MixClick::of(&state.prefs, l.key);
+            let playing = wave_playing(state, Some(l.key)).1 || lane_playing(state, l);
+            nav = cards::mix(ui, cell, l, with_new, can_blend, playing, state.player.status, click, None, out).or(nav.take());
+        });
+    }
+    if live {
+        ctx.data_mut(|d| d.insert_temp(id, scroll));
+        if scroll.wants_more(n, max, grid.width) {
+            ask_more(&ctx, HomeRow::Mixes, n, out);
+        }
+    }
+    nav
+}
+
 /// A row scrolled near its end showing `n` cards asks for more of it,
 /// once for each length: a row whose source has no more stays as it is
 /// and asks no more.
@@ -850,7 +1081,7 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: 
     // own under it where both do not fit (a phone's column).
     let below = g.size().x + 16.0 + gw > grid.width;
     let extra = if below { HEADER_H } else { 0.0 };
-    let total = HEADER_H + extra + HEADER_GAP + mix_card_h(grid);
+    let total = HEADER_H + extra + HEADER_GAP + mix_section_h(ui, grid);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), total), Sense::hover());
     let mut nav = None;
     entering(ui, rect, n, "mixes", |ui| {

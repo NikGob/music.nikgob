@@ -581,3 +581,21 @@ fn the_name_buttons_go_under_a_cramped_field() {
     assert!(name_buttons_below(288.0, 204.0));
     assert!(!name_buttons_below(520.0, 204.0));
 }
+
+#[test]
+fn a_phone_mix_row_shows_about_two_cards_and_a_peek() {
+    assert!((compact_mix_w(COMPACT_MIX_PAGE) - COMPACT_MIX_W).abs() < 0.01);
+    for page in [360.0, 392.0, 412.0] {
+        let w = compact_mix_w(page);
+        let shown = compact_mix_shown(page, w, 16.0);
+        assert!(shown > 2.1 && shown < 2.4, "{page}: a {w} card shows {shown}");
+    }
+    let w = compact_mix_w(392.0);
+    assert_eq!(compact_mix_left(16.0, 0, w, 0.0), 16.0);
+    assert!((compact_mix_left(16.0, 1, w, 0.0) - (16.0 + w + COMPACT_MIX_GAP)).abs() < 0.01);
+    // The third card starts on the page and runs off it: the row reads as scrollable.
+    let third = compact_mix_left(16.0, 2, w, 0.0);
+    assert!(third < 392.0 && third + w > 392.0, "peek at {third}");
+    // Let go one card on: the next card sits at the margin.
+    assert!((compact_mix_left(16.0, 1, w, w + COMPACT_MIX_GAP) - 16.0).abs() < 0.01);
+}

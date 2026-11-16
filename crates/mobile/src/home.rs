@@ -27,9 +27,16 @@ pub(crate) fn show(ui: &mut Ui, frame: PageFrame, shell: &mut PhonePages, worlds
             if state.prefs.home_card_shown() && !state.home.worlds.is_empty() {
                 ui.add_space(16.0);
             }
+            // The column stays inset; the mix row reads this to scroll to
+            // the screen's edges.
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("phone-home-edges"), body));
+            let clip = ui.clip_rect();
             let nav = egui::Frame::new()
                 .inner_margin(Margin::symmetric(16, 0))
-                .show(ui, |ui| shell.home(ui, state, out))
+                .show(ui, |ui| {
+                    ui.set_clip_rect(Rect::from_x_y_ranges(clip.x_range(), ui.clip_rect().y_range()));
+                    shell.home(ui, state, out)
+                })
                 .inner;
             ui.add_space(24.0);
             world.or(nav)

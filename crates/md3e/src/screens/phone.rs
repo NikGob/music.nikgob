@@ -80,6 +80,7 @@ impl PhonePages {
         pages::set_window_can_hide(ctx, false);
         // Главная's worlds are the phone's own row (the stage is too wide).
         pages::hide_world_stage(ctx);
+        pages::home::mark_phone(ctx);
         // A phone has no pointer to hover with.
         crate::components::tooltip::set_enabled(ctx, false);
         let pinned_id = egui::Id::new("md3e-pinned-revision");
@@ -123,6 +124,9 @@ impl PhonePages {
     /// `snack_bottom` over the bottom of `area`. Returns the page a chooser
     /// picked (which of a track's artists).
     pub fn overlays(&mut self, ctx: &Context, state: &ViewState, area: Rect, snack_bottom: f32, out: &mut Vec<Command>) -> Option<Route> {
+        // The name, once, over the app, while it is still wanted. Not the
+        // card on Главная.
+        pages::home::name_dialog(ctx, &state.prefs, &mut self.pages, out);
         self.pages.overlays(ctx, state, area, (area, snack_bottom), out);
         super::artist_links::chooser(ctx)
     }
