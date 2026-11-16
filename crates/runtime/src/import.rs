@@ -367,6 +367,13 @@ impl ImportService {
                 Ok(_) => {}
                 Err(e) => log::warn!("trash purge: {e}"),
             }
+            // Masters on their way to the Trash when the player stopped:
+            // finished or undone first.
+            match nikgob_import::trash::recover_master_moves(&lib, &cfg.trash_dir) {
+                Ok(n) if n > 0 => log::info!("master moves settled: {n}"),
+                Ok(_) => {}
+                Err(e) => log::warn!("master moves not settled: {e}"),
+            }
             // Masters let go of once the devices held copies of them.
             match nikgob_import::trash::purge_trashed_masters(&lib, &cfg.trash_dir, nikgob_import::TRASH_DAYS) {
                 Ok(r) if r.rows > 0 => log::info!("trashed masters purge: {r:?}"),
