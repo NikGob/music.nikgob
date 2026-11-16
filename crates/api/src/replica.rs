@@ -35,7 +35,8 @@ use crate::sync::{is_hash, peer_of};
 const PAGE_MAX: u32 = 500;
 /// Files one check asks about at most.
 const CHECK_MAX: usize = 500;
-/// Bytes one check reads and hashes at most (the rest wait for the next).
+/// Bytes one check reads and hashes at most (the rest are told deferred;
+/// one file larger than this is read when it is the first to be read).
 const HASH_BUDGET: u64 = 4 << 30;
 
 /// The files right in the masters folder by their stem (`{hash}.flac`; not
@@ -155,7 +156,9 @@ pub async fn check(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
         let me = shared.lib.device_id().0;
         let mut flat: Option<HashMap<String, PathBuf>> = None;
         let mut budget = HASH_BUDGET;
+        let mut read_any = false;
         let mut held = Vec::new();
+        let mut deferred = Vec::new();
         for hash in ask.hashes.iter().filter(|h| is_hash(h)) {
             let (paths, is_flat) = shared.lib.copies_of_hash(hash).map_err(db)?;
             let flat_file = if is_flat { flat.get_or_insert_with(|| flat_files(&masters)).get(hash).cloned() } else { None };
@@ -166,10 +169,13 @@ pub async fn check(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
                 continue;
             }
             let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(u64::MAX);
-            if size > budget {
+            // Not read this time is not absent: told apart, its row kept.
+            if size > budget && read_any {
+                deferred.push(hash.clone());
                 continue;
             }
-            budget -= size;
+            budget = budget.saturating_sub(size);
+            read_any = true;
             match blake3_of(&file) {
                 Ok(sum) if sum == *hash => {
                     let now = nikgob_library::now_ms();
@@ -183,7 +189,7 @@ pub async fn check(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
                 Err(e) => log::warn!("replica: {} not read: {e}", file.display()),
             }
         }
-        Ok(CheckAnswer { held })
+        Ok(CheckAnswer { held, deferred })
     })
     .await?;
     Ok(Json(answer))
@@ -284,6 +290,31 @@ mod tests {
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         let r = local.call(pi.clone(), get(&format!("/v1/media/tracks/{}/audio?profile=orig", t.id))).await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND, "no song file here, only its master");
+
+        // Exactly one file of a song, by its hash: the owner's devices only;
+        // the plain route stays a token's.
+        let opus = dir.path().join("Кино").join("1988 - Группа крови").join("02 - Кукушка.opus");
+        std::fs::create_dir_all(opus.parent().unwrap()).unwrap();
+        let bytes: Vec<u8> = (0..=255u8).rev().cycle().take(3_000).collect();
+        std::fs::write(&opus, &bytes).unwrap();
+        let ohash = blake3::hash(&bytes).to_hex().to_string();
+        let mut s = nikgob_core::model::Source::new(u.id, nikgob_core::model::SourceKind::LocalFile, opus.to_string_lossy().into_owned(), Codec::Opus);
+        s.file_hash = Some(ohash.clone());
+        s.size_bytes = Some(bytes.len() as u64);
+        library.add_source(&s).unwrap();
+        let by_hash = format!("/v1/media/tracks/{}/audio?profile=orig&hash={ohash}", u.id);
+        let r = local.call(caller("k3J9aQ0b1c", ApiActor::Owner), get(&by_hash)).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "a token asks no copy's file");
+        let r = local.call(caller("k3J9aQ0b1c", ApiActor::Owner), get(&format!("/v1/media/tracks/{}/audio", u.id))).await;
+        assert_eq!(r.status(), StatusCode::OK, "the plain route as it was");
+        let r = local.call(pi.clone(), get(&by_hash)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers().get(HASH_HEADER).unwrap(), ohash.as_str());
+        assert_eq!(body(r).await.as_ref(), bytes.as_slice());
+        let real = std::fs::canonicalize(&opus).unwrap();
+        assert!(library.file_stamp(&real.to_string_lossy()).unwrap().is_some_and(|(size, _, h)| size == 3_000 && h == ohash), "noted: a resumed request is not read again");
+        let r = local.call(pi.clone(), get(&format!("/v1/media/tracks/{}/audio?hash={hash}", u.id))).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "not a file of this song");
 
         let check = |rehash: bool| {
             let ask = CheckAsk { hashes: vec![hash.clone(), missing.clone()], rehash };
