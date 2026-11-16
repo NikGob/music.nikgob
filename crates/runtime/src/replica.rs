@@ -55,7 +55,7 @@ pub(crate) struct Watch {
 enum Busy {
     /// Its masters' copies are being read again on the devices, with the
     /// state of things it was asked in.
-    Rechecking { card: u64, items: Vec<Offered>, since: Instant, gen: u64 },
+    Rechecking { card: u64, items: Vec<Offered>, since: Instant, era: u64 },
     /// The ones that may go are being moved to the Trash.
     Moving,
 }
@@ -78,7 +78,7 @@ pub(crate) struct ReplicaKeep {
     /// count of changes (read by the thread that moves them, before each
     /// file).
     watch: Option<Watch>,
-    gen: Arc<AtomicU64>,
+    era: Arc<AtomicU64>,
 }
 
 /// «файл», «файла», «файлов» for `n`.
@@ -201,7 +201,7 @@ impl Worker {
         if first {
             return;
         }
-        self.replica.gen.fetch_add(1, Ordering::SeqCst);
+        self.replica.era.fetch_add(1, Ordering::SeqCst);
         self.replica.due = None;
         if matches!(self.replica.busy, Some(Busy::Rechecking { .. })) {
             self.replica.busy = None;
@@ -323,9 +323,9 @@ impl Worker {
             return;
         };
         self.replica_follow();
-        let gen = self.replica.gen.load(Ordering::SeqCst);
+        let era = self.replica.era.load(Ordering::SeqCst);
         self.replica.card = None;
-        self.replica.busy = Some(Busy::Rechecking { card, items, since: Instant::now(), gen });
+        self.replica.busy = Some(Busy::Rechecking { card, items, since: Instant::now(), era });
         self.replica_publish();
         let leaving = self.mesh.leaving();
         log::info!("replica: {} masters may go; their copies are read again first", hashes.len());
@@ -338,8 +338,8 @@ impl Worker {
     /// when the trusted devices or the choice changed since it was asked.
     pub(crate) fn replica_rechecked(&mut self, card: u64, ok: Vec<String>, failed: Option<String>) {
         self.replica_follow();
-        let (items, gen) = match &self.replica.busy {
-            Some(Busy::Rechecking { card: c, items, gen, .. }) if *c == card => (items.clone(), *gen),
+        let (items, era) = match &self.replica.busy {
+            Some(Busy::Rechecking { card: c, items, era, .. }) if *c == card => (items.clone(), *era),
             _ => return,
         };
         let Some(need) = self.state.read().mesh.keep_masters.copies() else {
@@ -347,7 +347,7 @@ impl Worker {
             self.toast("Выбор изменился — оригиналы остались на компьютере", None);
             return;
         };
-        if self.replica.gen.load(Ordering::SeqCst) != gen {
+        if self.replica.era.load(Ordering::SeqCst) != era {
             self.replica.busy = None;
             self.toast("Устройства или выбор изменились — оригиналы остались на компьютере", None);
             return;
@@ -375,7 +375,7 @@ impl Worker {
         };
         let (trash, masters) = (svc.config().trash_dir.clone(), svc.config().masters_dir());
         let (lib, later) = (self.lib.clone(), self.later_tx.clone());
-        let (watch, leaving) = (self.replica.gen.clone(), self.mesh.leaving());
+        let (watch, leaving) = (self.replica.era.clone(), self.mesh.leaving());
         self.replica.busy = Some(Busy::Moving);
         let spawned = std::thread::Builder::new().name("nikgob-masters-trash".into()).spawn(move || {
             let (mut ids, mut left) = (Vec::new(), stayed);
@@ -384,7 +384,7 @@ impl Worker {
                 // Right before each file: nothing changed meanwhile, and the
                 // trusted devices staying still hold enough verified copies.
                 let still = || {
-                    watch.load(Ordering::SeqCst) == gen
+                    watch.load(Ordering::SeqCst) == era
                         && lib.verified_holders(h, &leaving).is_ok_and(|holders| holders.len() >= need as usize)
                 };
                 let moved = nikgob_import::trash::trash_master_files(&lib, &trash, &masters, h, &files, &still);

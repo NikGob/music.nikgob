@@ -206,7 +206,7 @@ pub(crate) struct Ctl {
     pub(crate) stop: AtomicBool,
     /// The plan's number: a pull of an older plan stops between two
     /// pieces (a new profile or new pins).
-    pub(crate) gen: AtomicU64,
+    pub(crate) era: AtomicU64,
     /// Bytes pulled in this round (a resumed part counts whole).
     pub(crate) received: AtomicU64,
     /// Bytes the running pulls may still write: kept free on the disks.
@@ -218,16 +218,16 @@ impl Ctl {
     pub(crate) fn new(rate: f64) -> Self {
         Self {
             stop: AtomicBool::new(false),
-            gen: AtomicU64::new(0),
+            era: AtomicU64::new(0),
             received: AtomicU64::new(0),
             reserved: AtomicU64::new(0),
             pace: Pace::new(rate),
         }
     }
 
-    /// Whether a pull of plan `gen` stops now.
-    fn halted(&self, gen: u64) -> bool {
-        self.stop.load(Ordering::Relaxed) || self.gen.load(Ordering::Relaxed) != gen
+    /// Whether a pull of plan `era` stops now.
+    fn halted(&self, era: u64) -> bool {
+        self.stop.load(Ordering::Relaxed) || self.era.load(Ordering::Relaxed) != era
     }
 }
 
@@ -695,15 +695,15 @@ pub(crate) async fn run(sh: Arc<Shared>) {
                     st.failed.remove(&job.key());
                 }
                 // A pull of an older plan is dropped with it.
-                Ok((job, gen, Err(Failed::Stopped))) => {
-                    if gen == ctl.gen.load(Ordering::Relaxed) {
+                Ok((job, era, Err(Failed::Stopped))) => {
+                    if era == ctl.era.load(Ordering::Relaxed) {
                         st.queue.push_front(job);
                     }
                 }
-                Ok((job, gen, Err(Failed::NoRoom))) => {
+                Ok((job, era, Err(Failed::NoRoom))) => {
                     log::info!("replica: the disk is near its reserve; {} waits", job.key());
                     st.room_wait = Some(Instant::now() + ROOM_WAIT);
-                    if gen == ctl.gen.load(Ordering::Relaxed) {
+                    if era == ctl.era.load(Ordering::Relaxed) {
                         st.queue.push_front(job);
                     }
                 }
@@ -735,7 +735,7 @@ pub(crate) fn has_room(dirs: &[&Path], need: u64, reserved: u64) -> bool {
 /// The old plan goes: no more pulls of it, the running ones stop between
 /// two pieces (their parts stay), the next plan comes at once.
 fn drop_plan(st: &mut Puller, ctl: &Ctl) {
-    ctl.gen.fetch_add(1, Ordering::Relaxed);
+    ctl.era.fetch_add(1, Ordering::Relaxed);
     st.queue.clear();
     st.plan_for = None;
     st.planned_at = None;
@@ -780,7 +780,7 @@ async fn turn(sh: &Arc<Shared>, lib: &Library, me: &str, ctl: &Arc<Ctl>, st: &mu
     if st.queue.is_empty() && tasks.is_empty() && due && !peers.is_empty() {
         replan(sh, lib, &dirs, &a, &peers, st, ctl).await;
     }
-    let gen = ctl.gen.load(Ordering::Relaxed);
+    let era = ctl.era.load(Ordering::Relaxed);
     while tasks.len() < AT_ONCE && st.next_start.is_none_or(|t| Instant::now() >= t) && st.room_wait.is_none_or(|t| Instant::now() >= t) {
         let Some(job) = st.queue.pop_front() else { break };
         let from: Vec<String> = job.holders().into_iter().filter(|p| peers.contains(p)).collect();
@@ -803,9 +803,9 @@ async fn turn(sh: &Arc<Shared>, lib: &Library, me: &str, ctl: &Arc<Ctl>, st: &mu
         ctl.reserved.fetch_add(need, Ordering::Relaxed);
         let (sh, lib, me, dirs, ctl) = (sh.clone(), lib.clone(), me.to_owned(), dirs.clone(), ctl.clone());
         tasks.spawn(async move {
-            let out = pull(&sh, &lib, &me, &dirs, &job, &from, gen, &ctl).await;
+            let out = pull(&sh, &lib, &me, &dirs, &job, &from, era, &ctl).await;
             ctl.reserved.fetch_sub(need, Ordering::Relaxed);
-            (job, gen, out)
+            (job, era, out)
         });
         st.next_start = Some(Instant::now() + GAP);
     }
@@ -870,10 +870,10 @@ pub(crate) fn verify_part(part: &Path, meta: &Path, hash: &str) -> Result<(), St
 
 /// Writes `resp`'s body to `part` (after its first `offset` bytes, or over
 /// it when `offset` is 0), paced, at most `limit` bytes in all; stops
-/// between two pieces when told or when its plan (`gen`) is no longer the
+/// between two pieces when told or when its plan (`era`) is no longer the
 /// one ([`Failed::Stopped`]), or when the part's disk comes near its
 /// reserve ([`Failed::NoRoom`]); the part stays. How long the part is then.
-pub(crate) async fn receive_paced(resp: http::Response<Body>, part: &Path, offset: u64, limit: u64, gen: u64, ctl: &Ctl) -> Result<u64, Failed> {
+pub(crate) async fn receive_paced(resp: http::Response<Body>, part: &Path, offset: u64, limit: u64, era: u64, ctl: &Ctl) -> Result<u64, Failed> {
     let io = |e: std::io::Error| Failed::Bad(format!("{}: {e}", part.display()));
     let room = part.parent().unwrap_or(part).to_owned();
     let mut file = if offset == 0 {
@@ -885,7 +885,7 @@ pub(crate) async fn receive_paced(resp: http::Response<Body>, part: &Path, offse
     let mut since_look = 0u64;
     let mut body = resp.into_body().into_data_stream();
     loop {
-        if ctl.halted(gen) {
+        if ctl.halted(era) {
             file.flush().await.map_err(io)?;
             return Err(Failed::Stopped);
         }
@@ -932,7 +932,7 @@ fn header<'a>(r: &'a http::Response<Body>, name: &str) -> Option<&'a str> {
 /// (the first that has it), keeps it and makes it this device's own. Its
 /// bytes.
 #[allow(clippy::too_many_arguments)]
-async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job, from: &[String], gen: u64, ctl: &Ctl) -> Result<u64, Failed> {
+async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job, from: &[String], era: u64, ctl: &Ctl) -> Result<u64, Failed> {
     let library = dirs.library.clone();
     let dir = tokio::task::spawn_blocking(move || parts_dir(&library))
         .await
@@ -1021,7 +1021,7 @@ async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job,
                 ext = Some(e.clone());
             }
             ctl.received.fetch_add(from_byte, Ordering::Relaxed);
-            let len = receive_paced(resp, &part, from_byte, limit, gen, ctl).await?;
+            let len = receive_paced(resp, &part, from_byte, limit, era, ctl).await?;
             let (p, m, h) = (part.clone(), meta.clone(), hash.clone());
             tokio::task::spawn_blocking(move || verify_part(&p, &m, &h)).await.map_err(|e| Failed::Bad(e.to_string()))?.map_err(Failed::Bad)?;
             let e = ext.clone().unwrap_or(e);
@@ -1373,7 +1373,7 @@ mod tests {
         assert!(!part.exists() && !meta.exists());
 
         // A new profile or new pins: a pull of the old plan stops.
-        ctl.gen.store(1, Ordering::Relaxed);
+        ctl.era.store(1, Ordering::Relaxed);
         let old = http::Response::new(Body::from(bytes.clone()));
         assert_eq!(receive_paced(old, &dir.path().join("o.part"), 0, 30_000, 0, &ctl).await, Err(Failed::Stopped));
         // Never more than the planned file's bytes.
