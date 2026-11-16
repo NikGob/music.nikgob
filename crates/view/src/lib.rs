@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 mod api;
+mod connect;
 mod credit;
 mod mesh;
 pub mod dev;
@@ -29,6 +30,7 @@ pub use nikgob_core::model::{
     ArtistId, LikeTarget, PlaylistId, ReleaseId, ReleaseType, SourceKind, TrackId,
 };
 pub use api::*;
+pub use connect::*;
 pub use credit::*;
 pub use mesh::*;
 pub use player_prefs::*;
@@ -3178,6 +3180,11 @@ pub struct ViewState {
     pub no_audio: bool,
     /// The owner's devices («Межсеть → Устройства»).
     pub mesh: MeshView,
+    /// None: this window shows this device's zone; Some: another device's,
+    /// whose player and queue `player` and `queue` mirror (a remote).
+    pub target: Option<RemoteTarget>,
+    /// This device's own zone while the target is remote.
+    pub parked: Option<ParkedView>,
 }
 
 /// What the user does not want: tracks disliked and artists not to
@@ -3952,6 +3959,37 @@ pub enum Command {
     /// The pause on a transfer's line («Карта сети»): the files to that
     /// device wait (the replicas honour it).
     MeshPauseTransfer { node_id: String, paused: bool },
+
+    // Playing on another device (like Spotify Connect, [`RemoteTarget`]).
+    /// Some: what plays here goes to that device and it becomes the target
+    /// (this zone parks). None: the target's music comes back here (loaded
+    /// into this zone, the remote paused) and the target is this device.
+    OutputTransfer { node_id: Option<String> },
+    /// That device becomes the target as it is (nothing moves; this zone
+    /// parks).
+    OutputAttach { node_id: String },
+    /// The target is this device again, nothing moved (the parked queue is
+    /// back, still paused).
+    OutputDetach,
+    /// After the link was lost: this zone plays the last mirrored state from
+    /// a moment before where it was, and the target is this device.
+    OutputContinueHere,
+    /// «Отменить» of a transfer onto a device that was playing: its queue,
+    /// place and pause come back, and the target is what it was.
+    OutputUndoTransfer,
+    /// From the API: this zone's transferable state, answered as a
+    /// [`ZoneSnapshot`].
+    ApiSnapshot { reply: ApiReply },
+    /// From the API: this zone's queue replaced by `snapshot` (its tracks
+    /// checked by the API already), playing unless it says paused; `from`
+    /// is the device that sent it (missing files are fetched from it).
+    /// Answered as `{"previous": ZoneSnapshot | null}`.
+    ApiLoad { snapshot: Box<ZoneSnapshot>, from: Option<String>, reply: ApiReply },
+    /// From the API: player commands a remote forwarded (`from`: its
+    /// device), run here as they are.
+    ConnectRun { from: Option<String>, commands: Vec<Command> },
+    /// From the mesh service: what came of a [`ConnectJob`].
+    ConnectReport(Box<ConnectReport>),
 }
 
 impl Default for Prefs {
