@@ -351,28 +351,38 @@ impl MobileUi {
         // leaves behind — so the page, the sheets and the player's own
         // geometry stay on it and nothing jumps while it comes and goes.
         let k = self.player.expand(now).clamp(0.0, 1.0);
+        // Laid out from the page on the stack. The edge swipe reads this
+        // rect; a back it completes pops, and this is laid out again, so
+        // the page drawn is the one arrived at — not one frame of it in
+        // the room of the page left.
+        let layout = |hides_bar: bool| {
+            let shown = anim::fraction(&ctx, egui::Id::new("phone-nav-room"), if hides_bar { 0.0 } else { 1.0 }, theme.motion.default_spatial);
+            let bar_h = NAV_H + ins.bottom;
+            let room = bar_room(ins.bottom, shown);
+            let bar_top = full.bottom() - bar_h * shown + bar_h * k;
+            let mini_bottom = full.bottom() - room - player::MINI_GAP + bar_h * k;
+            let mini_space = if has_track { player::MINI_H + player::MINI_GAP } else { 0.0 };
+            let content_bottom = if keyboard { full.bottom() - ins.ime_bottom } else { full.bottom() - room - mini_space };
+            let content = Rect::from_min_max(full.min, pos2(full.right(), content_bottom));
+            let mini = Rect::from_min_size(
+                pos2(full.left() + player::MINI_MARGIN, mini_bottom - player::MINI_H),
+                vec2(full.width() - 2.0 * player::MINI_MARGIN, player::MINI_H),
+            );
+            (bar_h, bar_top, content_bottom, content, mini)
+        };
         let hides_bar = matches!(self.nav.top(), Some(Route::Release(_) | Route::Playlist(_) | Route::Artist(_)));
-        let shown = anim::fraction(&ctx, egui::Id::new("phone-nav-room"), if hides_bar { 0.0 } else { 1.0 }, theme.motion.default_spatial);
-        let bar_h = NAV_H + ins.bottom;
-        let room = bar_room(ins.bottom, shown);
-        let bar_top = full.bottom() - bar_h * shown + bar_h * k;
-        let mini_bottom = full.bottom() - room - player::MINI_GAP + bar_h * k;
-        let mini_space = if has_track { player::MINI_H + player::MINI_GAP } else { 0.0 };
-        let content_bottom = if keyboard { full.bottom() - ins.ime_bottom } else { full.bottom() - room - mini_space };
-        let content = Rect::from_min_max(full.min, pos2(full.right(), content_bottom));
-        let mini = Rect::from_min_size(
-            pos2(full.left() + player::MINI_MARGIN, mini_bottom - player::MINI_H),
-            vec2(full.width() - 2.0 * player::MINI_MARGIN, player::MINI_H),
-        );
+        let (bar_h, mut bar_top, mut content_bottom, mut content, mut mini) = layout(hides_bar);
 
         // Under a player open all the way nothing else is laid out.
         if k < 0.999 {
             // The back swipe from the left edge, while there is a page to
-            // go back to.
+            // go back to. It reads the page still showing.
             let can_back = self.nav.depth() > 0 || self.search_shown();
             let edge = gesture::edge_back(&ctx, content, egui::Id::new("phone-edge"), can_back && !self.player.is_open());
             if edge.back {
                 self.page_back(now);
+                let hides_bar = matches!(self.nav.top(), Some(Route::Release(_) | Route::Playlist(_) | Route::Artist(_)));
+                (_, bar_top, content_bottom, content, mini) = layout(hides_bar);
             }
             let reset = std::mem::take(&mut self.reset_scroll);
             let (dx, alpha) = self.transition(&ctx, now, content.width());
