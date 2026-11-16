@@ -7,7 +7,7 @@
 //! behaves: it only opens a way in.
 
 use egui::{Context, Rect, Ui};
-use nikgob_view::{Command, MeshKind, Route, TrackId, TrackRow, ViewState};
+use nikgob_view::{Command, MeshKind, Route, TrackId, TrackRow, ViewState, World};
 
 use super::pages;
 use crate::{Icon, Theme, components::anim};
@@ -78,6 +78,8 @@ impl PhonePages {
         pages::set_marks(ctx, &state.dislikes);
         pages::set_track_menu(ctx, &state.prefs.track_menu);
         pages::set_window_can_hide(ctx, false);
+        // Главная's worlds are the phone's own row (the stage is too wide).
+        pages::hide_world_stage(ctx);
         // A phone has no pointer to hover with.
         crate::components::tooltip::set_enabled(ctx, false);
         let pinned_id = egui::Id::new("md3e-pinned-revision");
@@ -231,6 +233,11 @@ pub fn device_icon(kind: MeshKind) -> Icon {
 /// The spring the player opens and closes on (`Prefs::np_motion`).
 pub fn player_spring(motion: u8) -> nikgob_motion::Spring {
     super::np_spring(motion)
+}
+
+/// What a world's main button plays («Дослушать», «Начать», «С начала»).
+pub fn world_play(w: &World) -> Command {
+    pages::play_world(w)
 }
 
 /// Draws a new random outline for the playing cover.

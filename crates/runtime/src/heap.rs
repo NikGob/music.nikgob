@@ -10,12 +10,17 @@
 /// Gives back what this thread's heap holds free (and decommits the freed
 /// memory of every arena). A few ms at most; harmless where mimalloc is not
 /// the allocator (a test's), as its own heap is then empty.
+#[cfg(feature = "mimalloc")]
 #[allow(unsafe_code)]
 pub fn release_thread_memory() {
     // SAFETY: a plain call into mimalloc; it touches only this thread's
     // heap and the arenas' own locks.
     unsafe { libmimalloc_sys::mi_collect(true) };
 }
+
+/// The system allocator (the phone's build) gives back on its own.
+#[cfg(not(feature = "mimalloc"))]
+pub fn release_thread_memory() {}
 
 #[cfg(test)]
 mod tests {

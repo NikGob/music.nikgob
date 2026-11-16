@@ -16,7 +16,9 @@ live = ["dep:nikgob-soloist", "dep:nikgob-sc-widget"]
 [dependencies]
 nikgob-core.workspace = true
 nikgob-view.workspace = true
-nikgob-runtime = { path = "../runtime" }
+# Without the runtime's defaults: the binaries choose them (the phone runs
+# without mimalloc).
+nikgob-runtime = { path = "../runtime", default-features = false }
 nikgob-audio = { path = "../audio" }
 nikgob-soloist = { path = "../soloist", optional = true }
 nikgob-sc-widget = { path = "../sc-widget", optional = true }

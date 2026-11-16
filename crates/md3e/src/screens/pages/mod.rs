@@ -29,6 +29,7 @@ pub mod widgets;
 pub use search::{restore_search_scroll, search_results, search_scroll};
 pub use settings_help::SettingId;
 pub(crate) use worlds::choose as choose_world;
+pub(crate) use worlds::{hide_stage as hide_world_stage, play_primary as play_world};
 
 use egui::{Context, Rect, Response, Ui, UiBuilder, vec2};
 use nikgob_view::{

@@ -32,7 +32,13 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 log.workspace = true
 thread-priority = "3"
 # mimalloc's collect of a worker's own heap after a burst (heap.rs).
-libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended"] }
+libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended"], optional = true }
+
+[features]
+default = ["mimalloc"]
+# The app and nikgobd run on mimalloc and collect a worker's heap after a
+# burst; the phone runs on the system allocator, which needs no collect.
+mimalloc = ["dep:libmimalloc-sys"]
 
 [target.'cfg(windows)'.dependencies]
 # The fullscreen / game check of the background passes (quiet.rs).

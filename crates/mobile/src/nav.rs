@@ -107,6 +107,12 @@ impl Nav {
                 self.changed(if was == Tab::Home { -1.0 } else { 0.0 }, now);
                 Opened::Tab(Tab::Home)
             }
+            // From Настройки' own first page: the whole settings, as a page.
+            Route::Settings if self.tab == Tab::Settings && self.top().is_none() => {
+                self.stacks[Tab::Settings.index()].push(Route::Settings);
+                self.changed(1.0, now);
+                Opened::Pushed
+            }
             Route::Settings => {
                 self.tab = Tab::Settings;
                 self.stacks[Tab::Settings.index()].clear();
@@ -225,6 +231,8 @@ mod tests {
         assert_eq!(nav.open(Route::Library(LibraryTab::Albums), 0.1), Opened::Library(LibraryTab::Albums));
         assert_eq!(nav.tab(), Tab::Library);
         assert_eq!(nav.open(Route::Settings, 0.2), Opened::Tab(Tab::Settings));
+        assert_eq!(nav.open(Route::Settings, 0.25), Opened::Pushed, "the whole settings from Настройки");
+        assert_eq!(nav.top(), Some(&Route::Settings));
         assert_eq!(nav.open(Route::Home, 0.3), Opened::Tab(Tab::Home));
         // Главная's own stack was emptied by the way back to it.
         assert_eq!(nav.top(), None);

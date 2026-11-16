@@ -53,8 +53,8 @@ directories = { version = "6", optional = true }
 serde_json = { version = "1", optional = true }
 # The demo library's covers (the app's demo seed).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
-# The phone's player: no lyrics alignment, torrents, Soulseek or mimalloc
-# (the runtime's default features), no Soloist or SoundCloud's player.
+# The phone's player: no mimalloc (the runtime's default feature), no
+# Soloist or SoundCloud's player.
 nikgob-runtime = { path = "../runtime", default-features = false, optional = true }
 nikgob-playback = { path = "../playback", default-features = false, optional = true }
 nikgob-library = { path = "../library", optional = true }

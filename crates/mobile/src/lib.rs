@@ -16,12 +16,15 @@ mod home;
 mod library;
 mod menu;
 mod nav;
+mod output;
 mod parts;
 mod player;
 mod queue;
 mod rows;
 mod search;
+mod settings;
 mod text;
+mod worlds;
 
 use egui::{Pos2, Rect, Ui, UiBuilder, pos2, vec2};
 use nikgob_md3e::components::{NavBar, NavBarItem, anim};
@@ -98,8 +101,9 @@ pub struct MobileUi {
     player: player::Player,
     queue: queue::QueueSheet,
     menu: menu::TrackMenu,
-    /// «Где играть» was asked for (the player's output).
-    output_asked: bool,
+    output: output::OutputSheet,
+    settings: settings::Settings,
+    worlds: worlds::Worlds,
 }
 
 impl Default for MobileUi {
@@ -120,7 +124,9 @@ impl MobileUi {
             player: player::Player::default(),
             queue: queue::QueueSheet::default(),
             menu: menu::TrackMenu::default(),
-            output_asked: false,
+            output: output::OutputSheet::default(),
+            settings: settings::Settings::default(),
+            worlds: worlds::Worlds::default(),
         }
     }
 
@@ -222,7 +228,7 @@ impl MobileUi {
             self.shell.apply(&ctx, phone::TrackAct::Equalizer, &t, &here, state, out);
         }
         if po.output {
-            self.output_asked = true;
+            self.output.open();
         }
         if let Some(r) = po.nav {
             self.go(r, now, out);
@@ -239,6 +245,10 @@ impl MobileUi {
             self.player.close(now, state);
             self.go(r, now, out);
         }
+        if self.output.show(&ctx, state, out) {
+            self.player.close(now, state);
+            self.go(Route::Devices, now, out);
+        }
         let snack = full.bottom() - content_bottom + 8.0;
         if let Some(r) = self.shell.overlays(&ctx, state, full, snack, out) {
             self.player.close(now, state);
@@ -253,6 +263,8 @@ impl MobileUi {
             // The topmost thing open closes first.
             if self.menu.is_open() {
                 self.menu.close();
+            } else if self.output.is_open() {
+                self.output.close();
             } else if self.queue.is_open() {
                 self.queue.close(&ctx);
             } else if self.player.is_open() {
@@ -284,9 +296,9 @@ impl MobileUi {
     fn page(&mut self, ui: &mut Ui, frame: PageFrame, state: &ViewState, out: &mut Vec<Command>) -> PageOut {
         let top = self.nav.top().cloned();
         match (self.nav.tab(), top) {
-            (Tab::Home, None) => PageOut::nav(home::show(ui, frame, &mut self.shell, state, out)),
+            (Tab::Home, None) => PageOut::nav(home::show(ui, frame, &mut self.shell, &mut self.worlds, state, out)),
             (Tab::Library, None) => self.library.show(ui, frame, state, out),
-            (Tab::Settings, None) => PageOut::nav(self.desktop_page(ui, frame, &Route::Settings, state, false, out)),
+            (Tab::Settings, None) => self.settings.show(ui, frame, state, out),
             (Tab::Search, None) => self.search.show(ui, frame, state, out),
             (_, Some(Route::Release(id))) => detail::album(ui, frame, id, state, out),
             (_, Some(Route::Playlist(id))) => detail::playlist(ui, frame, id, state, out),

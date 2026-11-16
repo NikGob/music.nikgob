@@ -101,6 +101,15 @@ pub fn route(w: &World) -> Route {
     Route::World(w.key.clone())
 }
 
+fn stage_off_id() -> Id {
+    Id::new("home-card-off")
+}
+
+/// The phone draws the worlds as a row of its own: the card stays off.
+pub(crate) fn hide_stage(ctx: &Context) {
+    ctx.data_mut(|d| d.insert_temp(stage_off_id(), true));
+}
+
 /// The card takes room on the page now (shown, or still folding away).
 pub fn shown(ctx: &Context) -> bool {
     ctx.data(|d| d.get_temp::<bool>(Id::new("home-card-shown"))).unwrap_or(false)
@@ -172,7 +181,7 @@ pub fn show(ui: &mut Ui, grid: Grid, state: &ViewState, n: usize, pages: &mut Pa
     let ctx = ui.ctx().clone();
     let theme = Theme::get(&ctx);
     let worlds = &state.home.worlds;
-    let on = state.prefs.home_card_shown() && !worlds.is_empty();
+    let on = state.prefs.home_card_shown() && !worlds.is_empty() && !ctx.data(|d| d.get_temp::<bool>(stage_off_id())).unwrap_or(false);
     let k = anim::f32(&ctx, Id::new("home-card-k"), f32::from(u8::from(on)), theme.motion.default_spatial.without_bounce()).clamp(0.0, 1.0);
     let alpha_target = if on && k > 0.4 { 1.0 } else { 0.0 };
     let alpha_spring = if on { theme.motion.default_effects } else { theme.motion.fast_effects };
