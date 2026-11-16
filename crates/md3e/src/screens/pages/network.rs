@@ -628,6 +628,7 @@ fn passport(ui: &mut Ui, state: &ViewState, d: &Dev<'_>, mem: &mut MeshUi, out: 
             });
         });
     }
+    listen(ui, state, d, out);
     ui.add_space(16.0);
     let version = match d.node {
         Some(n) => n.version.clone(),
@@ -660,6 +661,47 @@ fn passport(ui: &mut Ui, state: &ViewState, d: &Dev<'_>, mem: &mut MeshUi, out: 
     if let Some(a) = act {
         mesh_ui::act(ui, m, d.node, a, mem, state, out);
     }
+}
+
+/// What «Слушать здесь» and «Пульт» of a passport do: the music of this
+/// window moves to that device (this computer's passport brings it back
+/// while another device plays); this window drives what the device plays,
+/// as it is. Neither for a device out of reach or the one that plays the
+/// window's music already.
+fn listen_commands(state: &ViewState, node: Option<&MeshNodeView>) -> (Option<Command>, Option<Command>) {
+    let target = state.target.as_ref();
+    match node {
+        None => (target.map(|_| Command::OutputTransfer { node_id: None }), None),
+        Some(n) if !n.online || target.is_some_and(|t| t.node_id == n.id) => (None, None),
+        Some(n) => (
+            Some(Command::OutputTransfer { node_id: Some(n.id.clone()) }),
+            n.playing.is_some().then(|| Command::OutputAttach { node_id: n.id.clone() }),
+        ),
+    }
+}
+
+/// «Слушать здесь» · «Пульт» of a passport ([`listen_commands`]).
+fn listen(ui: &mut Ui, state: &ViewState, d: &Dev<'_>, out: &mut Vec<Command>) {
+    let (here, remote) = listen_commands(state, d.node);
+    if here.is_none() && remote.is_none() {
+        return;
+    }
+    ui.add_space(16.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if let Some(c) = here
+            && ui.add(Button::new("Слушать здесь").icon(Icon::SpeakerGroup).style(Style::Filled).size(Size::S).id_salt(("mesh-passport-here", d.id))).clicked()
+        {
+            crate::screens::output::set_attached(ui.ctx(), None);
+            out.push(c);
+        }
+        if let Some(c) = remote
+            && ui.add(Button::new("Пульт").style(Style::Tonal).size(Size::S).id_salt(("mesh-passport-remote", d.id))).clicked()
+        {
+            crate::screens::output::set_attached(ui.ctx(), d.node.map(|n| n.id.clone()));
+            out.push(c);
+        }
+    });
 }
 
 /// A fact of the passport: its name above, what it is under it.
@@ -739,6 +781,35 @@ mod tests {
 
     /// The map's devices: this computer first with its own player, then
     /// the paired ones with what plays there.
+    /// «Слушать здесь» moves the music to a device in reach (back here
+    /// from this computer's passport while another device plays), «Пульт»
+    /// only drives a device that has music of its own; nothing for the
+    /// device that plays the window's music already.
+    #[test]
+    fn the_passport_moves_the_music_or_drives_it() {
+        let mut state = ViewState::default();
+        let pi = MeshNodeView { id: "pi".into(), online: true, playing: Some(nikgob_view::MeshPlaying::default()), ..MeshNodeView::default() };
+        let tv = MeshNodeView { id: "tv".into(), online: true, ..MeshNodeView::default() };
+        let off = MeshNodeView { id: "off".into(), online: false, ..MeshNodeView::default() };
+        assert_eq!(listen_commands(&state, None), (None, None));
+        assert_eq!(
+            listen_commands(&state, Some(&pi)),
+            (Some(Command::OutputTransfer { node_id: Some("pi".into()) }), Some(Command::OutputAttach { node_id: "pi".into() }))
+        );
+        assert_eq!(listen_commands(&state, Some(&tv)), (Some(Command::OutputTransfer { node_id: Some("tv".into()) }), None));
+        assert_eq!(listen_commands(&state, Some(&off)), (None, None));
+        state.target = Some(nikgob_view::RemoteTarget {
+            node_id: "pi".into(),
+            name: "Pi".into(),
+            kind: MeshKind::Pi,
+            link: nikgob_view::RemoteLink::Live,
+            volume: 0.5,
+            muted: false,
+        });
+        assert_eq!(listen_commands(&state, Some(&pi)), (None, None));
+        assert_eq!(listen_commands(&state, None), (Some(Command::OutputTransfer { node_id: None }), None));
+    }
+
     #[test]
     fn the_map_lists_this_computer_first() {
         let mut state = ViewState::default();
