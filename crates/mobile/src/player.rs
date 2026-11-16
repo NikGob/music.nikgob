@@ -599,11 +599,13 @@ fn outlined_icon(ui: &mut Ui, circle: Rect, id: Id, icon: Icon, on: bool) -> boo
 }
 
 /// The transport row's height, a toggle's width (the bottom row's height
-/// is 40) and the ♥ | share pair's size.
+/// is 40), the ♥ | share pair's drawn size and the touch each square had
+/// before it shrank to [`TOGGLE`].
 const TRANSPORT_H: f32 = 68.0;
 const TOGGLE: f32 = 42.0;
 const PAIR_W: f32 = 2.0 * TOGGLE + 2.0;
 const PAIR_H: f32 = TOGGLE;
+const PAIR_TOUCH: f32 = 48.0;
 
 /// The track's title in the player: 20 sp emphasized (Metrolist's bold
 /// title), on TitleLarge's line with the artist under it.
@@ -674,8 +676,28 @@ fn toggles_w(n: usize, gap: f32) -> f32 {
     n as f32 * TOGGLE + gap * n.saturating_sub(1) as f32
 }
 
+/// The touch of one square of the ♥ | share pair: [`PAIR_TOUCH`] wide and
+/// at least that tall around `square`. The two meet at the middle of
+/// `gap`, so a point is one button's. The last stops on `row_right`,
+/// where the old 48 dp targets stopped — one that was also [`PAIR_TOUCH`]
+/// wide and met at that middle would pass the edge.
+fn pair_touch(square: Rect, gap: f32, row_right: f32, last: bool) -> Rect {
+    let h = square.height().max(PAIR_TOUCH);
+    let top = square.center().y - h * 0.5;
+    let half = gap * 0.5;
+    let (left, right) = if last {
+        let left = square.left() - half;
+        (left, row_right.min(left + PAIR_TOUCH))
+    } else {
+        let right = square.right() + half;
+        (right - PAIR_TOUCH, right)
+    };
+    Rect::from_min_max(pos2(left, top), pos2(right, top + h))
+}
+
 /// Connected toggles filling `rect`, from its left, as `look` asks:
-/// tonal or outlined (1 dp) while off, primary while on. The one tapped.
+/// tonal or outlined (1 dp) while off, primary while on. The ♥ | share
+/// pair is drawn on its squares and touched on [`pair_touch`]. The one tapped.
 fn toggles(ui: &mut Ui, rect: Rect, id: Id, items: &[Toggle], look: ToggleRow) -> Option<usize> {
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
@@ -686,7 +708,8 @@ fn toggles(ui: &mut Ui, rect: Rect, id: Id, items: &[Toggle], look: ToggleRow) -
     let mut tapped = None;
     for (i, t) in items.iter().enumerate() {
         let r = Rect::from_min_size(pos2(rect.left() + i as f32 * (w + gap), rect.top()), vec2(w, rect.height()));
-        let resp = ui.interact(r, id.with(i), if t.enabled { Sense::click() } else { Sense::hover() });
+        let hit = if look == ToggleRow::Pair { pair_touch(r, gap, rect.right(), i + 1 == n) } else { r };
+        let resp = ui.interact(hit, id.with(i), if t.enabled { Sense::click() } else { Sense::hover() });
         let k = anim::fraction(ui.ctx(), id.with(("on", i)), if t.on { 1.0 } else { 0.0 }, theme.motion.fast_effects);
         let radii = connected_radii(i, n, false, r.height()).lerp(connected_radii(i, n, true, r.height()), k);
         let (off_fill, off_ink, off_stroke) = if look.outlined() {
@@ -896,6 +919,34 @@ mod tests {
         assert_eq!(toggles_w(5, ToggleRow::Row.gap()), 234.0);
         assert!(ToggleRow::Row.outlined());
         assert!(!ToggleRow::Pair.outlined());
+    }
+
+    #[test]
+    fn the_pair_touch_meets_in_the_gap_and_stops_on_the_row_edge() {
+        // A 392 dp phone: the column ends 32 dp in, the pair flush with it.
+        let row_right = 360.0;
+        let pair = Rect::from_min_size(pos2(row_right - PAIR_W, 500.0), vec2(PAIR_W, PAIR_H));
+        let gap = ToggleRow::Pair.gap();
+        let heart = Rect::from_min_size(pair.min, vec2(TOGGLE, PAIR_H));
+        let share = Rect::from_min_size(pos2(heart.right() + gap, pair.top()), vec2(TOGGLE, PAIR_H));
+        assert_eq!((heart.width(), heart.height(), share.right()), (42.0, 42.0, row_right));
+        let ht = pair_touch(heart, gap, row_right, false);
+        let st = pair_touch(share, gap, row_right, true);
+        let mid = (heart.right() + share.left()) * 0.5;
+        assert_eq!(ht.right(), mid);
+        assert_eq!(st.left(), mid, "they meet, so no point is both");
+        assert_eq!((ht.width(), ht.height()), (PAIR_TOUCH, PAIR_TOUCH));
+        assert_eq!(st.height(), PAIR_TOUCH);
+        assert_eq!(ht.center().y, heart.center().y);
+        assert!(ht.left() <= heart.left() && ht.bottom() >= heart.bottom() && ht.top() <= heart.top());
+        assert!(st.left() <= share.left() && st.right() >= share.right() && st.top() <= share.top() && st.bottom() >= share.bottom());
+        // The old targets ended on the row's edge. A 48 dp share touch
+        // that also met at the gap's middle would pass it by 5, so this
+        // one keeps the edge and is the square plus half the gap.
+        assert_eq!(st.right(), row_right);
+        assert_eq!(st.width(), TOGGLE + gap * 0.5);
+        let old_left = row_right - (2.0 * PAIR_TOUCH + gap);
+        assert!(ht.left() >= old_left, "the heart touch reaches no further left than the old one");
     }
 
     #[test]
