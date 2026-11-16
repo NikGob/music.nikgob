@@ -1,8 +1,9 @@
-//! Настройки in one column: Вид (the theme, less motion), YouTube Music
-//! (this phone's own sign-in), Межсеть (this phone among the owner's
-//! devices: its code or a pasted invitation while it is in no ring, the
-//! devices once it is, what it keeps with its «Избранное») and the rest of
-//! the settings as the desktop draws them.
+//! Настройки in one column of Metrolist's settings groups (a title in the
+//! primary colour over rows that stand as one grouped card): Вид (the
+//! theme, less motion), YouTube Music (this phone's own sign-in), Межсеть
+//! (this phone among the owner's devices: its code or a pasted invitation
+//! while it is in no ring, the devices once it is, what it keeps with its
+//! «Избранное») and the rest of the settings as the desktop draws them.
 
 use egui::{Id, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use nikgob_core::streaming::{Account, LoginInput, Service};
@@ -16,6 +17,42 @@ use crate::parts::{self, PageOut};
 use crate::{PageFrame, detail, text};
 
 const ROW_H: f32 = 56.0;
+/// The space between the rows of a group.
+const ROW_GAP: f32 = 4.0;
+/// A group's ends and its inner corners.
+const GROUP_END: f32 = 20.0;
+const GROUP_INNER: f32 = 4.0;
+
+/// The corners of row `i` of a group of `n`.
+fn row_radii(i: usize, n: usize) -> Radii {
+    let top = if i == 0 { GROUP_END } else { GROUP_INNER };
+    let bottom = if i + 1 >= n { GROUP_END } else { GROUP_INNER };
+    Radii([top, top, bottom, bottom])
+}
+
+/// A group's title: the primary colour, over its rows.
+fn group_title(ui: &mut Ui, title: &str) {
+    let theme = Theme::get(ui.ctx());
+    ui.add_space(16.0);
+    let style = TypeRole::TitleSmall.emphasized();
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), style.line_height + 12.0), Sense::hover());
+    text::paint_line(ui, pos2(r.left() + 32.0, r.top()), title, style, theme.scheme.primary, r.width() - 48.0);
+}
+
+/// Row `i` of a group of `n`: its card with the page's margins (a press
+/// lights it). Returns the card and its response.
+fn group_row(ui: &mut Ui, id: Id, i: usize, n: usize, sense: Sense) -> (Rect, egui::Response) {
+    let theme = Theme::get(ui.ctx());
+    let s = theme.scheme;
+    let (slot, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H + ROW_GAP), Sense::hover());
+    let card = Rect::from_min_size(pos2(slot.left() + 16.0, slot.top()), vec2(slot.width() - 32.0, ROW_H));
+    let resp = ui.interact(card, id, sense);
+    let radii = row_radii(i, n);
+    paint::container(ui.painter(), card, radii, s.surface_container, Stroke::NONE);
+    let layer = anim::fraction(ui.ctx(), id.with("l"), if resp.is_pointer_button_down_on() { 0.10 } else { 0.0 }, theme.motion.fast_effects);
+    paint::state_layer(ui.painter(), card, radii, s.on_surface, layer);
+    (card, resp)
+}
 
 #[derive(Default)]
 pub struct Settings {
@@ -48,8 +85,8 @@ impl Settings {
             self.look(ui, state, out);
             self.youtube(ui, state, out);
             self.mesh(ui, state, out, &mut page);
-            parts::section(ui, "Ещё");
-            if link(ui, "set-all", Icon::Settings, "Все настройки", None) {
+            group_title(ui, "Ещё");
+            if link(ui, "set-all", (0, 1), Icon::Settings, "Все настройки", None) {
                 page.nav = Some(Route::Settings);
             }
             ui.add_space(24.0);
@@ -58,10 +95,10 @@ impl Settings {
     }
 
     fn look(&mut self, ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
-        parts::section(ui, "Вид");
+        group_title(ui, "Вид");
         let p = &state.prefs;
-        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
-        let mut cui = ui.new_child(UiBuilder::new().max_rect(r.shrink2(vec2(16.0, 8.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let (r, _) = group_row(ui, Id::new("set-theme-row"), 0, 2, Sense::hover());
+        let mut cui = ui.new_child(UiBuilder::new().max_rect(r.shrink2(vec2(12.0, 8.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         cui.spacing_mut().item_spacing.x = 8.0;
         for (mode, label) in [(ThemeMode::System, "Как в системе"), (ThemeMode::Dark, "Тёмная"), (ThemeMode::Light, "Светлая")] {
             if cui.add(FilterChip::new(label, p.theme == mode).one_of().id_salt(("set-theme", label))).clicked() && p.theme != mode {
@@ -70,7 +107,7 @@ impl Settings {
                 out.push(Command::SetPrefs(Box::new(next)));
             }
         }
-        if let Some(on) = switch(ui, "set-motion", Icon::AutoAwesome, "Меньше движения", p.reduced_motion) {
+        if let Some(on) = switch(ui, "set-motion", (1, 2), Icon::AutoAwesome, "Меньше движения", p.reduced_motion) {
             let mut next = p.clone();
             next.reduced_motion = on;
             out.push(Command::SetPrefs(Box::new(next)));
@@ -79,19 +116,19 @@ impl Settings {
 
     fn youtube(&mut self, ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
         let Some(acc) = state.account(Service::Youtube) else { return };
-        parts::section(ui, "YouTube Music");
+        group_title(ui, "YouTube Music");
         match &acc.account {
             Account::LoggedIn { name, .. } => {
-                if link(ui, "set-yt-out", Icon::Logout, name, Some("Выйти")) {
+                if link(ui, "set-yt-out", (0, 1), Icon::Logout, name, Some("Выйти")) {
                     out.push(Command::StreamLogout(Service::Youtube));
                 }
             }
             Account::LoggingIn(_) => {
-                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
+                let (r, _) = group_row(ui, Id::new("set-yt-wait"), 0, 1, Sense::hover());
                 ui.put(Rect::from_center_size(r.center(), vec2(32.0, 32.0)), LoadingIndicator::new().size(32.0));
             }
             _ => {
-                if link(ui, "set-yt-in", Icon::Login, "Войти", None) {
+                if link(ui, "set-yt-in", (0, 1), Icon::Login, "Войти", None) {
                     out.push(Command::StreamLogin { service: Service::Youtube, input: LoginInput::Browser });
                 }
             }
@@ -103,9 +140,35 @@ impl Settings {
 
     fn mesh(&mut self, ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>, page: &mut PageOut) {
         let m = &state.mesh;
-        parts::section(ui, "Межсеть");
-        if let Some(on) = switch(ui, "set-mesh", Icon::Sync, "Мои устройства", m.enabled) {
+        group_title(ui, "Межсеть");
+        // The switch, this phone and, in a ring, the owner's other devices
+        // as one group.
+        let n = if !m.enabled { 1 } else if m.paired { 2 + m.nodes.len() } else { 2 };
+        if let Some(on) = switch(ui, "set-mesh", (0, n), Icon::Sync, "Мои устройства", m.enabled) {
             out.push(Command::MeshSetEnabled(on));
+        }
+        if m.enabled {
+            let theme = Theme::get(ui.ctx());
+            let s = theme.scheme;
+            let ts = TypeRole::BodyLarge.style();
+            let (r, _) = group_row(ui, Id::new("set-this"), 1, n, Sense::hover());
+            let c = pos2(r.left() + 12.0 + 20.0, r.center().y);
+            phone::device_avatar(ui, c, 40.0, "set-this", m.this.kind, true, state.player.status == nikgob_view::Status::Playing);
+            let name = if m.this.name.is_empty() { kind_label(m.this.kind).to_owned() } else { m.this.name.clone() };
+            text::paint_line(ui, pos2(c.x + 36.0, r.center().y - ts.line_height * 0.5), name, ts, s.on_surface, r.right() - c.x - 52.0);
+            if m.paired {
+                for (k, node) in m.nodes.iter().enumerate() {
+                    let (r, resp) = group_row(ui, Id::new(("set-node", node.id.as_str())), 2 + k, n, Sense::click());
+                    let c = pos2(r.left() + 12.0 + 20.0, r.center().y);
+                    let playing = node.online && node.playing.as_ref().is_some_and(|p| !p.paused);
+                    phone::device_avatar(ui, c, 40.0, &format!("set-node-{}", node.id), node.kind, node.online, playing);
+                    let alpha = if node.online { 1.0 } else { 0.38 };
+                    text::paint_line(ui, pos2(c.x + 36.0, r.center().y - ts.line_height * 0.5), node.name.clone(), ts, s.on_surface.gamma_multiply(alpha), r.right() - c.x - 52.0);
+                    if resp.clicked() {
+                        page.nav = Some(Route::Devices);
+                    }
+                }
+            }
         }
         if let Some(e) = &m.error {
             parts::error(ui, e);
@@ -113,42 +176,23 @@ impl Settings {
         if !m.enabled {
             return;
         }
-        let theme = Theme::get(ui.ctx());
-        let s = theme.scheme;
-        // This phone.
-        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 72.0), Sense::hover());
-        let c = pos2(r.left() + 16.0 + 20.0, r.center().y);
-        phone::device_avatar(ui, c, 40.0, "set-this", m.this.kind, true, state.player.status == nikgob_view::Status::Playing);
-        let name = if m.this.name.is_empty() { kind_label(m.this.kind).to_owned() } else { m.this.name.clone() };
-        let ts = TypeRole::BodyLarge.style();
-        text::paint_line(ui, pos2(c.x + 36.0, r.center().y - ts.line_height * 0.5), name, ts, s.on_surface, r.right() - c.x - 52.0);
         if !m.paired {
             self.pairing(ui, state, out);
             return;
         }
-        // The owner's other devices.
-        for n in &m.nodes {
-            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::click());
-            let c = pos2(r.left() + 16.0 + 20.0, r.center().y);
-            let playing = n.online && n.playing.as_ref().is_some_and(|p| !p.paused);
-            phone::device_avatar(ui, c, 40.0, &format!("set-node-{}", n.id), n.kind, n.online, playing);
-            let alpha = if n.online { 1.0 } else { 0.38 };
-            text::paint_line(ui, pos2(c.x + 36.0, r.center().y - ts.line_height * 0.5), n.name.clone(), ts, s.on_surface.gamma_multiply(alpha), r.right() - c.x - 52.0);
-            if resp.clicked() {
-                page.nav = Some(Route::Devices);
-            }
-        }
         // What this phone keeps.
-        parts::section(ui, "Избранное");
+        group_title(ui, "Избранное");
         let pins = &m.this.pins;
-        if let Some(on) = switch(ui, "set-pin-liked", Icon::Favorite, "Любимые", pins.liked) {
+        let kept: Vec<&nikgob_view::PlaylistCard> = state.library.playlists.iter().filter(|p| p.id != LIKED_PLAYLIST && !p.pinned).collect();
+        let n = 1 + kept.len();
+        if let Some(on) = switch(ui, "set-pin-liked", (0, n), Icon::Favorite, "Любимые", pins.liked) {
             let mut p = pins.clone();
             p.liked = on;
             out.push(Command::MeshSetPins { node_id: m.this.id.clone(), pins: p });
         }
-        for pl in state.library.playlists.iter().filter(|p| p.id != LIKED_PLAYLIST && !p.pinned) {
+        for (k, pl) in kept.into_iter().enumerate() {
             let on = pins.playlists.contains(&pl.id);
-            if switch(ui, ("set-pin", pl.id), Icon::QueueMusic, &pl.name, on).is_some() {
+            if switch(ui, ("set-pin", pl.id), (1 + k, n), Icon::QueueMusic, &pl.name, on).is_some() {
                 out.push(Command::MeshSetPins { node_id: m.this.id.clone(), pins: detail::toggle_pin(pins, pl.id) });
             }
         }
@@ -193,16 +237,14 @@ impl Settings {
     }
 }
 
-/// A row with a switch at its end; the new value when it was flipped.
-fn switch(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, icon: Icon, label: &str, value: bool) -> Option<bool> {
+/// A row of a group (`pos`: its place and the group's length) with a switch
+/// at its end; the new value when it was flipped.
+fn switch(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, pos: (usize, usize), icon: Icon, label: &str, value: bool) -> Option<bool> {
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
-    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
     let id = Id::new(&salt);
-    let resp = ui.interact(r, id, Sense::click());
-    let layer = anim::fraction(ui.ctx(), id.with("l"), if resp.is_pointer_button_down_on() { 0.10 } else { 0.0 }, theme.motion.fast_effects);
-    paint::state_layer(ui.painter(), r, Radii::all(0.0), s.on_surface, layer);
-    icon.widget(false, s.on_surface_variant, 24.0).paint_at(ui, Rect::from_center_size(pos2(r.left() + 28.0, r.center().y), vec2(24.0, 24.0)));
+    let (r, resp) = group_row(ui, id, pos.0, pos.1, Sense::click());
+    icon.widget(false, s.on_surface_variant, 24.0).paint_at(ui, Rect::from_center_size(pos2(r.left() + 16.0 + 12.0, r.center().y), vec2(24.0, 24.0)));
     let ts = TypeRole::BodyLarge.style();
     text::paint_line(ui, pos2(r.left() + 56.0, r.center().y - ts.line_height * 0.5), label, ts, s.on_surface, r.width() - 56.0 - 80.0);
     let mut v = value;
@@ -218,17 +260,14 @@ fn switch(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, icon: Icon,
     }
 }
 
-/// A row that leads somewhere (or does something): its icon, its name,
-/// a value at its end. True when tapped.
-fn link(ui: &mut Ui, salt: &str, icon: Icon, label: &str, value: Option<&str>) -> bool {
+/// A row of a group that leads somewhere (or does something): its icon,
+/// its name, a value at its end. True when tapped.
+fn link(ui: &mut Ui, salt: &str, pos: (usize, usize), icon: Icon, label: &str, value: Option<&str>) -> bool {
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
-    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
     let id = Id::new(salt);
-    let resp = ui.interact(r, id, Sense::click());
-    let layer = anim::fraction(ui.ctx(), id.with("l"), if resp.is_pointer_button_down_on() { 0.10 } else { 0.0 }, theme.motion.fast_effects);
-    paint::state_layer(ui.painter(), r, Radii::all(0.0), s.on_surface, layer);
-    icon.widget(false, s.on_surface_variant, 24.0).paint_at(ui, Rect::from_center_size(pos2(r.left() + 28.0, r.center().y), vec2(24.0, 24.0)));
+    let (r, resp) = group_row(ui, id, pos.0, pos.1, Sense::click());
+    icon.widget(false, s.on_surface_variant, 24.0).paint_at(ui, Rect::from_center_size(pos2(r.left() + 16.0 + 12.0, r.center().y), vec2(24.0, 24.0)));
     let ts = TypeRole::BodyLarge.style();
     let mut right = r.right() - 16.0;
     if let Some(v) = value {
@@ -245,6 +284,13 @@ fn link(ui: &mut Ui, salt: &str, icon: Icon, label: &str, value: Option<&str>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_group_is_round_at_its_ends() {
+        assert_eq!(row_radii(0, 2).0, [GROUP_END, GROUP_END, GROUP_INNER, GROUP_INNER]);
+        assert_eq!(row_radii(1, 2).0, [GROUP_INNER, GROUP_INNER, GROUP_END, GROUP_END]);
+        assert_eq!(row_radii(0, 1).0, [GROUP_END; 4]);
+    }
 
     #[test]
     fn the_ticket_is_found_in_what_was_pasted() {
