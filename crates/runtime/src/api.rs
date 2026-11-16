@@ -26,6 +26,8 @@ use crate::{PlaybackEvent, Worker};
 pub(crate) const API_CONFIRM_ID: u64 = 1 << 50;
 /// Cards of the API in «Подтверди» at most; a new one pushes out the oldest.
 const API_CONFIRMS: usize = 16;
+/// Runs whose skips are kept for the API to read.
+const API_SKIPS_KEPT: usize = 32;
 /// Offers of a dry search of the sources answered at most.
 const OFFERS_ANSWERED: usize = 12;
 /// A source's dry search at most (the API waits a little longer).
@@ -83,6 +85,10 @@ pub(crate) struct ApiKeep {
     /// Downloads of the API waiting in «Подтверди», oldest first.
     confirms: Vec<ApiConfirm>,
     next_confirm: u64,
+    /// An [`Command::ApiRun`] is being run: what its commands could not do
+    /// goes to [`Self::skipped`].
+    pub(crate) in_run: bool,
+    pub(crate) skipped: Vec<String>,
 }
 
 /// What a device event says of the sound: `Some(true)` it comes out,
@@ -343,8 +349,19 @@ impl Worker {
             }
             Command::ApiRun { commands, ack, actor } => {
                 self.api.actor = actor;
+                self.api.in_run = true;
+                self.api.skipped.clear();
                 for c in commands {
                     self.command(c);
+                }
+                self.api.in_run = false;
+                let skipped = std::mem::take(&mut self.api.skipped);
+                if !skipped.is_empty() {
+                    self.publish(move |s| {
+                        s.api.skipped.push((ack, skipped));
+                        let over = s.api.skipped.len().saturating_sub(API_SKIPS_KEPT);
+                        s.api.skipped.drain(..over);
+                    });
                 }
                 // A shuffle asked for a list the request did not make (it had
                 // nothing to play) does not reach a later one.
@@ -361,6 +378,7 @@ impl Worker {
                 // API refuses such a request before it gets here).
                 if !self.state.read().prefs.use_trash {
                     log::warn!("api: {} tracks not deleted, the Trash is off", tracks.len());
+                    self.api_skip("the Trash is off".to_owned());
                     return;
                 }
                 self.delete_tracks(tracks, &what);
@@ -376,6 +394,8 @@ impl Worker {
                 self.api.confirms.push(ApiConfirm { card: confirm_card(id, &title, &origin, &lines), commands });
                 self.publish_api_confirms();
             }
+            Command::ApiKnow(tracks) => self.streaming.learn(&tracks),
+            Command::ApiCreatePlaylist { id, name, tracks } => self.api_create_playlist(id, &name, &tracks),
             other => log::warn!("api: not an API command {other:?}"),
         }
     }
@@ -387,6 +407,30 @@ impl Worker {
             s.downloads.confirm.retain(|c| c.id & API_CONFIRM_ID == 0);
             s.downloads.confirm.extend(cards);
         });
+    }
+
+    /// Something a command of an [`Command::ApiRun`] could not do: the API
+    /// answers it instead of «done». Outside a run (the window's own
+    /// commands) nothing is kept.
+    pub(crate) fn api_skip(&mut self, why: String) {
+        if self.api.in_run && self.api.skipped.len() < 50 {
+            self.api.skipped.push(why);
+        }
+    }
+
+    /// [`Command::ApiCreatePlaylist`]: the playlist under the API's id, as
+    /// «Сохранить как плейлист» makes one.
+    fn api_create_playlist(&mut self, id: nikgob_core::model::PlaylistId, name: &str, tracks: &[TrackId]) {
+        let before = self.library_tracks();
+        let Some(p) = self.log_err("плейлист", self.lib.create_playlist_with_id(id, name)) else {
+            self.api_skip(format!("playlist «{name}» not created"));
+            return;
+        };
+        if !tracks.is_empty() {
+            let _ = self.log_err("плейлист", self.lib.playlist_add_many(p.id, tracks));
+        }
+        self.toast(format!("Плейлист «{name}» сохранён"), None);
+        self.library_edited(before, Vec::new());
     }
 
     /// «Скачать» (`Some`) or «Не скачивать» (`None`) of an API card.

@@ -980,6 +980,9 @@ impl Worker {
     pub(crate) fn download_stream(&mut self, remotes: &[nikgob_core::streaming::RemoteId]) {
         let known: Vec<nikgob_core::streaming::StreamTrack> =
             remotes.iter().filter_map(|r| self.streaming.known.get(r).cloned()).collect();
+        for r in remotes.iter().filter(|r| !self.streaming.known.contains_key(r)).cloned().collect::<Vec<_>>() {
+            self.api_skip(format!("{r} is not known: find it again"));
+        }
         if known.is_empty() {
             self.toast("Трек устарел — найди его заново", None);
             return;

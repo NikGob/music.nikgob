@@ -2021,7 +2021,9 @@ impl Worker {
             | Command::ApiRetag { .. }
             | Command::ApiTrash { .. }
             | Command::ApiSourceSearch { .. }
-            | Command::ApiConfirmDownload { .. }) => self.api_command(c),
+            | Command::ApiConfirmDownload { .. }
+            | Command::ApiKnow(_)
+            | Command::ApiCreatePlaylist { .. }) => self.api_command(c),
         }
     }
 

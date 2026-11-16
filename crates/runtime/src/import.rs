@@ -1213,6 +1213,7 @@ impl Worker {
         for &t in &tracks {
             if let Err(e) = nikgob_import::delete_track_to_trash(&self.lib, &cfg.trash_dir, &cfg.library_dir, t) {
                 log::error!("trash {t}: {e}");
+                self.api_skip(format!("{t} not moved to the Trash: {e}"));
                 failed += 1;
             }
         }

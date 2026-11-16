@@ -842,6 +842,7 @@ impl Worker {
     /// downloads).
     pub(crate) fn stream_in_library(&mut self, remote: &RemoteId, on: bool) {
         let Some(t) = self.streaming.known.get(remote).cloned() else {
+            self.api_skip(format!("{remote} is not known: find it again"));
             self.toast("Трек устарел — найди его заново", None);
             return;
         };
@@ -857,6 +858,7 @@ impl Worker {
 
     pub(crate) fn like_stream(&mut self, remote: &RemoteId, on: bool) {
         let Some(t) = self.streaming.known.get(remote).cloned() else {
+            self.api_skip(format!("{remote} is not known: find it again"));
             self.toast("Трек устарел — найди его заново", None);
             return;
         };

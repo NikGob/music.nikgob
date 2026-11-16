@@ -210,7 +210,9 @@ impl Worker {
     }
 
     /// The tags in the files of `tracks`, read off the loop, to `reply` as
-    /// `{"<id>": {"title", …}}` (a track without a file is left out).
+    /// `{"tags": {"<id>": {"title", …}}, "outside": ["<id>"]}`: a track
+    /// without a file is left out, one whose file lies outside the library
+    /// is listed in `outside` and never read.
     pub(crate) fn api_read_tags(&mut self, tracks: Vec<TrackId>, reply: v::ApiReply) {
         let Some(svc) = &self.import else {
             reply.send(Err("Файлы библиотеки недоступны".to_owned()));
@@ -219,7 +221,12 @@ impl Worker {
         let importer = svc.importer().clone();
         svc.spawn_blocking(move || {
             let mut out = serde_json::Map::new();
+            let mut outside = Vec::new();
             for t in tracks {
+                if outside_library(&importer, t) {
+                    outside.push(t.to_string());
+                    continue;
+                }
                 match importer.read_track_tags(t) {
                     Ok((_, tags)) => {
                         out.insert(t.to_string(), edit_json(&tag_edit(&tags)));
@@ -227,14 +234,17 @@ impl Worker {
                     Err(e) => log::debug!("api: tags of {t}: {e}"),
                 }
             }
-            reply.send(Ok(serde_json::Value::Object(out)));
+            reply.send(Ok(serde_json::json!({"tags": out, "outside": outside})));
         });
     }
 
-    /// The local API's retag: each track's file read, the patch put over
-    /// what it has and written (the importer moves the file into place);
-    /// one snackbar for all, to `reply` as `{"done", "failed"}`.
-    pub(crate) fn api_retag(&mut self, tracks: Vec<(TrackId, v::TagPatch)>, reply: v::ApiReply) {
+    /// The local API's retag: each track's file read, checked against the
+    /// values the confirmed plan showed (a field changed since is a
+    /// failure, nothing written), the patch put over what it has and
+    /// written (the importer moves the file into place, and refuses a file
+    /// outside the library); one snackbar for all, to `reply` as
+    /// `{"done", "failed"}`.
+    pub(crate) fn api_retag(&mut self, tracks: Vec<(TrackId, v::TagPatch, v::TagPatch)>, reply: v::ApiReply) {
         let Some(svc) = &self.import else {
             reply.send(Err("Файлы библиотеки недоступны".to_owned()));
             return;
@@ -244,11 +254,14 @@ impl Worker {
         svc.spawn_blocking(move || {
             let mut done = Vec::new();
             let mut failed = Vec::new();
-            for (t, patch) in tracks {
-                let r = importer
-                    .read_track_tags(t)
-                    .map_err(|e| e.to_string())
-                    .and_then(|(_, now)| importer.retag(t, changes(patch.apply(&tag_edit(&now)))).map(|_| ()).map_err(|e| e.to_string()));
+            for (t, patch, before) in tracks {
+                let r = importer.read_track_tags(t).map_err(|e| e.to_string()).and_then(|(_, now)| {
+                    let now = tag_edit(&now);
+                    if !still_as_planned(&now, &before) {
+                        return Err("the tags changed since the plan".to_owned());
+                    }
+                    importer.retag(t, changes(patch.apply(&now))).map(|_| ()).map_err(|e| e.to_string())
+                });
                 match r {
                     Ok(()) => done.push(t),
                     Err(e) => {
@@ -287,4 +300,20 @@ fn edit_json(e: &v::TagEdit) -> serde_json::Value {
         m.insert(k.to_owned(), serde_json::Value::String(val.to_owned()));
     }
     serde_json::Value::Object(m)
+}
+
+/// Whether the track's file is there but lies outside the library and the
+/// masters folder (links followed): the API never reads or writes it.
+fn outside_library(importer: &nikgob_import::Importer, track: TrackId) -> bool {
+    let Some(src) = importer.library().active_source(track).ok().flatten().filter(|s| s.kind.is_local()) else {
+        return false;
+    };
+    let path = std::path::Path::new(&src.locator);
+    path.exists() && importer.check_in_library(path).is_err()
+}
+
+/// Whether each field the plan showed still has the value it showed.
+fn still_as_planned(now: &v::TagEdit, before: &v::TagPatch) -> bool {
+    let now: std::collections::HashMap<&str, &str> = v::tag_fields(now).into_iter().collect();
+    before.fields().into_iter().all(|(k, want)| want.is_none_or(|w| now.get(k).copied().unwrap_or_default().trim() == w.trim()))
 }
