@@ -561,7 +561,7 @@ fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
 
 /// «Дослушать» / «Начать» / «С начала».
 pub fn play_primary(w: &World) -> Command {
-    Command::PlayTracks { tracks: w.primary.clone(), start: 0, context: format!("мира «{}»", w.title) }
+    Command::PlayTracks { tracks: w.primary.clone(), start: 0, context: nikgob_view::QueueOrigin::World(w.title.clone()) }
 }
 
 /// The world's name in DisplayLarge 57/64 at `axes` (wght, wdth); a name
@@ -657,7 +657,7 @@ fn text_block(
         out.push(play_primary(w));
     }
     if b.add(Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Outlined).id_salt(("home-world-shuffle", &w.key))).clicked() {
-        out.push(Command::PlayTracks { tracks: w.shuffled.clone(), start: 0, context: format!("мира «{}»", w.title) });
+        out.push(Command::PlayTracks { tracks: w.shuffled.clone(), start: 0, context: nikgob_view::QueueOrigin::World(w.title.clone()) });
     }
     let more = b.add(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Standard).tooltip("Ещё").id_salt(("home-world-more", &w.key)));
     let items = world_items(state.home.worlds.len());
@@ -795,7 +795,7 @@ fn cards_row(
         if clicked && live {
             match &c.go {
                 WorldGo::Player => go = Some(Go::Player),
-                WorldGo::Play(t) => out.push(Command::PlayTracks { tracks: t.clone(), start: 0, context: format!("мира «{}»", w.title) }),
+                WorldGo::Play(t) => out.push(Command::PlayTracks { tracks: t.clone(), start: 0, context: nikgob_view::QueueOrigin::World(w.title.clone()) }),
                 WorldGo::Release(r) => go = Some(Go::Route(Route::Release(*r))),
                 WorldGo::Stream(r) => go = Some(Go::Route(Route::Stream(nikgob_view::StreamPage::Album(r.clone())))),
             }

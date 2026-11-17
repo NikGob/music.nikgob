@@ -59,6 +59,7 @@ pub(crate) struct Shared {
     pub(crate) text: String,
     /// What the toast says.
     pub(crate) toast: String,
+    pub(crate) kind: v::ToastKind,
 }
 
 /// A service page a share can start from.
@@ -141,6 +142,13 @@ impl Outcome {
                 }
             }
             Self::Nothing => "Нет в сервисах — скопировано название".into(),
+        }
+    }
+
+    fn toast_kind(&self) -> v::ToastKind {
+        match self {
+            Self::Everywhere { .. } | Self::Service { .. } => v::ToastKind::Success,
+            Self::Nothing => v::ToastKind::Info,
         }
     }
 }
@@ -475,8 +483,8 @@ impl Worker {
         // The lookup can take a few seconds: say it started (the result
         // replaces this toast).
         self.drop_share_toast();
-        self.toast("Ищу ссылку…", None);
-        self.streaming.share_toast = Some(self.toast_id);
+        let id = self.push_toast(v::ToastKind::Working, "Ищу ссылку…".into(), None, None, false);
+        self.streaming.share_toast = Some(id);
         self.streaming.spawn(async move {
             let (outcome, text) = run(job).await;
             Msg::Shared {
@@ -486,6 +494,7 @@ impl Worker {
                     link: outcome.link(),
                     text,
                     toast: outcome.toast(),
+                    kind: outcome.toast_kind(),
                 },
             }
         });
@@ -607,7 +616,7 @@ impl Worker {
         let copied = result.link.clone().unwrap_or_else(|| result.text.clone());
         if copied.is_empty() {
             self.publish(|s| s.share = None);
-            self.toast("Нечем поделиться", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).nothing_to_share, None);
             return;
         }
         self.streaming.clipboard_id += 1;
@@ -624,7 +633,7 @@ impl Worker {
             });
             s.clipboard = Some(request);
         });
-        self.toast(result.toast, None);
+        self.push_toast(result.kind, result.toast, None, None, false);
     }
 }
 

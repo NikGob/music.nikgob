@@ -277,7 +277,7 @@ impl Worker {
         let Some(path) = self.own_path(track) else {
             // A song without a file and without an artist or a title to
             // keep its text under.
-            self.toast("Не получилось сохранить текст: неясно, чья это песня", None);
+            self.toast_err("Не получилось сохранить текст: неясно, чья это песня", None);
             return;
         };
         let Some(svc) = self.import.as_ref() else { return };
@@ -295,7 +295,7 @@ impl Worker {
             Ok(t) => t,
             Err(e) => {
                 log::warn!("saving the own lyrics: {e}");
-                self.toast(format!("Не получилось сохранить текст: {e}"), None);
+                self.toast_err(format!("Не получилось сохранить текст: {e}"), None);
                 return;
             }
         };
@@ -332,7 +332,7 @@ impl Worker {
             Ok(None) => false,
             Err(e) => {
                 log::warn!("removing the own lyrics of {track}: {e}");
-                self.toast(format!("Не получилось убрать свой текст: {e}"), None);
+                self.toast_err(format!("Не получилось убрать свой текст: {e}"), None);
                 return;
             }
         };
@@ -351,7 +351,8 @@ impl Worker {
             });
         }
         if undo {
-            self.toast("Свой текст в корзине", Some(("Отменить".to_owned(), nikgob_view::Command::RestoreOwnLyrics(track))));
+            let act = self.undo_action(nikgob_view::Command::RestoreOwnLyrics(track));
+            self.toast_ok("Свой текст в корзине", Some(act));
         }
     }
 
@@ -363,7 +364,7 @@ impl Worker {
             Ok(text) => self.own_lyrics_kept(track, Ok(text)),
             Err(e) => {
                 log::warn!("bringing back the own lyrics of {track}: {e}");
-                self.toast(format!("Не получилось вернуть свой текст: {e}"), None);
+                self.toast_err(format!("Не получилось вернуть свой текст: {e}"), None);
             }
         }
     }
@@ -410,7 +411,7 @@ impl Worker {
     /// next to it ([`Self::lyrics_imported`]).
     fn keep_with_song(&mut self, track: TrackId, keep: Keep) {
         let Some(yt) = self.service(Service::Youtube) else {
-            self.toast("YouTube Music выключен", None);
+            self.toast_err("YouTube Music выключен", None);
             return;
         };
         let Some(src) = self.timing_stream(track).filter(|s| s.kind == SourceKind::Youtube) else { return };
@@ -421,7 +422,7 @@ impl Worker {
             let result = yt.save_audio(&locator, &dir).await.map_err(|e| e.to_string());
             Internal::Align(Msg::SongSaved { track, result })
         });
-        self.toast("Сохраняю песню с YouTube…", None);
+        self.toast_work("Сохраняю песню с YouTube…", None);
     }
 
     pub(crate) fn song_saved(&mut self, track: TrackId, result: Result<PathBuf, String>) {
@@ -438,7 +439,7 @@ impl Worker {
             Err(e) => {
                 log::warn!("saving a song for its lyrics: {e}");
                 self.align.after_import.remove(&track);
-                self.toast(format!("Не получилось сохранить песню: {e}"), None);
+                self.toast_err(format!("Не получилось сохранить песню: {e}"), None);
             }
         }
     }
@@ -489,7 +490,7 @@ impl Worker {
         let Some(track) = self.align.saved_audio.remove(path) else { return };
         let _ = std::fs::remove_file(path);
         if self.align.after_import.remove(&track).is_some() {
-            self.toast("Не получилось сохранить песню", None);
+            self.toast_err("Не получилось сохранить песню", None);
         }
     }
 
@@ -500,7 +501,7 @@ impl Worker {
             Ok(t) => t,
             Err(e) => {
                 log::warn!("saving lyrics: {e}");
-                self.toast(format!("Не получилось сохранить текст: {e}"), None);
+                self.toast_err(format!("Не получилось сохранить текст: {e}"), None);
                 return;
             }
         };

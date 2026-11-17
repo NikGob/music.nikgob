@@ -960,7 +960,7 @@ impl Worker {
         if !self.cover_refresh.insert(id) {
             return;
         }
-        self.toast(LOOKING, None);
+        self.toast_work(LOOKING, None);
         let lib = self.lib.clone();
         let root = self.res.root().to_owned();
         let masters = self.import.as_ref().map(|s| s.config().masters_dir());
@@ -1036,12 +1036,12 @@ impl Worker {
                     Ok(()) => {
                         self.reload_after_import();
                         if !changed {
-                            self.toast("Лучшей обложки не нашлось", None);
+                            self.toast_info("Лучшей обложки не нашлось", None);
                         }
                     }
                     Err(e) => {
                         log::warn!("cover refresh of {id}: {e}");
-                        self.toast("Не получилось обновить обложку", None);
+                        self.toast_err("Не получилось обновить обложку", None);
                     }
                 }
             }
@@ -1061,17 +1061,17 @@ impl Worker {
                     }
                     Err(e) => {
                         log::warn!("cover refresh of {id}: {e}");
-                        self.toast("Не получилось обновить обложку", None);
+                        self.toast_err("Не получилось обновить обложку", None);
                     }
                 }
             }
             Ok(Refreshed::Nothing) => {
                 log::info!("cover refresh of {id}: nothing to pick from");
-                self.toast("Лучшей обложки не нашлось", None);
+                self.toast_info("Лучшей обложки не нашлось", None);
             }
             Err(e) => {
                 log::warn!("cover refresh of {id}: {e}");
-                self.toast("Не получилось обновить обложку", None);
+                self.toast_err("Не получилось обновить обложку", None);
             }
         }
     }

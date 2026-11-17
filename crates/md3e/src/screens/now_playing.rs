@@ -994,7 +994,7 @@ pub fn show_on(
     {
         closed = true;
     }
-    let ctx_text = p.context_line();
+    let (ctx_text, ctx_link) = p.cached_context();
     let left_used = hui.min_rect().right() - header.left();
     let right_used = hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let more = ui.add(IconButton::new(Icon::MoreVert).tooltip("Ещё").id_salt("np-more"));
@@ -1045,7 +1045,7 @@ pub fn show_on(
         );
         // The album, playlist or artist it plays from: its name is a link to
         // its page, like the album under the title.
-        match (p.context_link(&ctx_text), p.context_page.clone()) {
+        match (ctx_link, p.context_page.clone()) {
             (Some(name), Some(page)) => {
                 let format = TypeRole::TitleSmall.style().text_format(s.on_surface_variant);
                 if crate::components::link_label(&mut tui, "np-context", &ctx_text, &[name], format).clicked.is_some() {

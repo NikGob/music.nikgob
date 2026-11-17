@@ -425,12 +425,13 @@ impl Worker {
         let head = format!("{}: {n} {likes} теперь в Любимых", service.display_name());
         if self.state.read().prefs.like_downloads {
             self.toast_open(
+                nikgob_view::ToastKind::Success,
                 format!("{head} · ждут скачивания"),
                 "Открыть",
                 nikgob_view::Link::Route(nikgob_view::Route::Downloads(nikgob_view::DownloadsTab::Wishlist)),
             );
         } else {
-            self.toast(head, None);
+            self.toast_ok(head, None);
         }
     }
 
@@ -568,7 +569,7 @@ impl Worker {
                     let _ = self.lib.delete_remote_like(remote);
                 }
             }
-            self.toast(
+            self.toast_err(
                 format!(
                     "Не получилось {} лайк в {}",
                     if on { "поставить" } else { "снять" },

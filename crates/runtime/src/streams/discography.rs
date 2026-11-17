@@ -36,7 +36,7 @@ use nikgob_core::streaming::{EntityKind, RemoteId, Service, StreamAlbum, StreamE
 use nikgob_metadata::text::{album_key, artist_key};
 use nikgob_view as v;
 
-use super::{Msg, error_text};
+use super::{Msg, error_text_in};
 use crate::Worker;
 
 /// How long a looked-up discography is good for…
@@ -335,7 +335,7 @@ impl Worker {
                 }
                 Err(e) => {
                     log::warn!("{}: discography of {artist}: {e}", f.service);
-                    errors.push(format!("{}: {}", f.service.display_name(), error_text(&e)));
+                    errors.push(format!("{}: {}", f.service.display_name(), error_text_in(&e, self.locale())));
                 }
             }
         }

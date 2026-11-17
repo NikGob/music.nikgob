@@ -200,7 +200,7 @@ impl Worker {
         match self.api_save(edit) {
             Ok(saved) => saved,
             Err(why) => {
-                self.toast(why, None);
+                self.toast_err(why, None);
                 false
             }
         }
@@ -233,7 +233,7 @@ impl Worker {
         }
         if let Err(e) = settings.save(&path) {
             log::error!("saving settings: {e}");
-            return Err("Не удалось сохранить настройки");
+            return Err(nikgob_core::i18n::errors_in(self.locale()).failed_save_prefs);
         }
         self.api.used_unsaved = false;
         self.api.used_saved_at = Some(Instant::now());
@@ -318,7 +318,8 @@ impl Worker {
                     None => false,
                 });
                 if revoked {
-                    self.toast(format!("Токен «{name}» отозван"), Some(("Отменить".to_owned(), Command::ApiRestoreToken(id))));
+                    let undo = self.undo_action(Command::ApiRestoreToken(id));
+                    self.toast_info(format!("Токен «{name}» отозван"), Some(undo));
                 }
             }
             Command::ApiRestoreToken(id) => {
@@ -430,7 +431,7 @@ impl Worker {
         if !tracks.is_empty() {
             let _ = self.log_err("плейлист", self.lib.playlist_add_many(p.id, tracks));
         }
-        self.toast(format!("Плейлист «{name}» сохранён"), None);
+        self.toast_ok(format!("Плейлист «{name}» сохранён"), None);
         self.library_edited(before, Vec::new());
     }
 

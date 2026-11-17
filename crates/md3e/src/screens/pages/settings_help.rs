@@ -37,6 +37,7 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SettingId {
     // Вид.
+    Language,
     Theme,
     Contrast,
     Scheme,
@@ -469,6 +470,33 @@ macro_rules! c {
     };
 }
 
+const fn lang_choice_help(pref: nikgob_core::i18n::LangPref, loc: nikgob_core::i18n::Locale) -> &'static str {
+    use nikgob_core::i18n::{LangPref, Locale};
+    match (pref, loc) {
+        (LangPref::Auto, Locale::Ru) => "Определяется по языку операционной системы.",
+        (LangPref::Auto, Locale::En) => "Follows your operating system language.",
+        (LangPref::Ru, Locale::Ru) => "Интерфейс на русском языке.",
+        (LangPref::Ru, Locale::En) => "Russian interface.",
+        (LangPref::En, Locale::Ru) => "Интерфейс на английском языке.",
+        (LangPref::En, Locale::En) => "English interface.",
+    }
+}
+
+const fn lang_choices(loc: nikgob_core::i18n::Locale) -> [Choice; nikgob_core::i18n::LangPref::ALL.len()] {
+    use nikgob_core::i18n::LangPref;
+    let mut out = [c!("", ""); LangPref::ALL.len()];
+    let mut i = 0;
+    while i < LangPref::ALL.len() {
+        let pref = LangPref::ALL[i];
+        out[i] = c!(pref.label_in(loc), lang_choice_help(pref, loc));
+        i += 1;
+    }
+    out
+}
+
+static LANG_CHOICES_RU: [Choice; nikgob_core::i18n::LangPref::ALL.len()] = lang_choices(nikgob_core::i18n::Locale::Ru);
+static LANG_CHOICES_EN: [Choice; nikgob_core::i18n::LangPref::ALL.len()] = lang_choices(nikgob_core::i18n::Locale::En);
+
 const OPUS: [u32; 4] = [128, 160, 192, 256];
 /// «Уведомления на экране», seconds; 0 = until closed.
 const TOAST_TIMES: [u8; 4] = [4, 6, 10, 0];
@@ -501,7 +529,7 @@ impl SettingId {
             | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsCountdown | WaveFallback | LyricsReturn | LyricsGenius
             | SaveLyrics | LyricsCheck | LyricsWordsPlaying | LyricsLinesAuto | LyricsStreams | LyricsStreamKeep | LyricsRecognize
             | LyricsModels | LyricsKeepMisfits => TAB_LYRICS,
-            Theme | Scheme | Contrast | CoverShape | ShapeRange | ShapePick | CoverSpin | CoverDir | CoverPulse | CoverPauseMorph
+            Language | Theme | Scheme | Contrast | CoverShape | ShapeRange | ShapePick | CoverSpin | CoverDir | CoverPulse | CoverPauseMorph
             | CoverSpinSpeed | CoverPulseStrength | HomeSections
             | Ring | RingStyle | Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity
             | BgSpeed | BgReact | BgColors | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape
@@ -548,7 +576,7 @@ impl SettingId {
             | LyricsStyle | LyricsUnit | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsGap
             | LyricsCountdown | LyricsGenius | SaveLyrics | LyricsWordsPlaying | LyricsLinesAuto | LyricsStreams
             // Вид: the theme, each part of the track screen and which kind.
-            | Theme | Scheme | Contrast | CoverShape | ShapeRange | ShapePick | CoverSpin | CoverPulse | Ring
+            | Language | Theme | Scheme | Contrast | CoverShape | ShapeRange | ShapePick | CoverSpin | CoverPulse | Ring
             | Ambient | BgShapes | ProgressWave | NpVolume | HomeSections | HiddenMixes | AlbumDate | LikedAlbumsPlace
             | UiScale | RailCompact | ReducedMotion
             // Сервисы: the accounts, their sound and their playlists.
@@ -605,11 +633,12 @@ impl SettingId {
         }
     }
 
-    /// The row's name: the thing it changes, as the page shows it (never
-    /// its value).
-    pub fn label(self) -> &'static str {
+    /// The row's name in `loc`: the thing it changes, as the page shows it
+    /// (never its value).
+    pub fn label_in(self, loc: nikgob_core::i18n::Locale) -> &'static str {
         use SettingId::*;
         match self {
+            Language => nikgob_core::i18n::settings_in(loc).language_label,
             Theme => "Тема",
             Contrast => "Контраст",
             Scheme => "Схема цвета",
@@ -811,6 +840,11 @@ impl SettingId {
         }
     }
 
+    /// The row's name in the active process locale.
+    pub fn label(self) -> &'static str {
+        self.label_in(nikgob_core::i18n::locale())
+    }
+
     /// Not tested by users yet: the row carries a «Бета» mark and its card
     /// says so.
     pub fn beta(self) -> bool {
@@ -818,10 +852,11 @@ impl SettingId {
         matches!(self, ImportSpotify | ImportYouTube | ImportSoundCloud | ImportFiles | LyricsRecognize)
     }
 
-    /// One line on what the option changes.
-    pub fn help(self) -> &'static str {
+    /// One line on what the option changes in `loc`.
+    pub fn help_in(self, loc: nikgob_core::i18n::Locale) -> &'static str {
         use SettingId::*;
         match self {
+            Language => nikgob_core::i18n::settings_in(loc).language_help,
             Theme => "Светлый или тёмный фон приложения.",
             Contrast => "Насколько текст и кнопки выделяются на фоне. Выше — читать легче, но цвета резче.",
             Scheme => "Приложение окрашивается в цвета обложки играющего трека. Здесь выбирается, насколько ярко.",
@@ -1051,11 +1086,20 @@ impl SettingId {
         }
     }
 
-    /// The options of a choice row (segmented buttons or a menu), in order;
-    /// empty for every other row.
-    pub fn choices(self) -> &'static [Choice] {
+    /// One line on what the option changes in the active process locale.
+    pub fn help(self) -> &'static str {
+        self.help_in(nikgob_core::i18n::locale())
+    }
+
+    /// The options of a choice row (segmented buttons or a menu) in `loc`, in
+    /// order; empty for every other row.
+    pub fn choices_in(self, loc: nikgob_core::i18n::Locale) -> &'static [Choice] {
         use v::presets::Area;
         match self {
+            Self::Language => match loc {
+                nikgob_core::i18n::Locale::Ru => &LANG_CHOICES_RU,
+                nikgob_core::i18n::Locale::En => &LANG_CHOICES_EN,
+            },
             Self::Preset(Area::Recs) => &[
                 c!("Только моё", "Радио, миксы и автовоспроизведение берут только твою музыку."),
                 c!("Сбалансировано", "Немного новой музыки в радио и миксах, изредка песня наугад."),
@@ -1324,11 +1368,17 @@ impl SettingId {
         }
     }
 
+    /// The options of a choice row in the active process locale.
+    pub fn choices(self) -> &'static [Choice] {
+        self.choices_in(nikgob_core::i18n::locale())
+    }
+
     /// Which of [`Self::choices`] `p` has.
     pub fn chosen(self, p: &Prefs) -> usize {
         match self {
             // None matching: «Свои», the button after the presets.
             Self::Preset(a) => a.current(p).unwrap_or(a.names().len()),
+            Self::Language => nikgob_core::i18n::LangPref::ALL.iter().position(|l| *l == p.language).unwrap_or(0),
             Self::Theme => match p.theme {
                 v::ThemeMode::Light => 0,
                 v::ThemeMode::Dark => 1,
@@ -1425,6 +1475,9 @@ impl SettingId {
         match self {
             // As `PrefPatch::Preset` does it (from «Свои», the values are kept).
             Self::Preset(a) => a.apply(p, i),
+            Self::Language => {
+                p.language = nikgob_core::i18n::LangPref::ALL[i.min(nikgob_core::i18n::LangPref::ALL.len() - 1)];
+            }
             Self::Theme => p.theme = [v::ThemeMode::Light, v::ThemeMode::Dark, v::ThemeMode::System][i.min(2)],
             Self::Contrast => p.contrast = i.min(2) as u8,
             Self::NpVolume => (p.np_volume, p.np_volume_pop) = [(true, false), (false, true), (false, false)][i.min(2)],
@@ -2258,7 +2311,8 @@ pub fn finish(ui: &mut Ui, prefs: &mut Prefs, samples: bool) {
         if content < 1.0 {
             ctx.request_repaint();
         }
-        let layout = Layout::new(&ctx, row, body, samples);
+        let loc = prefs.resolved_locale();
+        let layout = Layout::new(&ctx, row, body, samples, loc);
         // Next to this row's own ⓘ, not under the row: a group title's row
         // is the whole list, and anchoring there dropped the card in the corner.
         let anchor = row.button;
@@ -2448,17 +2502,17 @@ const BETA_CARD: &str = "Функция в бета-тестировании. ";
 const CLOSE_W: f32 = 32.0;
 
 impl Layout {
-    fn new(ctx: &egui::Context, row: &Row, body: Body, samples: bool) -> Self {
+    fn new(ctx: &egui::Context, row: &Row, body: Body, samples: bool, loc: nikgob_core::i18n::Locale) -> Self {
         let pinned = true;
         let s = Theme::get(ctx).scheme;
         let painter = ctx.layer_painter(egui::LayerId::new(Order::Tooltip, Id::new("settings-help-measure")));
-        let choices = row.id.choices();
+        let choices = row.id.choices_in(loc);
         let kind = if matches!(body, Body::All | Body::Table) || !samples { None } else { row.id.preview() };
         let width = if body == Body::Table { TABLE_W } else { CARD_W };
         let (title, help) = match body {
             Body::Option(i) => (format!("{} · {}", row.label, choices[i].label), choices[i].help.to_owned()),
-            _ if row.id.beta() => (row.label.clone(), BETA_CARD.to_owned() + row.id.help()),
-            _ => (row.label.clone(), row.id.help().to_owned()),
+            _ if row.id.beta() => (row.label.clone(), BETA_CARD.to_owned() + row.id.help_in(loc)),
+            _ => (row.label.clone(), row.id.help_in(loc).to_owned()),
         };
         let close_w = if pinned { CLOSE_W } else { 0.0 };
         let title = para(&painter, TypeRole::TitleSmall, &title, s.on_surface, width - close_w);
@@ -3103,7 +3157,7 @@ mod tests {
     fn every_choice_round_trips_through_prefs() {
         use SettingId as S;
         for id in [
-            S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::AlbumDate, S::RingStyle, S::Ambient,
+            S::Language, S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::AlbumDate, S::RingStyle, S::Ambient,
             S::BgShapes, S::BgColors, S::LyricsStyle, S::LyricsUnit, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::AlbumLike, S::SingleLike, S::LikedAlbumsPlace, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
@@ -3119,6 +3173,29 @@ mod tests {
                 assert!(!id.choices()[i].help.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn language_setting_uses_prefs_only_and_exposes_native_endonyms() {
+        use nikgob_core::i18n::{LangPref, Locale};
+        let id = SettingId::Language;
+        assert_eq!(id.tab(), TAB_LOOK);
+        assert_eq!(id.level(), Level::Simple);
+        assert_eq!(id.label_in(Locale::Ru), "Язык");
+        assert_eq!(id.label_in(Locale::En), "Language");
+        let ru_labels: Vec<&str> = id.choices_in(Locale::Ru).iter().map(|c| c.label).collect();
+        let en_labels: Vec<&str> = id.choices_in(Locale::En).iter().map(|c| c.label).collect();
+        assert_eq!(ru_labels, ["Системный", "Русский", "English"]);
+        assert_eq!(en_labels, ["System", "Русский", "English"]);
+
+        let before_global = nikgob_core::i18n::locale();
+        for (i, pref) in LangPref::ALL.iter().enumerate() {
+            let mut p = Prefs::default();
+            id.choose(&mut p, i);
+            assert_eq!(p.language, *pref);
+            assert_eq!(id.chosen(&p), i);
+        }
+        assert_eq!(nikgob_core::i18n::locale(), before_global);
     }
 
     /// A preset row's options are its presets: each one picked reads back,

@@ -301,7 +301,7 @@ fn library(
             "search",
             &r.tracks,
             Lead::Cover,
-            &PlayFrom::SearchRows("поиска".to_owned()),
+            &PlayFrom::SearchRows(nikgob_view::QueueOrigin::Search { service: None }),
             state,
             pages,
             out,
@@ -592,7 +592,7 @@ fn results(
         Some(x) => {
             if !x.tracks.is_empty() {
                 part_label(ui, "Треки");
-                let from = streams::StreamFrom::SearchRows(format!("поиска {}", service.display_name()));
+                let from = streams::StreamFrom::SearchRows(nikgob_view::QueueOrigin::Search { service: Some(service) });
                 nav = streams::track_rows(ui, &format!("sv-tracks-{salt}"), &x.tracks, false, &from, state, pages, out)
                     .or(nav.take());
             }
@@ -818,12 +818,12 @@ fn track_rows(
         let id = format!("sa-track-{i}");
         nav = match &a.tracks[i] {
             SearchTrack::Library(t) => {
-                let from = PlayFrom::Search { picks: picks.to_vec(), at, context: context.to_owned() };
+                let from = PlayFrom::Search { picks: picks.to_vec(), at, context: context.into() };
                 let opts = widgets::TrackListOpts { mark_local: true, ..Default::default() };
                 widgets::track_list_ext(ui, &id, std::slice::from_ref(t), Lead::Cover, &from, opts, state, pages, out)
             }
             SearchTrack::Stream(t) => {
-                let from = streams::StreamFrom::Search { picks: picks.to_vec(), at, context: context.to_owned() };
+                let from = streams::StreamFrom::Search { picks: picks.to_vec(), at, context: context.into() };
                 streams::track_rows(ui, &id, std::slice::from_ref(t), false, &from, state, pages, out)
             }
         }
@@ -846,7 +846,7 @@ struct TopView {
 }
 
 fn top_view(top: &TopResult, picks: &[SearchPick], context: &str) -> TopView {
-    let play_queue = || Command::PlaySearch { tracks: picks.to_vec(), start: 0, context: context.to_owned() };
+    let play_queue = || Command::PlaySearch { tracks: picks.to_vec(), start: 0, context: context.into() };
     match top {
         TopResult::Artist(SearchArtist::Library(a)) => TopView {
             title: a.name.clone(),

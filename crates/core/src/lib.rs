@@ -4,6 +4,7 @@ pub mod api_token;
 pub mod clip_title;
 pub mod cover_frame;
 pub mod credit;
+pub mod i18n;
 pub mod indexer;
 pub mod lyrics;
 pub mod model;

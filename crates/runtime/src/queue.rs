@@ -4,7 +4,7 @@
 //! or drag a specific occurrence of a track that appears twice.
 
 use nikgob_core::model::TrackId;
-use nikgob_view::{ListKind, ListShuffle, Repeat};
+use nikgob_view::{ListKind, ListShuffle, QueueOrigin, Repeat};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,7 +23,7 @@ pub struct Queue {
     pos: Option<usize>,
     pub shuffle: bool,
     pub repeat: Repeat,
-    pub context: Option<String>,
+    pub origin: QueueOrigin,
     next_id: u64,
     /// Bumped whenever the whole queue is replaced ([`Self::set`],
     /// [`Self::restore`]): a radio knows its queue is gone.
@@ -51,6 +51,8 @@ pub struct Snapshot {
     /// 0 off, 1 all, 2 one.
     pub repeat: u8,
     pub context: Option<String>,
+    #[serde(default)]
+    pub origin: Option<QueueOrigin>,
     /// [`Queue::list_kind`].
     pub kind: Option<ListKind>,
 }
@@ -71,7 +73,8 @@ impl Queue {
                 Repeat::All => 1,
                 Repeat::One => 2,
             },
-            context: self.context.clone(),
+            context: self.origin.legacy_text(),
+            origin: Some(self.origin.clone()),
             kind: self.kind,
         }
     }
@@ -84,7 +87,7 @@ impl Queue {
         self.original = if original.len() == self.items.len() { original } else { self.items.clone() };
         self.pos = s.pos.filter(|&p| p < self.items.len());
         self.restore_modes(s);
-        self.context = s.context.clone();
+        self.origin = s.origin.clone().unwrap_or_else(|| QueueOrigin::from_legacy(s.context.as_deref()));
         self.kind = s.kind;
         self.next_kind = None;
         self.generation += 1;
@@ -106,6 +109,11 @@ impl Queue {
         self.generation
     }
 
+    /// Updates the queue origin label in place without advancing [`Self::generation`].
+    pub fn set_origin(&mut self, origin: QueueOrigin) {
+        self.origin = origin;
+    }
+
     /// See the field: the kind of the list playing, if it has one.
     pub fn list_kind(&self) -> Option<ListKind> {
         self.kind
@@ -122,8 +130,8 @@ impl Queue {
     /// Replaces the queue and starts at `start`. With shuffle on, the
     /// starting track plays first and all the others follow shuffled
     /// (shuffle stays as it was: a new queue never turns it off).
-    pub fn set(&mut self, tracks: &[TrackId], start: usize, context: Option<String>) {
-        self.set_ordered(tracks, start, context);
+    pub fn set(&mut self, tracks: &[TrackId], start: usize, origin: QueueOrigin) {
+        self.set_ordered(tracks, start, origin);
         if self.shuffle {
             self.shuffle_all_but_current();
         }
@@ -131,23 +139,23 @@ impl Queue {
 
     /// [`Self::set`] for a whole list the user did not start at a track:
     /// with shuffle on a random track starts, else the first one.
-    pub fn set_from(&mut self, tracks: &[TrackId], start: Option<usize>, context: Option<String>) {
+    pub fn set_from(&mut self, tracks: &[TrackId], start: Option<usize>, origin: QueueOrigin) {
         let start = match start {
             Some(s) => s,
             None if self.shuffle && !tracks.is_empty() => fastrand::usize(..tracks.len()),
             None => 0,
         };
-        self.set(tracks, start, context);
+        self.set(tracks, start, origin);
     }
 
     /// Replaces the queue keeping the given order even with shuffle on (a
     /// radio's picks are a path, not a list to shuffle). Shuffle itself
     /// stays on: turning it off and on again shuffles what is left.
-    pub fn set_ordered(&mut self, tracks: &[TrackId], start: usize, context: Option<String>) {
+    pub fn set_ordered(&mut self, tracks: &[TrackId], start: usize, origin: QueueOrigin) {
         let items: Vec<Entry> = tracks.iter().map(|&t| self.entry(t)).collect();
         self.original = items.clone();
         self.items = items;
-        self.context = context;
+        self.origin = origin;
         self.generation += 1;
         self.kind = self.next_kind.take();
         self.pos = (!self.items.is_empty()).then(|| start.min(self.items.len() - 1));
@@ -166,11 +174,11 @@ impl Queue {
     /// in their order ([`Self::set_ordered`]), or with `shuffled`
     /// («Перемешивать радио и автовоспроизведение») and shuffle on as a
     /// whole list under shuffle ([`Self::set_from`]).
-    pub fn set_path(&mut self, tracks: &[TrackId], context: Option<String>, shuffled: bool) {
+    pub fn set_path(&mut self, tracks: &[TrackId], origin: QueueOrigin, shuffled: bool) {
         if shuffled && self.shuffle {
-            self.set_from(tracks, None, context);
+            self.set_from(tracks, None, origin);
         } else {
-            self.set_ordered(tracks, 0, context);
+            self.set_ordered(tracks, 0, origin);
         }
     }
 
@@ -503,7 +511,7 @@ mod tests {
     fn plays_through_and_stops() {
         let t = ids(3);
         let mut q = Queue::default();
-        q.set(&t, 0, None);
+        q.set(&t, 0, QueueOrigin::None);
         assert_eq!(q.current().map(|e| e.track), Some(t[0]));
         assert_eq!(q.advance_auto().map(|e| e.track), Some(t[1]));
         assert_eq!(q.advance_auto().map(|e| e.track), Some(t[2]));
@@ -514,7 +522,7 @@ mod tests {
     fn repeat_modes() {
         let t = ids(2);
         let mut q = Queue::default();
-        q.set(&t, 1, None);
+        q.set(&t, 1, QueueOrigin::None);
         q.repeat = Repeat::All;
         assert_eq!(q.advance_auto().map(|e| e.track), Some(t[0]));
         q.repeat = Repeat::One;
@@ -529,12 +537,12 @@ mod tests {
     fn ahead_is_what_comes_after_the_current_one() {
         let t = ids(4);
         let mut q = Queue::default();
-        q.set(&t, 1, None);
+        q.set(&t, 1, QueueOrigin::None);
         let tracks = |q: &Queue| q.ahead(2).iter().map(|e| e.track).collect::<Vec<_>>();
         assert_eq!(tracks(&q), [t[2], t[3]]);
         q.repeat = Repeat::One;
         assert_eq!(tracks(&q), [t[2], t[3]], "not the current one again");
-        q.set(&t, 3, None);
+        q.set(&t, 3, QueueOrigin::None);
         q.repeat = Repeat::All;
         assert_eq!(tracks(&q), [t[0], t[1]], "the first ones again past the end");
         q.repeat = Repeat::Off;
@@ -549,13 +557,13 @@ mod tests {
         let mut q = Queue::default();
         q.repeat = Repeat::All;
         let tracks = |q: &Queue, n: usize| q.ahead(n).iter().map(|e| e.track).collect::<Vec<_>>();
-        q.set(&t, 1, None);
+        q.set(&t, 1, QueueOrigin::None);
         assert_eq!(tracks(&q, 2), [t[2], t[0]], "the penultimate one");
         assert_eq!(tracks(&q, 5), [t[2], t[0]], "each once, not the current one");
-        q.set(&t, 2, None);
+        q.set(&t, 2, QueueOrigin::None);
         assert_eq!(tracks(&q, 2), [t[0], t[1]], "the last one");
         assert_eq!(tracks(&q, 5), [t[0], t[1]]);
-        q.set(&t[..1], 0, None);
+        q.set(&t[..1], 0, QueueOrigin::None);
         assert!(q.ahead(2).is_empty(), "a single one is only itself");
     }
 
@@ -563,7 +571,7 @@ mod tests {
     fn shuffle_keeps_current_and_restores_order() {
         let t = ids(20);
         let mut q = Queue::default();
-        q.set(&t, 5, None);
+        q.set(&t, 5, QueueOrigin::None);
         q.set_shuffle(true);
         assert_eq!(q.current().map(|e| e.track), Some(t[5]));
         // The current track first, every other one of the list after it.
@@ -582,7 +590,7 @@ mod tests {
     fn manual_reorder_survives_shuffle_toggle() {
         let t = ids(4);
         let mut q = Queue::default();
-        q.set(&t, 0, None);
+        q.set(&t, 0, QueueOrigin::None);
         let up: Vec<u64> = q.upcoming().iter().map(|e| e.id).collect();
         assert!(q.move_next_to(up[2], up[0], false)); // t3 first
         q.set_shuffle(true);
@@ -594,7 +602,7 @@ mod tests {
     fn enqueue_after_the_queue_played_out_starts_with_the_new_track() {
         let t = ids(2);
         let mut q = Queue::default();
-        q.set(&t, 0, None);
+        q.set(&t, 0, QueueOrigin::None);
         assert!(q.advance_auto().is_some());
         assert_eq!(q.advance_auto(), None);
         let extra = ids(1);
@@ -606,7 +614,7 @@ mod tests {
     fn history_is_what_came_before_and_jumping_back_works() {
         let t = ids(4);
         let mut q = Queue::default();
-        q.set(&t, 0, None);
+        q.set(&t, 0, QueueOrigin::None);
         assert!(q.history().is_empty());
         q.advance_auto();
         q.skip_forward();
@@ -617,7 +625,7 @@ mod tests {
         assert!(q.history().is_empty());
         assert_eq!(q.upcoming().len(), 3);
         // Played out: nothing is current, so nothing is "before" it.
-        q.set(&t, 3, None);
+        q.set(&t, 3, QueueOrigin::None);
         assert_eq!(q.history().len(), 3);
         assert_eq!(q.advance_auto(), None);
         assert!(q.history().is_empty());
@@ -627,7 +635,7 @@ mod tests {
     fn played_tracks_can_be_moved_and_removed_like_upcoming_ones() {
         let t = ids(5);
         let mut q = Queue::default();
-        q.set(&t, 2, None);
+        q.set(&t, 2, QueueOrigin::None);
         let all: Vec<u64> = q.history().iter().chain(q.current().iter()).chain(q.upcoming()).map(|e| e.id).collect();
         let cur = all[2];
         // A played track back after the current one: it plays next.
@@ -654,7 +662,7 @@ mod tests {
     fn a_saved_queue_comes_back_the_same() {
         let t = ids(5);
         let mut q = Queue::default();
-        q.set(&t, 2, Some("Альбом".into()));
+        q.set(&t, 2, QueueOrigin::Album("Альбом".into()));
         q.set_shuffle(true);
         q.repeat = Repeat::All;
         let saved = q.snapshot();
@@ -662,10 +670,24 @@ mod tests {
         let mut back = Queue::default();
         back.restore(&serde_json::from_str(&json).unwrap());
         assert_eq!(back.snapshot(), saved);
+        assert_eq!(back.origin, QueueOrigin::Album("Альбом".into()));
         assert_eq!(back.current().map(|e| e.track), q.current().map(|e| e.track));
         back.set_shuffle(false);
         q.set_shuffle(false);
         assert_eq!(back.tracks(), q.tracks());
+
+        // Legacy session.json without `origin` parses `context`.
+        let legacy = serde_json::json!({
+            "items": t,
+            "original": [0, 1, 2, 3, 4],
+            "pos": 0,
+            "shuffle": false,
+            "repeat": 0,
+            "context": "альбома «Группа крови»"
+        });
+        let legacy_snap: Snapshot = serde_json::from_value(legacy).unwrap();
+        back.restore(&legacy_snap);
+        assert_eq!(back.origin, QueueOrigin::Album("Группа крови".into()));
     }
 
     /// A long shuffled queue saves in time linear in its length (it is
@@ -674,7 +696,7 @@ mod tests {
     fn a_long_queue_snapshots_quickly() {
         let t = ids(50_000);
         let mut q = Queue::default();
-        q.set(&t, 0, None);
+        q.set(&t, 0, QueueOrigin::None);
         q.set_shuffle(true);
         let started = std::time::Instant::now();
         let saved = q.snapshot();
@@ -704,7 +726,7 @@ mod tests {
         let t = ids(30);
         let mut q = Queue::default();
         q.set_shuffle(true);
-        q.set(&t, 7, Some("Альбом".into()));
+        q.set(&t, 7, QueueOrigin::Album("Альбом".into()));
         assert!(q.shuffle);
         assert_eq!(q.current().map(|e| e.track), Some(t[7]));
         assert!(q.history().is_empty());
@@ -714,7 +736,7 @@ mod tests {
         assert_ne!(up, others, "the rest is shuffled");
         // Another list after it: shuffle is still on.
         let u = ids(5);
-        q.set(&u, 0, Some("Плейлист".into()));
+        q.set(&u, 0, QueueOrigin::Playlist("Плейлист".into()));
         assert!(q.shuffle);
         assert_eq!(q.current().map(|e| e.track), Some(u[0]));
         assert!(same_tracks(&q.tracks(), &u));
@@ -725,16 +747,16 @@ mod tests {
         let t = ids(12);
         let mut q = Queue::default();
         q.set_shuffle(true);
-        q.set_from(&t, None, None);
+        q.set_from(&t, None, QueueOrigin::None);
         let cur = q.current().map(|e| e.track).unwrap();
         assert!(t.contains(&cur));
         assert!(q.history().is_empty());
         assert!(same_tracks(&q.tracks(), &t));
         // A picked track starts even under shuffle.
-        q.set_from(&t, Some(4), None);
+        q.set_from(&t, Some(4), QueueOrigin::None);
         assert_eq!(q.current().map(|e| e.track), Some(t[4]));
         q.set_shuffle(false);
-        q.set_from(&t, None, None);
+        q.set_from(&t, None, QueueOrigin::None);
         assert_eq!(q.current().map(|e| e.track), Some(t[0]));
         assert_eq!(q.tracks(), t);
     }
@@ -744,7 +766,7 @@ mod tests {
         let t = ids(10);
         let mut q = Queue::default();
         q.set_shuffle(true);
-        q.set(&t, 0, None);
+        q.set(&t, 0, QueueOrigin::None);
         let seventh = entry_of(&q, t[6]);
         q.jump(seventh);
         q.set_shuffle(false);
@@ -761,7 +783,7 @@ mod tests {
         let (next, last) = (ids(1), ids(1));
         let mut q = Queue::default();
         q.set_shuffle(true);
-        q.set(&t, 0, None);
+        q.set(&t, 0, QueueOrigin::None);
         q.jump(entry_of(&q, t[4]));
         q.play_next(&next);
         q.enqueue(&last);
@@ -781,7 +803,7 @@ mod tests {
     fn shuffle_on_mid_list_puts_the_current_first_and_shuffles_all_the_others() {
         let t = ids(30);
         let mut q = Queue::default();
-        q.set(&t, 0, None);
+        q.set(&t, 0, QueueOrigin::None);
         for _ in 0..5 {
             q.skip_forward();
         }
@@ -803,7 +825,7 @@ mod tests {
         let more = ids(5);
         let mut q = Queue::default();
         q.set_shuffle(true);
-        q.set(&t, 0, None);
+        q.set(&t, 0, QueueOrigin::None);
         // Autoplay / a radio goes on after the list.
         q.enqueue(&more);
         let up = tracks_of(q.upcoming());
@@ -823,7 +845,7 @@ mod tests {
         let new = ids(1);
         let mut q = Queue::default();
         q.set_shuffle(true);
-        q.set_ordered(&r, 0, Some("радио".into()));
+        q.set_ordered(&r, 0, QueueOrigin::Custom("радио".into()));
         assert!(q.shuffle);
         assert_eq!(q.tracks(), r);
         // New music spliced in after the third pick.
@@ -845,7 +867,7 @@ mod tests {
         let more = ids(5);
         let mut q = Queue::default();
         q.set_shuffle(true);
-        q.set(&t, 3, None);
+        q.set(&t, 3, QueueOrigin::None);
         q.enqueue_shuffled(&more);
         assert_eq!(q.len(), 15);
         assert_eq!(q.current().map(|e| e.track), Some(t[3]));
@@ -880,7 +902,7 @@ mod tests {
         let t = ids(5);
         let mut q = Queue::default();
         q.new_list(ListShuffle::InOrder, Some(ListKind::OwnPlaylist));
-        q.set_from(&t, None, None);
+        q.set_from(&t, None, QueueOrigin::None);
         assert_eq!(q.list_kind(), Some(ListKind::OwnPlaylist));
         // Edits of the queue keep it.
         q.enqueue(&ids(2));
@@ -893,12 +915,12 @@ mod tests {
         assert_eq!(back.list_kind(), Some(ListKind::OwnPlaylist));
         // A radio (no kind) replaces it.
         q.new_list(ListShuffle::Button, None);
-        q.set_ordered(&t, 0, None);
+        q.set_ordered(&t, 0, QueueOrigin::None);
         assert_eq!(q.list_kind(), None);
         // A queue set without a new list has no kind either.
         q.new_list(ListShuffle::Button, Some(ListKind::Album));
-        q.set_from(&t, None, None);
-        q.set(&t, 0, None);
+        q.set_from(&t, None, QueueOrigin::None);
+        q.set(&t, 0, QueueOrigin::None);
         assert_eq!(q.list_kind(), None);
     }
 
@@ -909,24 +931,24 @@ mod tests {
         let mut q = Queue::default();
         q.set_shuffle(true);
         q.new_list(ListShuffle::Button, None);
-        q.set_from(&t, None, None);
+        q.set_from(&t, None, QueueOrigin::None);
         assert!(q.shuffle);
         assert!(same_tracks(&q.tracks(), &t));
         // «По порядку»: shuffle goes off and the list plays from its first track.
         q.new_list(ListShuffle::InOrder, None);
-        q.set_from(&t, None, None);
+        q.set_from(&t, None, QueueOrigin::None);
         assert!(!q.shuffle);
         assert_eq!(q.tracks(), t);
         assert_eq!(q.current().map(|e| e.track), Some(t[0]));
         // «По кнопке» with the button off: in order too.
         q.new_list(ListShuffle::Button, None);
-        q.set_from(&t, Some(4), None);
+        q.set_from(&t, Some(4), QueueOrigin::None);
         assert!(!q.shuffle);
         assert_eq!(q.tracks(), t);
         assert_eq!(q.current().map(|e| e.track), Some(t[4]));
         // «Вперемешку»: on, whatever the button was; a picked track first.
         q.new_list(ListShuffle::Shuffled, None);
-        q.set_from(&t, Some(7), None);
+        q.set_from(&t, Some(7), QueueOrigin::None);
         assert!(q.shuffle);
         assert_eq!(q.current().map(|e| e.track), Some(t[7]));
         assert!(same_tracks(&q.tracks(), &t));
@@ -934,7 +956,7 @@ mod tests {
         // «Перемешать» on a list played in order (as `play_list` does).
         q.new_list(ListShuffle::InOrder, None);
         q.shuffle = true;
-        q.set_from(&t, None, None);
+        q.set_from(&t, None, QueueOrigin::None);
         assert!(q.shuffle);
         assert!(same_tracks(&q.tracks(), &t));
         // Turned off by hand, the list's order comes back.
@@ -943,7 +965,7 @@ mod tests {
         assert_eq!(q.tracks(), t);
         assert_eq!(q.current(), Some(cur));
         q.new_list(ListShuffle::Shuffled, None);
-        q.set(&t, 3, None);
+        q.set(&t, 3, QueueOrigin::None);
         q.set_shuffle(false);
         assert_eq!(q.tracks(), t);
         assert_eq!(q.current().map(|e| e.track), Some(t[3]));
@@ -956,7 +978,7 @@ mod tests {
         let mut q = Queue::default();
         q.set_shuffle(true);
         // Off (the default): the picks and what joins them keep their order.
-        q.set_path(&r, Some("радио".into()), false);
+        q.set_path(&r, QueueOrigin::Custom("радио".into()), false);
         assert!(q.shuffle);
         assert_eq!(q.tracks(), r);
         let added = q.enqueue_path(&more, false);
@@ -965,7 +987,7 @@ mod tests {
         assert_eq!(up[up.len() - 5..].to_vec(), more);
         // On: the picks play shuffled, the order they came in is kept for
         // shuffle off.
-        q.set_path(&r, Some("радио".into()), true);
+        q.set_path(&r, QueueOrigin::Custom("радио".into()), true);
         assert!(q.shuffle);
         assert!(q.history().is_empty());
         assert!(same_tracks(&q.tracks(), &r));
@@ -981,7 +1003,7 @@ mod tests {
         assert_eq!(q.tracks(), want);
         assert_eq!(q.current(), Some(cur));
         // Shuffle off: the setting alone shuffles nothing.
-        q.set_path(&r, Some("радио".into()), true);
+        q.set_path(&r, QueueOrigin::Custom("радио".into()), true);
         assert_eq!(q.tracks(), r);
         let added = q.enqueue_path(&more, true);
         assert_eq!(tracks_of(&added), more);
@@ -992,7 +1014,7 @@ mod tests {
     fn edit_upcoming() {
         let t = ids(4);
         let mut q = Queue::default();
-        q.set(&t, 0, None);
+        q.set(&t, 0, QueueOrigin::None);
         let up: Vec<u64> = q.upcoming().iter().map(|e| e.id).collect();
         assert!(q.remove(up[0]));
         assert_eq!(q.upcoming().len(), 2);
@@ -1012,7 +1034,7 @@ mod tests {
     fn a_cleared_queue_comes_back() {
         let t = ids(5);
         let mut q = Queue::default();
-        q.set(&t, 2, None);
+        q.set(&t, 2, QueueOrigin::None);
         let cur = q.current().map(|e| e.id);
         let before: Vec<TrackId> = q.history().iter().map(|e| e.track).collect();
         let after: Vec<TrackId> = q.upcoming().iter().map(|e| e.track).collect();

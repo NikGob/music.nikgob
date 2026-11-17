@@ -4,7 +4,7 @@
 use nikgob_core::streaming::{LoginInput, Service, StreamError};
 use nikgob_view as v;
 
-use super::{Msg, error_text};
+use super::{Msg, error_text_in};
 use crate::Worker;
 
 /// Unix ms of `at`, rounded up to the whole minute (stable between ticks).
@@ -80,7 +80,8 @@ impl Worker {
 
     pub(crate) fn stream_login(&mut self, service: Service, input: LoginInput) {
         let Some(svc) = self.streams.iter().find(|s| s.service() == service).cloned() else {
-            self.toast(format!("{} не подключён", service.display_name()), None);
+            let msg = nikgob_core::i18n::ErrorStrings::service_not_connected_in(self.locale(), service.display_name());
+            self.toast_err(msg, None);
             return;
         };
         if !matches!(self.streaming.web_state.get(&service), Some(super::web_login::WebState::Running(_))) {
@@ -128,12 +129,13 @@ impl Worker {
                 // A login's own message (a busy port, a refused grant) is
                 // already for the user; the rest reads as any service error.
                 // Spotify without Premium is not connected at all.
+                let loc = self.locale();
                 let text = match &e {
                     StreamError::Network(m) if !m.trim().is_empty() => m.clone(),
                     StreamError::PremiumRequired if service == Service::Spotify => {
                         nikgob_core::streaming::SPOTIFY_PREMIUM_REQUIRED.to_owned()
                     }
-                    e => error_text(e),
+                    e => error_text_in(e, loc),
                 };
                 self.streaming.errors.insert(service, text);
             }
@@ -169,16 +171,18 @@ impl Worker {
             account,
             Some(nikgob_core::streaming::Account::LoggedIn { premium: Some(true) | None, audio: false, .. })
         );
+        let loc = self.locale();
+        let err = nikgob_core::i18n::errors_in(loc);
         match (service, input) {
-            (Service::Spotify, LoginInput::Playback) => self.toast("Звук из Spotify включён", None),
-            (Service::Spotify, _) if without_sound => self.toast(
-                "Spotify подключён · осталось включить звук",
+            (Service::Spotify, LoginInput::Playback) => self.toast_ok(err.spotify_audio_enabled, None),
+            (Service::Spotify, _) if without_sound => self.toast_ok(
+                err.spotify_connected_enable_audio,
                 Some((
-                    "Включить звук".into(),
+                    err.enable_audio.into(),
                     nikgob_view::Command::StreamLogin { service, input: LoginInput::Playback },
                 )),
             ),
-            _ => self.toast(format!("{} подключён", service.display_name()), None),
+            _ => self.toast_ok(nikgob_core::i18n::ErrorStrings::service_connected_in(loc, service.display_name()), None),
         }
     }
 
@@ -215,9 +219,11 @@ impl Worker {
 
     /// `None` keeps a value, `Some("")` clears it.
     fn save_stream_secrets(&mut self, spotify: Option<String>, cookies: Option<String>, tell: bool) {
+        let loc = self.locale();
+        let err = nikgob_core::i18n::errors_in(loc);
         let Some(path) = self.settings_path.clone() else {
             if tell {
-                self.toast("Некуда сохранить настройки", None);
+                self.toast_err(err.no_settings_path, None);
             }
             return;
         };
@@ -225,7 +231,7 @@ impl Worker {
             Ok(s) => s,
             Err(e) => {
                 log::error!("loading settings: {e}");
-                self.toast("settings.toml не читается — поправь файл вручную", None);
+                self.toast_err(err.settings_unreadable, None);
                 return;
             }
         };
@@ -238,7 +244,7 @@ impl Worker {
         }
         if let Err(e) = settings.save(&path) {
             log::error!("saving settings: {e}");
-            self.toast("Не удалось сохранить настройки", None);
+            self.toast_failed_save_prefs();
             return;
         }
         let (personal, cookies) = (
@@ -250,7 +256,7 @@ impl Worker {
             s.prefs.youtube_cookies_set = cookies;
         });
         if tell {
-            self.toast("Сохранено", None);
+            self.toast_ok(err.saved, None);
         }
     }
 }

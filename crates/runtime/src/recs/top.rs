@@ -14,8 +14,9 @@
 
 use std::collections::HashSet;
 
+use nikgob_core::i18n::{Locale, tracks_count_in};
 use nikgob_core::model::{EventType, ReleaseId, TrackId};
-use nikgob_recs::{DayPart, RadioParams, TilesInput, style_words};
+use nikgob_recs::{DayPart, RadioParams, TilesInput, style_words_in};
 use serde::{Deserialize, Serialize};
 
 use super::{BuildInput, Snapshot, cache_read, cache_write, day_seed, daylist_key};
@@ -100,39 +101,61 @@ const fn slot(m: TopMix) -> usize {
     }
 }
 
-/// «по вечерам».
-const fn when(part: DayPart) -> &'static str {
-    match part {
-        DayPart::Morning => "по утрам",
-        DayPart::Day => "днём",
-        DayPart::Evening => "по вечерам",
-        DayPart::Night => "по ночам",
+/// «по вечерам» / «in the evenings».
+const fn when(part: DayPart, loc: Locale) -> &'static str {
+    match loc {
+        Locale::Ru => match part {
+            DayPart::Morning => "по утрам",
+            DayPart::Day => "днём",
+            DayPart::Evening => "по вечерам",
+            DayPart::Night => "по ночам",
+        },
+        Locale::En => match part {
+            DayPart::Morning => "in the mornings",
+            DayPart::Day => "during the day",
+            DayPart::Evening => "in the evenings",
+            DayPart::Night => "at night",
+        },
     }
 }
 
-/// «Микс на вечер».
-const fn moment_kicker(part: DayPart) -> &'static str {
-    match part {
-        DayPart::Morning => "Микс на утро",
-        DayPart::Day => "Микс на день",
-        DayPart::Evening => "Микс на вечер",
-        DayPart::Night => "Микс на ночь",
+/// «Микс на вечер» / «Evening Mix».
+const fn moment_kicker(part: DayPart, loc: Locale) -> &'static str {
+    match loc {
+        Locale::Ru => match part {
+            DayPart::Morning => "Микс на утро",
+            DayPart::Day => "Микс на день",
+            DayPart::Evening => "Микс на вечер",
+            DayPart::Night => "Микс на ночь",
+        },
+        Locale::En => match part {
+            DayPart::Morning => "Morning Mix",
+            DayPart::Day => "Daytime Mix",
+            DayPart::Evening => "Evening Mix",
+            DayPart::Night => "Night Mix",
+        },
     }
 }
 
-/// «A, B, C и D» (more than `NAMED`: «A, B, C, D и другие»).
-fn names(list: &[&str]) -> String {
+/// «A, B, C и D» / «A, B, C & D» (more than `NAMED`: «A, B, C, D и другие» / «A, B, C, D & more»).
+fn names(list: &[&str], loc: Locale) -> String {
     match list {
         [] => String::new(),
         [a] => (*a).to_owned(),
-        _ if list.len() > NAMED => format!("{} и другие", list[..NAMED].join(", ")),
-        [init @ .., last] => format!("{} и {last}", init.join(", ")),
+        _ if list.len() > NAMED => match loc {
+            Locale::Ru => format!("{} и другие", list[..NAMED].join(", ")),
+            Locale::En => format!("{} & more", list[..NAMED].join(", ")),
+        },
+        [init @ .., last] => match loc {
+            Locale::Ru => format!("{} и {last}", init.join(", ")),
+            Locale::En => format!("{} & {last}", init.join(", ")),
+        },
     }
 }
 
 /// The name of a sound in two short words: «спокойное и мрачное» of
-/// [`style_words`] reads «Тихо и темно».
-fn sound_name(words: &str) -> String {
+/// [`style_words_in`] reads «Тихо и темно».
+fn sound_name(words: &str, loc: Locale) -> String {
     fn short(w: &str) -> &str {
         match w {
             "энергичное" => "бодро",
@@ -144,7 +167,10 @@ fn sound_name(words: &str) -> String {
             other => other,
         }
     }
-    let s = words.split(" и ").map(short).collect::<Vec<_>>().join(" и ");
+    let s = match loc {
+        Locale::Ru => words.split(" и ").map(short).collect::<Vec<_>>().join(" и "),
+        Locale::En => words.to_owned(),
+    };
     let mut c = s.chars();
     c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
 }
@@ -189,14 +215,15 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, ref
     let (part, _, part_key) = daylist_key(input.now, input.utc_offset_min);
     let world1 = last_world(snap, tiles);
 
+    let loc = input.locale;
     let mut out = Vec::new();
     for m in TopMix::ALL {
         let k = slot(m);
         let salt = cache.salts[k];
         let key = match m {
-            TopMix::Moment => format!("{part_key}|{}|{salt}", snap.local_only),
+            TopMix::Moment => format!("{part_key}|{}|{salt}|{}", snap.local_only, loc.code()),
             TopMix::After => match world1 {
-                Some(w) => format!("{}|{w}|{}|{salt}", input.day, snap.local_only),
+                Some(w) => format!("{}|{w}|{}|{salt}|{}", input.day, snap.local_only, loc.code()),
                 None => continue,
             },
         };
@@ -218,12 +245,19 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, ref
                             })
                             .filter(|(id, _)| !long(id))
                             .collect();
-                        let title = style_words(centre.axes).map_or_else(|| format!("Как обычно {}", when(part)), |w| sound_name(&w));
+                        let fallback = match loc {
+                            Locale::Ru => format!("Как обычно {}", when(part, loc)),
+                            Locale::En => format!("Usual {}", when(part, loc)),
+                        };
+                        let title = style_words_in(centre.axes, loc).map_or(fallback, |w| sound_name(&w, loc));
                         (title, recs.mix_of(&cands, LEN, WORLD_SHARE))
                     }
                     TopMix::After => {
                         let w = world1.expect("keyed by it");
-                        let title = snap.worlds.get(&w).map_or_else(String::new, |x| format!("После {}", x.1));
+                        let title = snap.worlds.get(&w).map_or_else(String::new, |x| match loc {
+                            Locale::Ru => format!("После {}", x.1),
+                            Locale::En => format!("After {}", x.1),
+                        });
                         let tracks: Vec<TrackId> = recs.after_world(w, LEN + 4, WORLD_SHARE, &params).into_iter().filter(|id| !long(id)).take(LEN).collect();
                         (title, tracks)
                     }
@@ -238,7 +272,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, ref
         if tracks.len() < MIN_LEN || set.title.is_empty() {
             continue;
         }
-        out.push(describe(snap, tiles, m, part, set.title, tracks, world1, cache.presses[k] < PRESSES));
+        out.push(describe(snap, tiles, m, part, loc, set.title, tracks, world1, cache.presses[k] < PRESSES));
     }
     if changed {
         cache_write(lib, TOP_KEY, input.now, &cache);
@@ -253,6 +287,7 @@ fn describe(
     tiles: &TilesInput,
     m: TopMix,
     part: DayPart,
+    loc: Locale,
     title: String,
     tracks: Vec<TrackId>,
     world1: Option<u64>,
@@ -279,15 +314,29 @@ fn describe(
     let in_order: Vec<String> = worlds.iter().filter_map(|x| snap.worlds.get(&x.0)).map(|x| x.0.clone()).collect();
     worlds.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
     let titles: Vec<&str> = worlds.iter().filter_map(|x| snap.worlds.get(&x.0)).map(|x| x.1.as_str()).filter(|t| !t.is_empty()).collect();
-    let named = names(&titles);
+    let named = names(&titles, loc);
     let (kicker, reason, after) = match m {
-        TopMix::Moment => (moment_kicker(part).to_owned(), format!("Из того, что ты слушаешь {}: {named}", when(part)), None),
+        TopMix::Moment => (
+            moment_kicker(part, loc).to_owned(),
+            match loc {
+                Locale::Ru => format!("Из того, что ты слушаешь {}: {named}", when(part, loc)),
+                Locale::En => format!("From what you play {}: {named}", when(part, loc)),
+            },
+            None,
+        ),
         TopMix::After => {
             let w = world1.and_then(|w| snap.worlds.get(&w));
             let name = w.map_or("", |x| x.1.as_str());
             (
-                "Похоже по звуку".to_owned(),
-                format!("Звучит как твой {name}, но из других миров: {named}"),
+                match loc {
+                    Locale::Ru => "Похоже по звуку",
+                    Locale::En => "Similar Sound",
+                }
+                .to_owned(),
+                match loc {
+                    Locale::Ru => format!("Звучит как твой {name}, но из других миров: {named}"),
+                    Locale::En => format!("Sounds like your {name}, from other worlds: {named}"),
+                },
                 w.map(|x| x.0.clone()),
             )
         }
@@ -296,17 +345,32 @@ fn describe(
     let unheard = tracks.iter().filter(|id| !heard.contains(id)).count();
     let title_of = |id: &TrackId| tiles.facts.get(id).map_or_else(String::new, |f| f.title.clone());
     let first_new = tracks.iter().position(|id| !heard.contains(id)).map(|k| (k, title_of(&tracks[k])));
-    let plural = crate::streams::plural;
     let n = tracks.len();
     let w = worlds.len();
     let mut facts = vec![
-        "Микс".to_owned(),
-        format!("{n} {}", plural(n, "трек", "трека", "треков")),
-        minutes(duration_ms),
-        format!("{w} {}", plural(w, "мир", "мира", "миров")),
+        match loc {
+            Locale::Ru => "Микс",
+            Locale::En => "Mix",
+        }
+        .to_owned(),
+        tracks_count_in(loc, n as u64),
+        minutes(duration_ms, loc),
+        match loc {
+            Locale::Ru => format!("{w} {}", crate::streams::plural(w, "мир", "мира", "миров")),
+            Locale::En => {
+                if w == 1 {
+                    "1 world".to_owned()
+                } else {
+                    format!("{w} worlds")
+                }
+            }
+        },
     ];
     if unheard > 0 {
-        facts.push(format!("{unheard} ты ещё не слышал"));
+        facts.push(match loc {
+            Locale::Ru => format!("{unheard} ты ещё не слышал"),
+            Locale::En => format!("{unheard} unheard"),
+        });
     }
     TopMixHome {
         mix: m,
@@ -327,9 +391,16 @@ fn describe(
 }
 
 /// «52 мин», «1 ч 05 мин».
-fn minutes(ms: u64) -> String {
+fn minutes(ms: u64, loc: Locale) -> String {
     let m = (ms + 30_000) / 60_000;
-    if m < 60 { format!("{m} мин") } else { format!("{} ч {:02} мин", m / 60, m % 60) }
+    match loc {
+        Locale::Ru => {
+            if m < 60 { format!("{m} мин") } else { format!("{} ч {:02} мин", m / 60, m % 60) }
+        }
+        Locale::En => {
+            if m < 60 { format!("{m} min") } else { format!("{} hr {:02} min", m / 60, m % 60) }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -338,14 +409,15 @@ mod tests {
 
     #[test]
     fn names_read_as_a_list() {
-        assert_eq!(names(&["A"]), "A");
-        assert_eq!(names(&["A", "B"]), "A и B");
-        assert_eq!(names(&["A", "B", "C", "D"]), "A, B, C и D");
-        assert_eq!(names(&["A", "B", "C", "D", "E"]), "A, B, C, D и другие");
-        assert_eq!(minutes(52 * 60_000), "52 мин");
-        assert_eq!(minutes(65 * 60_000), "1 ч 05 мин");
-        assert_eq!(sound_name("спокойное и мрачное"), "Тихо и темно");
-        assert_eq!(sound_name("энергичное"), "Бодро");
+        assert_eq!(names(&["A"], Locale::Ru), "A");
+        assert_eq!(names(&["A", "B"], Locale::Ru), "A и B");
+        assert_eq!(names(&["A", "B", "C", "D"], Locale::Ru), "A, B, C и D");
+        assert_eq!(names(&["A", "B", "C", "D", "E"], Locale::Ru), "A, B, C, D и другие");
+        assert_eq!(names(&["A", "B"], Locale::En), "A & B");
+        assert_eq!(minutes(52 * 60_000, Locale::Ru), "52 мин");
+        assert_eq!(minutes(65 * 60_000, Locale::Ru), "1 ч 05 мин");
+        assert_eq!(sound_name("спокойное и мрачное", Locale::Ru), "Тихо и темно");
+        assert_eq!(sound_name("энергичное", Locale::Ru), "Бодро");
     }
 
     /// Three soundtracks of 10 songs, MADE IN ABYSS played last: the mix
@@ -397,6 +469,7 @@ mod tests {
             lib: lib.clone(),
             index: index.clone(),
             day: "2026-10-25".into(),
+            locale: Locale::Ru,
             epoch: crate::home_v2::Epoch::default(),
             utc_offset_min: 0,
             now,

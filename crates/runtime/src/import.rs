@@ -112,7 +112,7 @@ pub(crate) enum Internal {
         job: u64,
         old_dir: PathBuf,
         new_dir: PathBuf,
-        result: Result<nikgob_import::RelocateReport, String>,
+        result: std::result::Result<nikgob_import::RelocateReport, nikgob_import::ImportError>,
     },
     /// The local API's retag wrote these tracks (and failed on `failed`).
     ApiRetagged { done: Vec<TrackId>, failed: usize },
@@ -483,18 +483,23 @@ impl ImportService {
         self.importer.pending()
     }
 
-    fn view(&self) -> (Vec<v::Job>, Vec<v::Confirm>, Vec<v::Job>) {
+    fn view_in(&self, loc: nikgob_core::i18n::Locale) -> (Vec<v::Job>, Vec<v::Confirm>, Vec<v::Job>) {
+        use nikgob_core::i18n::Locale;
         let active = self
             .jobs
             .iter()
             .map(|(&id, p)| {
                 let subtitle = match &p.current {
-                    Some((file, stage)) => format!("{} · {}", stage_label(*stage), file),
-                    None => "готовлю файлы".to_owned(),
+                    Some((file, stage)) => format!("{} · {}", stage_label_in(*stage, loc), file),
+                    None => match loc {
+                        Locale::Ru => "готовлю файлы",
+                        Locale::En => "preparing files",
+                    }
+                    .to_owned(),
                 };
                 v::Job {
                     id: IMPORT_ID | id,
-                    title: import_title(&p.title, p.done, p.files),
+                    title: import_title_in(&p.title, p.done, p.files, loc),
                     subtitle,
                     progress: import_progress(p.done, p.files),
                     rate: None,
@@ -524,7 +529,10 @@ impl ImportService {
                     (Some(t), None) => t.clone(),
                     _ => file.clone(),
                 };
-                let mut origin = format!("Файл: {file}");
+                let mut origin = match loc {
+                    Locale::Ru => format!("Файл: {file}"),
+                    Locale::En => format!("File: {file}"),
+                };
                 if let Some(ms) = item.duration_ms {
                     origin.push_str(&format!(" · {}", fmt_duration(Duration::from_millis(ms.into()))));
                 }
@@ -565,12 +573,28 @@ impl ImportService {
                                 detail.push(fmt_duration(Duration::from_millis(ms.into())));
                             }
                             match o.source {
-                                nikgob_import::events::TAGS_OPTION => detail.push("теги файла".to_owned()),
+                                nikgob_import::events::TAGS_OPTION => detail.push(
+                                    match loc {
+                                        Locale::Ru => "теги файла",
+                                        Locale::En => "file tags",
+                                    }
+                                    .to_owned(),
+                                ),
                                 nikgob_import::events::STREAM_OPTION => {
-                                    detail.push("лайкнутый стрим-трек, другая длина".to_owned());
+                                    detail.push(
+                                        match loc {
+                                            Locale::Ru => "лайкнутый стрим-трек, другая длина",
+                                            Locale::En => "liked stream track, different duration",
+                                        }
+                                        .to_owned(),
+                                    );
                                 }
                                 source => {
-                                    detail.push(format!("совпадение {:.0}%", o.score * 100.0));
+                                    let pct = o.score * 100.0;
+                                    detail.push(match loc {
+                                        Locale::Ru => format!("совпадение {pct:.0}%"),
+                                        Locale::En => format!("match {pct:.0}%"),
+                                    });
                                     detail.push(match source {
                                         "musicbrainz" => "MusicBrainz".to_owned(),
                                         "deezer" => "Deezer".to_owned(),
@@ -578,7 +602,11 @@ impl ImportService {
                                     });
                                 }
                             }
-                            let artist = if o.artist.is_empty() { "исполнитель неизвестен" } else { o.artist.as_str() };
+                            let unknown = match loc {
+                                Locale::Ru => "исполнитель неизвестен",
+                                Locale::En => "unknown artist",
+                            };
+                            let artist = if o.artist.is_empty() { unknown } else { o.artist.as_str() };
                             v::ConfirmOption {
                                 label: format!("{} — {artist}", o.title),
                                 detail: detail.join(" · "),
@@ -588,9 +616,17 @@ impl ImportService {
                         .collect(),
                     // The file's own tags are an option of their own.
                     skip_label: String::new(),
-                    accept_label: "Импортировать".into(),
+                    accept_label: match loc {
+                        Locale::Ru => "Импортировать",
+                        Locale::En => "Import",
+                    }
+                    .into(),
                     pick: None,
-                    question: "Это какой трек?".into(),
+                    question: match loc {
+                        Locale::Ru => "Это какой трек?",
+                        Locale::En => "Which track is this?",
+                    }
+                    .into(),
                 }
             })
             .collect();
@@ -599,25 +635,42 @@ impl ImportService {
 }
 
 /// What the import does with a file now, as its row says it.
-fn stage_label(s: Stage) -> &'static str {
-    match s {
-        Stage::Probing => "читаю файл",
-        Stage::Fingerprinting => "снимаю отпечаток",
-        Stage::Identifying => "узнаю трек",
-        Stage::QualityCheck => "проверяю качество",
-        Stage::Deciding => "сверяю с библиотекой",
-        Stage::Converting => "конвертирую",
-        Stage::Tagging => "пишу теги",
-        Stage::Placing => "кладу в библиотеку",
-        Stage::Deriving => "беру цвета обложки",
+fn stage_label_in(s: Stage, loc: nikgob_core::i18n::Locale) -> &'static str {
+    use nikgob_core::i18n::Locale;
+    match (loc, s) {
+        (Locale::Ru, Stage::Probing) => "читаю файл",
+        (Locale::En, Stage::Probing) => "reading file",
+        (Locale::Ru, Stage::Fingerprinting) => "снимаю отпечаток",
+        (Locale::En, Stage::Fingerprinting) => "fingerprinting",
+        (Locale::Ru, Stage::Identifying) => "узнаю трек",
+        (Locale::En, Stage::Identifying) => "identifying track",
+        (Locale::Ru, Stage::QualityCheck) => "проверяю качество",
+        (Locale::En, Stage::QualityCheck) => "checking quality",
+        (Locale::Ru, Stage::Deciding) => "сверяю с библиотекой",
+        (Locale::En, Stage::Deciding) => "matching library",
+        (Locale::Ru, Stage::Converting) => "конвертирую",
+        (Locale::En, Stage::Converting) => "converting",
+        (Locale::Ru, Stage::Tagging) => "пишу теги",
+        (Locale::En, Stage::Tagging) => "writing tags",
+        (Locale::Ru, Stage::Placing) => "кладу в библиотеку",
+        (Locale::En, Stage::Placing) => "placing in library",
+        (Locale::Ru, Stage::Deriving) => "беру цвета обложки",
+        (Locale::En, Stage::Deriving) => "extracting cover colors",
     }
 }
 
 /// An import's row title: its name, and how many of its files are in
 /// when it has several («Альбом · 3 из 12»); one file is not counted.
-fn import_title(title: &str, done: usize, files: usize) -> String {
+fn import_title_in(title: &str, done: usize, files: usize, loc: nikgob_core::i18n::Locale) -> String {
     let all = files.max(done);
-    if all > 1 { format!("{title} · {done} из {all}") } else { title.to_owned() }
+    if all > 1 {
+        match loc {
+            nikgob_core::i18n::Locale::Ru => format!("{title} · {done} из {all}"),
+            nikgob_core::i18n::Locale::En => format!("{title} · {done} of {all}"),
+        }
+    } else {
+        title.to_owned()
+    }
 }
 
 /// An import's bar: the files taken of several; one file has no steps to
@@ -639,8 +692,9 @@ fn file_name(p: &Path) -> String {
 
 impl Worker {
     pub(crate) fn publish_downloads(&mut self) {
+        let loc = self.state.read().prefs.resolved_locale();
         let Some(svc) = &self.import else { return };
-        let (active, confirm, history) = svc.view();
+        let (active, confirm, history) = svc.view_in(loc);
         self.publish(|s| {
             // Cold-start jobs of the streaming part share the id space.
             let others = |id: u64| id & IMPORT_ID == 0 || id & crate::streams::STREAM_JOB != 0;
@@ -663,7 +717,7 @@ impl Worker {
             format!("Импорт {} объектов", paths.len())
         };
         if self.import_with_origin(paths, title, SourceOrigin::Inbox) {
-            self.toast("Импорт начался · смотри «Загрузки»", None);
+            self.toast_work("Импорт начался · смотри «Загрузки»", None);
         }
     }
 
@@ -747,7 +801,7 @@ impl Worker {
         targets: nikgob_import::ImportTargets,
     ) -> bool {
         if self.import.is_none() {
-            self.toast("Импорт недоступен", None);
+            self.toast_err("Импорт недоступен", None);
             return false;
         }
         if paths.is_empty() {
@@ -784,7 +838,7 @@ impl Worker {
             return;
         }
         svc.importer.cancel(nikgob_import::JobId(job));
-        self.toast("Отменяю импорт — добавленное уберу", None);
+        self.toast_work("Отменяю импорт — добавленное уберу", None);
     }
 
     /// The «Хочу скачать» items whose files are being imported.
@@ -829,7 +883,7 @@ impl Worker {
                 }
                 if let Some(e) = error {
                     log::warn!("resolving item {item}: {e}");
-                    self.toast("Не получилось импортировать файл", None);
+                    self.toast_err("Не получилось импортировать файл", None);
                 }
                 if let Some(w) = wishlist {
                     self.wish_settle(w);
@@ -858,7 +912,7 @@ impl Worker {
             Internal::TorrentStarted(r) => self.torrent_started(r),
             Internal::TorrentError(e) => {
                 log::warn!("torrent: {e}");
-                self.toast(format!("Торрент: {e}"), None);
+                self.toast_err(format!("Торрент: {e}"), None);
             }
             Internal::PayloadFetched(i, r, then) => self.payload_fetched(i, r, then),
             Internal::TorrentFilesListed(i, r) => self.files_listed(i, r),
@@ -927,7 +981,7 @@ impl Worker {
                         }
                         self.publish_downloads();
                         if report.audio_moved > 0 {
-                            self.toast(
+                            self.toast_ok(
                                 format!(
                                     "Перенесено FLAC-оригиналов: {} (проверено по хешу, старые удалены)",
                                     report.audio_moved
@@ -935,7 +989,7 @@ impl Worker {
                                 None,
                             );
                         } else {
-                            self.toast(format!("Папка FLAC: {}", new_dir.display()), None);
+                            self.toast_ok(format!("Папка FLAC: {}", new_dir.display()), None);
                         }
                     }
                     Err(err) => {
@@ -952,7 +1006,9 @@ impl Worker {
                         self.publish(|s| s.prefs.masters_dir = old_dir);
                         self.save_prefs();
                         self.publish_downloads();
-                        self.toast(format!("Не удалось перенести FLAC: {err}"), None);
+                        let loc = self.locale();
+                        let detail = err.message_in(loc);
+                        self.toast_err(nikgob_core::i18n::ErrorStrings::masters_move_failed_in(loc, &detail), None);
                     }
                 }
                 // Imports asked for while it moved start now, into the
@@ -1128,7 +1184,7 @@ impl Worker {
                     at: nikgob_library::now_ms(),
                 });
                 svc.history.truncate(100);
-                finished = Some((summary, cancelled, svc.wish_jobs.remove(&job.0)));
+                finished = Some((summary, cancelled, failed > 0, svc.wish_jobs.remove(&job.0)));
             }
             ImportEvent::TorrentFound(path) => {
                 self.command(Command::AddTorrentFile(path));
@@ -1141,7 +1197,7 @@ impl Worker {
         if let Some(w) = parked_for {
             self.wish_parked(w);
         }
-        if let Some((summary, cancelled, wishlist)) = finished {
+        if let Some((summary, cancelled, has_failed, wishlist)) = finished {
             match wishlist {
                 // Cancelled: the item does not go on by itself (it can be
                 // brought back from the toast).
@@ -1151,7 +1207,11 @@ impl Worker {
             }
             self.reload_after_import();
             self.offer_editions();
-            self.toast(format!("Импорт: {summary}"), None);
+            if has_failed {
+                self.toast_err(format!("Импорт: {summary}"), None);
+            } else {
+                self.toast_info(format!("Импорт: {summary}"), None);
+            }
             if let Some(svc) = &mut self.import {
                 svc.apply_reconfigure();
             }
@@ -1215,7 +1275,7 @@ impl Worker {
             return;
         }
         let Some(svc) = &self.import else {
-            self.toast("Удаление недоступно", None);
+            self.toast_err("Удаление недоступно", None);
             return;
         };
         let cfg = svc.config().clone();
@@ -1233,12 +1293,10 @@ impl Worker {
         }
         self.wish_settle_albums(&albums);
         if failed == tracks.len() {
-            self.toast("Не получилось удалить", None);
+            self.toast_err("Не получилось удалить", None);
         } else {
-            self.toast(
-                format!("{what} в корзине (30 дней)"),
-                Some(("Отменить".into(), Command::RestoreTracks(tracks))),
-            );
+            let undo = self.undo_action(Command::RestoreTracks(tracks));
+            self.toast_ok(format!("{what} в корзине (30 дней)"), Some(undo));
         }
         self.after_delete();
     }
@@ -1255,7 +1313,11 @@ impl Worker {
                 }
             }
         }
-        self.toast(if ok { "Восстановлено" } else { "Восстановить удалось не всё" }, None);
+        if ok {
+            self.toast_ok("Восстановлено", None);
+        } else {
+            self.toast_err("Восстановить удалось не всё", None);
+        }
         self.after_delete();
     }
 
@@ -1264,7 +1326,7 @@ impl Worker {
     /// masters' lock): the toast and the lists follow when it is done.
     pub(crate) fn purge_tracks(&mut self, tracks: Vec<TrackId>) {
         let Some(svc) = &self.import else {
-            self.toast("Удаление недоступно", None);
+            self.toast_err("Удаление недоступно", None);
             return;
         };
         let cfg = svc.config().clone();
@@ -1295,14 +1357,11 @@ impl Worker {
     /// [`Self::purge_tracks`] is done.
     fn tracks_purged(&mut self, albums: &[nikgob_core::model::ReleaseId], done: usize, failed: usize) {
         self.wish_settle_albums(albums);
-        self.toast(
-            if failed > 0 {
-                "Удалено, но не все файлы получилось стереть".to_owned()
-            } else {
-                format!("Удалено навсегда: {done}")
-            },
-            None,
-        );
+        if failed > 0 {
+            self.toast_err("Удалено, но не все файлы получилось стереть", None);
+        } else {
+            self.toast_ok(format!("Удалено навсегда: {done}"), None);
+        }
         self.after_delete();
     }
 
@@ -1322,7 +1381,9 @@ impl Worker {
 
     /// The "Корзина" list.
     pub(crate) fn load_trash(&mut self) {
+        use nikgob_core::i18n::Locale;
         const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+        let loc = self.state.read().prefs.resolved_locale();
         let now = nikgob_library::now_ms();
         let rows = self.lib.deleted_tracks().unwrap_or_default();
         let res = &mut self.res;
@@ -1331,11 +1392,14 @@ impl Worker {
                 .map(|d| {
                     let ago = ((now - d.deleted_at).max(0) / DAY_MS) as u32;
                     v::TrashItem {
-                        track: res.track(&d.track),
-                        deleted: match ago {
-                            0 => "сегодня".to_owned(),
-                            1 => "вчера".to_owned(),
-                            n => format!("{n} дн. назад"),
+                        track: res.track_in(&d.track, loc),
+                        deleted: match (loc, ago) {
+                            (Locale::Ru, 0) => "сегодня".to_owned(),
+                            (Locale::En, 0) => "today".to_owned(),
+                            (Locale::Ru, 1) => "вчера".to_owned(),
+                            (Locale::En, 1) => "yesterday".to_owned(),
+                            (Locale::Ru, n) => format!("{n} дн. назад"),
+                            (Locale::En, n) => format!("{n} days ago"),
                         },
                         days_left: nikgob_import::TRASH_DAYS.saturating_sub(ago),
                     }
@@ -1357,13 +1421,14 @@ impl Worker {
     pub(crate) fn load_downloaded(&mut self, offset: usize, limit: usize) {
         self.library_load.downloaded_seq += 1;
         let seq = self.library_load.downloaded_seq;
+        let loc = self.state.read().prefs.resolved_locale();
         let (lib, res, later) = (self.lib.clone(), self.res.fork(), self.later_tx.clone());
         let spawned = std::thread::Builder::new().name("nikgob-downloaded".into()).spawn(move || {
-            let _ = later.send(read_downloaded(&lib, res, seq, offset, limit));
+            let _ = later.send(read_downloaded(&lib, res, seq, offset, limit, loc));
         });
         if spawned.is_err() {
             // No thread: read here.
-            let page = read_downloaded(&self.lib, self.res.fork(), seq, offset, limit);
+            let page = read_downloaded(&self.lib, self.res.fork(), seq, offset, limit, loc);
             (page.run)(self);
         }
     }
@@ -1450,7 +1515,7 @@ impl Worker {
             return;
         }
         let Some(svc) = &mut self.import else {
-            self.toast("Перенос папки FLAC недоступен", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).masters_move_unavailable, None);
             return;
         };
         let cur_cfg = svc.reconfigure.as_ref().unwrap_or(svc.config()).clone();
@@ -1465,17 +1530,14 @@ impl Worker {
                 || (new_dir.starts_with(&cur_cfg.library_dir)
                     && !new_dir.starts_with(cur_cfg.musiclib_dir())));
         if inside_work_dir {
-            self.toast(
-                "Нельзя хранить FLAC-архив внутри папки музыки, Inbox или загрузок",
-                None,
-            );
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).masters_inside_work_dir, None);
             return;
         }
 
         if old_dir == new_dir {
             self.publish(|s| s.prefs.masters_dir = new_dir);
             self.save_prefs();
-            self.toast("Эта папка FLAC уже используется", None);
+            self.toast_info("Эта папка FLAC уже используется", None);
             return;
         }
 
@@ -1514,8 +1576,7 @@ impl Worker {
                     total,
                     file: file_name(path),
                 });
-            })
-            .map_err(|e| e.to_string());
+            });
             let _ = tx.send(Internal::MastersMoved {
                 job: job_id,
                 old_dir: from,
@@ -1580,8 +1641,9 @@ impl Worker {
         };
 
         // Info tab: what the file says beyond the basics.
+        let loc = self.state.read().prefs.resolved_locale();
         if let Some(t) = &tags {
-            let extra = extra_tags(t);
+            let extra = extra_tags_in(t, loc);
             self.publish(|s| {
                 if s.info.track == Some(track) {
                     s.info.tags.extend(extra);
@@ -1600,16 +1662,17 @@ impl Worker {
             self.publish(|s| s.track_info = None);
             return;
         };
+        let loc = self.state.read().prefs.resolved_locale();
         let row = self.lib.get_track_row(track).ok().flatten();
         let src = self.lib.active_source(track).ok().flatten();
         // Read first: the info takes the file's channels from them.
         let path = src.as_ref().filter(|s| s.kind.is_local()).map(|s| self.res.path(&s.locator));
         let tags = path.as_deref().and_then(|p| self.res.facts().tags(p));
-        let mut info = self.res.info(row.as_ref(), src.as_ref());
+        let mut info = self.res.info_in(row.as_ref(), src.as_ref(), loc);
         // A track that is gone is answered too: with nothing to show.
         info.track = Some(track);
         if let Some(t) = tags {
-            info.tags.extend(extra_tags(&t));
+            info.tags.extend(extra_tags_in(&t, loc));
         }
         self.publish(|s| s.track_info = Some(info));
     }
@@ -1625,25 +1688,127 @@ impl Worker {
 }
 
 /// What a file's tags say beyond the basics the info has from the library.
-fn extra_tags(t: &nikgob_import::tags::TagSet) -> Vec<(String, String)> {
+pub(crate) fn extra_tags_in(t: &nikgob_import::tags::TagSet, loc: nikgob_core::i18n::Locale) -> Vec<(String, String)> {
+    use nikgob_core::i18n::Locale;
     let mut extra = Vec::new();
     let mut add = |k: &str, v: Option<String>| {
         if let Some(v) = v.filter(|v| !v.trim().is_empty()) {
             extra.push((k.to_owned(), v));
         }
     };
-    add("Исполнитель альбома", t.album_artist.clone());
-    add("Год", t.year.map(|y| y.to_string()));
-    add("Жанр", t.genre.clone());
+    add(
+        match loc {
+            Locale::Ru => "Исполнитель альбома",
+            Locale::En => "Album artist",
+        },
+        t.album_artist.clone(),
+    );
+    add(
+        match loc {
+            Locale::Ru => "Год",
+            Locale::En => "Year",
+        },
+        t.year.map(|y| y.to_string()),
+    );
+    add(
+        match loc {
+            Locale::Ru => "Жанр",
+            Locale::En => "Genre",
+        },
+        t.genre.clone(),
+    );
     add("ISRC", t.isrc.clone());
     add("MusicBrainz", t.recording_mbid.clone());
     add(
-        "Громкость",
+        match loc {
+            Locale::Ru => "Громкость",
+            Locale::En => "Loudness",
+        },
         t.r128_track_gain
             .map(|q| format!("R128 {:+.1} dB", f32::from(q) / 256.0))
             .or_else(|| t.replaygain_track_gain_db.map(|g| format!("ReplayGain {g:+.1} dB"))),
     );
     extra
+}
+
+fn downloaded_date_label(date: jiff::civil::Date, today: jiff::civil::Date, loc: nikgob_core::i18n::Locale) -> String {
+    use nikgob_core::i18n::Locale;
+    const MONTHS_RU: [&str; 12] = [
+        "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября",
+        "декабря",
+    ];
+    const MONTHS_EN: [&str; 12] = [
+        "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November",
+        "December",
+    ];
+    let month = match loc {
+        Locale::Ru => MONTHS_RU[date.month() as usize - 1],
+        Locale::En => MONTHS_EN[date.month() as usize - 1],
+    };
+    if date == today {
+        match loc {
+            Locale::Ru => "Сегодня",
+            Locale::En => "Today",
+        }
+        .to_owned()
+    } else if today.yesterday().ok() == Some(date) {
+        match loc {
+            Locale::Ru => "Вчера",
+            Locale::En => "Yesterday",
+        }
+        .to_owned()
+    } else if date.year() == today.year() {
+        match loc {
+            Locale::Ru => format!("{} {month}", date.day()),
+            Locale::En => format!("{month} {}", date.day()),
+        }
+    } else {
+        match loc {
+            Locale::Ru => format!("{} {month} {}", date.day(), date.year()),
+            Locale::En => format!("{month} {}, {}", date.day(), date.year()),
+        }
+    }
+}
+
+/// `limit` downloaded tracks from the `offset`-th on, grouped by the local
+/// day their file came («Сегодня», «Вчера», «28 октября»).
+fn downloaded_page(
+    lib: &nikgob_library::Library,
+    res: &mut crate::convert::Resolver,
+    offset: usize,
+    limit: usize,
+    loc: nikgob_core::i18n::Locale,
+) -> Vec<v::DownloadedDay> {
+    let tz = jiff::tz::TimeZone::system();
+    let today = jiff::Zoned::now().date();
+    let n = |x: usize| u32::try_from(x).unwrap_or(u32::MAX);
+    let rows = lib.downloaded_tracks(n(offset), n(limit)).unwrap_or_default();
+    let mut days: Vec<(jiff::civil::Date, v::DownloadedDay)> = Vec::new();
+    for (row, at) in &rows {
+        let Ok(ts) = jiff::Timestamp::from_millisecond(*at) else { continue };
+        let date = ts.to_zoned(tz.clone()).date();
+        if days.last().is_none_or(|(d, _)| *d != date) {
+            days.push((date, v::DownloadedDay { label: downloaded_date_label(date, today, loc), tracks: Vec::new() }));
+        }
+        if let Some((_, day)) = days.last_mut() {
+            day.tracks.push(res.track_in(row, loc));
+        }
+    }
+    days.into_iter().map(|(_, d)| d).collect()
+}
+
+/// Reads a page of «Скачано» for load `seq`; the answer for the loop.
+fn read_downloaded(
+    lib: &nikgob_library::Library,
+    mut res: crate::convert::Resolver,
+    seq: u64,
+    offset: usize,
+    limit: usize,
+    loc: nikgob_core::i18n::Locale,
+) -> crate::Later {
+    let days = downloaded_page(lib, &mut res, offset, limit, loc);
+    let total = lib.downloaded_count().unwrap_or(0);
+    crate::Later::new("a page of «Скачано»", move |w| w.downloaded_read(seq, offset, days, total))
 }
 
 #[cfg(test)]
@@ -1680,59 +1845,36 @@ mod tests {
         ];
         let kept: Vec<i64> = kept_history(entries).iter().map(|e| e.seq).collect();
         assert_eq!(kept, [9, 7, 5, 3, 2, 1]);
+        assert_eq!(wish_key("Tidal: Artist — Track"), "Artist — Track");
     }
-}
 
-/// `limit` downloaded tracks from the `offset`-th on, grouped by the local
-/// day their file came («Сегодня», «Вчера», «28 октября»).
-fn downloaded_page(
-    lib: &nikgob_library::Library,
-    res: &mut crate::convert::Resolver,
-    offset: usize,
-    limit: usize,
-) -> Vec<v::DownloadedDay> {
-    const MONTHS: [&str; 12] = [
-        "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября",
-        "декабря",
-    ];
-    let tz = jiff::tz::TimeZone::system();
-    let today = jiff::Zoned::now().date();
-    let label = |date: jiff::civil::Date| {
-        if date == today {
-            "Сегодня".to_owned()
-        } else if today.yesterday().ok() == Some(date) {
-            "Вчера".to_owned()
-        } else if date.year() == today.year() {
-            format!("{} {}", date.day(), MONTHS[date.month() as usize - 1])
-        } else {
-            format!("{} {} {}", date.day(), MONTHS[date.month() as usize - 1], date.year())
-        }
-    };
-    let n = |x: usize| u32::try_from(x).unwrap_or(u32::MAX);
-    let rows = lib.downloaded_tracks(n(offset), n(limit)).unwrap_or_default();
-    let mut days: Vec<(jiff::civil::Date, v::DownloadedDay)> = Vec::new();
-    for (row, at) in &rows {
-        let Ok(ts) = jiff::Timestamp::from_millisecond(*at) else { continue };
-        let date = ts.to_zoned(tz.clone()).date();
-        if days.last().is_none_or(|(d, _)| *d != date) {
-            days.push((date, v::DownloadedDay { label: label(date), tracks: Vec::new() }));
-        }
-        if let Some((_, day)) = days.last_mut() {
-            day.tracks.push(res.track(row));
-        }
+    #[test]
+    fn import_and_downloaded_labels_localize_exhaustively() {
+        use nikgob_core::i18n::Locale;
+        assert_eq!(stage_label_in(Stage::Probing, Locale::Ru), "читаю файл");
+        assert_eq!(stage_label_in(Stage::Probing, Locale::En), "reading file");
+        assert_eq!(import_title_in("Album", 3, 12, Locale::Ru), "Album · 3 из 12");
+        assert_eq!(import_title_in("Album", 3, 12, Locale::En), "Album · 3 of 12");
+
+        let today = jiff::civil::date(2026, 10, 28);
+        let yesterday = jiff::civil::date(2026, 10, 27);
+        let same_year = jiff::civil::date(2026, 5, 3);
+        let old_year = jiff::civil::date(2024, 12, 1);
+        assert_eq!(downloaded_date_label(today, today, Locale::Ru), "Сегодня");
+        assert_eq!(downloaded_date_label(today, today, Locale::En), "Today");
+        assert_eq!(downloaded_date_label(yesterday, today, Locale::Ru), "Вчера");
+        assert_eq!(downloaded_date_label(yesterday, today, Locale::En), "Yesterday");
+        assert_eq!(downloaded_date_label(same_year, today, Locale::Ru), "3 мая");
+        assert_eq!(downloaded_date_label(same_year, today, Locale::En), "May 3");
+        assert_eq!(downloaded_date_label(old_year, today, Locale::Ru), "1 декабря 2024");
+        assert_eq!(downloaded_date_label(old_year, today, Locale::En), "December 1, 2024");
+
+        let tags = nikgob_import::tags::TagSet {
+            genre: Some("Rock".into()),
+            year: Some(1988),
+            ..Default::default()
+        };
+        assert_eq!(extra_tags_in(&tags, Locale::Ru), vec![("Год".into(), "1988".into()), ("Жанр".into(), "Rock".into())]);
+        assert_eq!(extra_tags_in(&tags, Locale::En), vec![("Year".into(), "1988".into()), ("Genre".into(), "Rock".into())]);
     }
-    days.into_iter().map(|(_, d)| d).collect()
-}
-
-/// Reads a page of «Скачано» for load `seq`; the answer for the loop.
-fn read_downloaded(
-    lib: &nikgob_library::Library,
-    mut res: crate::convert::Resolver,
-    seq: u64,
-    offset: usize,
-    limit: usize,
-) -> crate::Later {
-    let days = downloaded_page(lib, &mut res, offset, limit);
-    let total = lib.downloaded_count().unwrap_or(0);
-    crate::Later::new("a page of «Скачано»", move |w| w.downloaded_read(seq, offset, days, total))
 }

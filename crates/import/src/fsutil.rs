@@ -117,10 +117,13 @@ pub fn copy_file_verified(from: &Path, to: &Path, expected_hash: Option<&str>) -
     let actual_hash = hash_file(&tmp)?;
     if actual_size != expected_size || actual_hash != expected {
         let _ = remove_file(&tmp);
-        return Err(ImportError::Other(format!(
-            "проверка хеша не прошла для {}: ожидалось {expected} ({expected_size} B), получено {actual_hash} ({actual_size} B)",
-            to.display()
-        )));
+        return Err(ImportError::HashVerificationFailed {
+            path: to.to_path_buf(),
+            expected,
+            expected_size: Some(expected_size),
+            actual: actual_hash,
+            actual_size: Some(actual_size),
+        });
     }
     fs::rename(long_path(&tmp), long_path(to)).map_err(|e| {
         let _ = remove_file(&tmp);
@@ -139,10 +142,13 @@ pub fn move_file_verified(from: &Path, to: &Path, expected_hash: Option<&str>) -
         };
         let actual = hash_file(to)?;
         if actual != expected {
-            return Err(ImportError::Other(format!(
-                "проверка хеша не прошла для {}: ожидалось {expected}, получено {actual}",
-                to.display()
-            )));
+            return Err(ImportError::HashVerificationFailed {
+                path: to.to_path_buf(),
+                expected,
+                expected_size: None,
+                actual,
+                actual_size: None,
+            });
         }
         return Ok(expected);
     }
@@ -579,5 +585,66 @@ mod tests {
             assert!(create_dir_inside(&root.join("Link").join("C"), &root).is_err());
             assert!(!out.join("C").exists());
         }
+    }
+
+    #[test]
+    fn hash_verification_failure_preserves_paths_and_hashes_across_locales() {
+        use nikgob_core::i18n::{ErrorStrings, Locale};
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.flac");
+        let dst = dir.path().join("dst.flac");
+        std::fs::write(&src, b"master-bytes").unwrap();
+        let actual = hash_file(&src).unwrap();
+        let size = file_size(&src).unwrap();
+        let wrong = "0".repeat(64);
+
+        let err = copy_file_verified(&src, &dst, Some(&wrong)).unwrap_err();
+        assert_eq!(
+            err.message_in(Locale::En),
+            ErrorStrings::hash_verification_failed_in(
+                Locale::En,
+                &dst.display().to_string(),
+                &wrong,
+                Some(size),
+                &actual,
+                Some(size),
+            )
+        );
+        assert_eq!(
+            err.message_in(Locale::Ru),
+            ErrorStrings::hash_verification_failed_in(
+                Locale::Ru,
+                &dst.display().to_string(),
+                &wrong,
+                Some(size),
+                &actual,
+                Some(size),
+            )
+        );
+
+        let same_err = move_file_verified(&src, &src, Some(&wrong)).unwrap_err();
+        assert_eq!(
+            same_err.message_in(Locale::En),
+            ErrorStrings::hash_verification_failed_in(
+                Locale::En,
+                &src.display().to_string(),
+                &wrong,
+                None,
+                &actual,
+                None,
+            )
+        );
+        assert_eq!(
+            same_err.message_in(Locale::Ru),
+            ErrorStrings::hash_verification_failed_in(
+                Locale::Ru,
+                &src.display().to_string(),
+                &wrong,
+                None,
+                &actual,
+                None,
+            )
+        );
     }
 }

@@ -30,5 +30,8 @@ sha2 = "0.10"
 [dev-dependencies]
 serde_json = "1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
+
 [lints]
 workspace = true

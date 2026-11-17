@@ -227,7 +227,7 @@ impl Search {
                     match p {
                         SearchPlaylist::Library(c) => {
                             let uri = c.cover.as_ref().map(|c| c.uri());
-                            if parts::media_row(ui, Id::new(("search-pl", i)), uri.as_deref(), &c.name, &text::tracks(u64::from(c.track_count)), Picture::Square).clicked() {
+                            if parts::media_row(ui, Id::new(("search-pl", i)), uri.as_deref(), c.display_name(), &text::tracks(u64::from(c.track_count)), Picture::Square).clicked() {
                                 page.nav = Some(Route::Playlist(c.id));
                             }
                         }

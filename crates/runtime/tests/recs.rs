@@ -18,7 +18,7 @@ use nikgob_core::model::{
 use nikgob_core::streaming::{FakeService, Service, StreamService};
 use nikgob_library::{Library, now_ms};
 use nikgob_runtime::{PlayRequest, Playback, PlaybackEvent, Runtime, RuntimeConfig, StreamSchedule};
-use nikgob_view::{Command, MixId, Mood, Prefs, RadioSeed, RecTarget, TileKind, ViewState};
+use nikgob_view::{Command, Locale, MixId, MixTitle, Mood, Prefs, RadioSeed, RadioTitle, RecTarget, TileKind, ViewState};
 
 const DAY: i64 = 24 * 3600 * 1000;
 
@@ -63,11 +63,32 @@ struct Started {
 }
 
 fn start(lib: &Library, streams: Vec<Arc<dyn StreamService>>, prefs: Prefs, prefs_path: Option<&Path>) -> Started {
-    start_with(lib, streams, prefs, prefs_path, schedule())
+    start_in_with(lib, &std::env::temp_dir(), streams, prefs, prefs_path, schedule())
+}
+
+fn start_in(
+    lib: &Library,
+    library_dir: &Path,
+    streams: Vec<Arc<dyn StreamService>>,
+    prefs: Prefs,
+    prefs_path: Option<&Path>,
+) -> Started {
+    start_in_with(lib, library_dir, streams, prefs, prefs_path, schedule())
 }
 
 fn start_with(
     lib: &Library,
+    streams: Vec<Arc<dyn StreamService>>,
+    prefs: Prefs,
+    prefs_path: Option<&Path>,
+    schedule: StreamSchedule,
+) -> Started {
+    start_in_with(lib, &std::env::temp_dir(), streams, prefs, prefs_path, schedule)
+}
+
+fn start_in_with(
+    lib: &Library,
+    library_dir: &Path,
     streams: Vec<Arc<dyn StreamService>>,
     prefs: Prefs,
     prefs_path: Option<&Path>,
@@ -78,7 +99,7 @@ fn start_with(
         RuntimeConfig {
             library: lib.clone(),
             streams,
-            library_dir: std::env::temp_dir(),
+            library_dir: library_dir.to_path_buf(),
             prefs,
             prefs_path: prefs_path.map(Path::to_path_buf),
             settings_path: None,
@@ -212,7 +233,12 @@ fn home_ready(s: &ViewState) -> bool {
 #[test]
 fn the_home_gets_a_hero_moods_and_style_mixes() {
     let l = library(3, 6, 5, &[]);
-    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    let s = start(
+        &l.lib,
+        Vec::new(),
+        Prefs { language: nikgob_view::LangPref::Ru, ..Prefs::default() },
+        None,
+    );
     wait_for(&s.rt, "the home's mixes", home_ready);
     let st = s.rt.state();
     let hero = st.home.hero.as_ref().unwrap();
@@ -304,14 +330,15 @@ fn play_mix_plays_and_records_the_home_context() {
 
     s.rt.send(Command::PlayMix { id: MixId::Mood(Mood::Calm) });
     wait_for(&s.rt, "the mood's radio", |st| {
-        st.queue.radio.as_ref().is_some_and(|r| r.title == "Спокойное") && st.queue.next.len() >= 3
+        st.queue.radio.as_ref().is_some_and(|r| r.title == RadioTitle::Mix(MixTitle::Mood(Mood::Calm.kind())))
+            && st.queue.next.len() >= 3
     });
     assert_eq!(current_start(&l.lib, &s.rt).context, EventContext::HomeSection);
-    assert_eq!(s.rt.state().player.context_line(), "Играет из микса «Спокойное»");
+    assert_eq!(s.rt.state().player.context_header(nikgob_view::Locale::Ru).0, "Играет из микса «Спокойное»");
 
     s.rt.send(Command::PlayMix { id: MixId::Style(0) });
     wait_for(&s.rt, "the style's radio", |st| {
-        st.queue.radio.as_ref().is_some_and(|r| r.title.contains(" и другие")) && st.queue.next.len() >= 3
+        st.queue.radio.as_ref().is_some_and(|r| r.title.title_in(Locale::Ru).contains(" и другие")) && st.queue.next.len() >= 3
     });
 
     // Playing anything else ends the radio (a lone track goes on by
@@ -334,7 +361,7 @@ fn autoplay_goes_on_after_the_last_track_with_nothing_the_queue_had() {
     wait_until("the first plays", || !s.asked.lock().unwrap().is_empty());
     wait_for(&s.rt, "the queue", |st| st.queue.next.len() == 2);
     assert!(s.rt.state().queue.radio.is_none(), "no radio before the last track");
-    let context = s.rt.state().player.context_line();
+    let context = s.rt.state().player.context_header(nikgob_view::Locale::Ru).0;
     end_current(&s);
     end_current(&s);
     // The last track plays: similar ones join the queue behind it.
@@ -342,10 +369,13 @@ fn autoplay_goes_on_after_the_last_track_with_nothing_the_queue_had() {
         st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() == 3
     });
     let st = s.rt.state();
-    assert_eq!(st.queue.radio.as_ref().unwrap().title, format!("Похожее на «{}»", st.player.current.as_ref().unwrap().title));
+    assert_eq!(
+        st.queue.radio.as_ref().unwrap().title,
+        RadioTitle::Autoplay(st.player.current.as_ref().unwrap().title.clone())
+    );
     assert_eq!(st.player.current.as_ref().map(|t| t.id), Some(album[2]));
     assert!(st.queue.next.iter().all(|e| !album.contains(&e.track.id)), "nothing the queue had");
-    assert_eq!(st.player.context_line(), context, "the queue keeps its name");
+    assert_eq!(st.player.context_header(nikgob_view::Locale::Ru).0, context, "the queue keeps its name");
     drop(st);
 
     // Off: a queue simply ends, and the radio it had stops picking.
@@ -400,7 +430,7 @@ fn a_radio_extends_itself_and_survives_a_restart() {
     assert_eq!(s.rt.state().player.current.as_ref().map(|t| t.id), Some(seed));
     wait_for(&s.rt, "three ahead", |st| st.queue.next.len() == 3);
     let title = s.rt.state().queue.radio.clone().unwrap().title;
-    assert!(title.starts_with("Радио · "), "{title}");
+    assert!(matches!(title, RadioTitle::Seed(_)), "{title:?}");
     assert_eq!(current_start(&l.lib, &s.rt).context, EventContext::Radio);
 
     // Two left: the short buffer fills up to three again by itself.
@@ -452,7 +482,7 @@ fn the_wave_plays_and_turns_without_a_skip() {
     wait_for(&s.rt, "three ahead", settled);
     let st = s.rt.state();
     let radio = st.queue.radio.clone().unwrap();
-    assert_eq!(radio.title, "Моя волна");
+    assert_eq!(radio.title, RadioTitle::Wave);
     let wave = radio.wave.unwrap();
     assert_eq!(wave.filter, nikgob_view::WaveFilter::default());
     assert_eq!(wave.preset, None);
@@ -501,7 +531,8 @@ fn the_wave_plays_and_turns_without_a_skip() {
     let before = entries(&s.rt.state());
     s.rt.send(Command::SetWave(calm));
     wait_for(&s.rt, "the calm answer", |st| {
-        st.toasts.iter().any(|t| t.text == "Нечего играть")
+        let nothing = nikgob_core::i18n::errors_in(st.prefs.resolved_locale()).nothing_to_play;
+        st.toasts.iter().any(|t| t.text == nothing)
             || st.queue.radio.as_ref().is_some_and(|r| !r.extending) && st.queue.next.len() == 3 && !entries(st).iter().any(|e| before.contains(e))
     });
     let st = s.rt.state();
@@ -545,7 +576,10 @@ fn a_chip_while_the_wave_starts_wins() {
     s.rt.send(Command::PlayWave { preset: None });
     let only_new = nikgob_view::WaveFilter { novelty: nikgob_view::WaveNovelty::OnlyNew, ..Default::default() };
     s.rt.send(Command::SetWave(only_new));
-    wait_for(&s.rt, "the newer filter's answer", |st| st.queue.current_entry.is_some() || st.toasts.iter().any(|t| t.text == "Нечего играть"));
+    wait_for(&s.rt, "the newer filter's answer", |st| {
+        let nothing = nikgob_core::i18n::errors_in(st.prefs.resolved_locale()).nothing_to_play;
+        st.queue.current_entry.is_some() || st.toasts.iter().any(|t| t.text == nothing)
+    });
     let st = s.rt.state();
     assert!(st.queue.current_entry.is_none(), "the library picks of «Баланс» started");
     assert!(st.queue.radio.is_none());
@@ -569,7 +603,10 @@ fn a_dry_wave_ends_at_once_without_the_refill() {
     let s = start(&l.lib, vec![yt.clone(), dz.clone()], prefs, None);
     wait_for(&s.rt, "the home", home_ready);
     s.rt.send(Command::PlayWave { preset: None });
-    wait_for(&s.rt, "the wave's end", |st| st.toasts.iter().any(|t| t.text == "Нечего играть"));
+    wait_for(&s.rt, "the wave's end", |st| {
+        let nothing = nikgob_core::i18n::errors_in(st.prefs.resolved_locale()).nothing_to_play;
+        st.toasts.iter().any(|t| t.text == nothing)
+    });
     let st = s.rt.state();
     assert!(st.queue.current_entry.is_none() && st.queue.radio.is_none());
     drop(st);
@@ -599,7 +636,10 @@ fn a_dry_only_new_wave_waits_for_its_refill_then_ends() {
     let s = start_with(&l.lib, vec![yt.clone(), dz.clone()], prefs, None, refill_schedule());
     wait_for(&s.rt, "the home", home_ready);
     s.rt.send(Command::PlayWave { preset: None });
-    wait_for(&s.rt, "the wave's end", |st| st.toasts.iter().any(|t| t.text == "Нечего играть"));
+    wait_for(&s.rt, "the wave's end", |st| {
+        let nothing = nikgob_core::i18n::errors_in(st.prefs.resolved_locale()).nothing_to_play;
+        st.toasts.iter().any(|t| t.text == nothing)
+    });
     let st = s.rt.state();
     assert!(st.queue.current_entry.is_none() && st.queue.radio.is_none());
     drop(st);
@@ -629,7 +669,10 @@ fn a_dry_wave_waits_for_its_refill_with_the_window_hidden() {
     wait_for(&s.rt, "the home", home_ready);
     s.rt.send(Command::WindowState { visible: false, focused: false });
     s.rt.send(Command::PlayWave { preset: None });
-    wait_for(&s.rt, "the wave's end", |st| st.toasts.iter().any(|t| t.text == "Нечего играть"));
+    wait_for(&s.rt, "the wave's end", |st| {
+        let nothing = nikgob_core::i18n::errors_in(st.prefs.resolved_locale()).nothing_to_play;
+        st.toasts.iter().any(|t| t.text == nothing)
+    });
     let day: Option<(String, u32)> = l.lib.cache_get("niche.day").unwrap().and_then(|(_, v)| serde_json::from_str(&v).ok());
     assert!(day.is_some_and(|d| d.1 >= 1), "{:?} {:?}", yt.all_calls(), dz.all_calls());
 }
@@ -658,7 +701,10 @@ fn a_dry_wave_plays_what_its_filter_was_topped_up_with_lately() {
         let s = start_with(&l.lib, services(), prefs(), None, refill_schedule());
         wait_for(&s.rt, "the home", home_ready);
         s.rt.send(Command::PlayWave { preset: None });
-        wait_for(&s.rt, "the wave's end", |st| st.toasts.iter().any(|t| t.text == "Нечего играть"));
+        wait_for(&s.rt, "the wave's end", |st| {
+        let nothing = nikgob_core::i18n::errors_in(st.prefs.resolved_locale()).nothing_to_play;
+        st.toasts.iter().any(|t| t.text == nothing)
+    });
     }
     // What the top-ups of the wave's filters (one a cluster) kept
     // (nothing): as if each had found two new songs.
@@ -683,7 +729,8 @@ fn a_dry_wave_plays_what_its_filter_was_topped_up_with_lately() {
     s.rt.send(Command::PlayWave { preset: None });
     wait_for(&s.rt, "the kept songs", |st| st.queue.current_entry.is_some() && st.queue.radio.is_some());
     let st = s.rt.state();
-    assert!(!st.toasts.iter().any(|t| t.text == "Нечего играть"));
+    let nothing = nikgob_core::i18n::errors_in(st.prefs.resolved_locale()).nothing_to_play;
+    assert!(!st.toasts.iter().any(|t| t.text == nothing));
     drop(st);
     assert_eq!(asked(&l.lib), before, "nothing asked again");
 }
@@ -939,7 +986,12 @@ fn daylist_picks(lib: &Library) -> serde_json::Value {
 #[test]
 fn the_home_gets_a_daylist_and_tiles_that_play() {
     let l = library(3, 6, 5, &[]);
-    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    let s = start(
+        &l.lib,
+        Vec::new(),
+        Prefs { language: nikgob_view::LangPref::Ru, ..Prefs::default() },
+        None,
+    );
     wait_for(&s.rt, "the daylist and the tiles", |st| st.home.daylist.is_some() && !st.home.tiles.is_empty());
     let st = s.rt.state().home.clone();
     let daylist = st.daylist.clone().unwrap();
@@ -976,13 +1028,17 @@ fn the_home_gets_a_daylist_and_tiles_that_play() {
     wait_until("the tile plays", || !s.asked.lock().unwrap().is_empty());
     wait_for(&s.rt, "its queue", |st| !st.queue.next.is_empty());
     assert!(s.rt.state().queue.radio.is_none(), "a tile is not endless");
-    assert_eq!(s.rt.state().player.context_line(), format!("Играет из микса «{}»", first.title));
+    assert_eq!(s.rt.state().player.context_header(nikgob_view::Locale::Ru).0, format!("Играет из микса «{}»", first.title));
     assert_eq!(current_start(&l.lib, &s.rt).context, EventContext::HomeSection);
 
     // The daylist plays the picks shown, then goes on as a radio.
     s.rt.send(Command::PlayMix { id: MixId::Daylist });
     wait_for(&s.rt, "the daylist", |st| {
-        st.queue.radio.as_ref().is_some_and(|r| r.title == daylist.title) && st.queue.next.len() == 29
+        st.queue
+            .radio
+            .as_ref()
+            .is_some_and(|r| r.title.title_in(nikgob_view::Locale::Ru) == daylist.title)
+            && st.queue.next.len() == 29
     });
     assert_eq!(current_start(&l.lib, &s.rt).context, EventContext::HomeSection);
     for _ in 0..27 {
@@ -1077,7 +1133,7 @@ fn downloaded_only_keeps_every_mix_to_files_at_once() {
     // The radio of a streamed song: the song (it cannot play here without
     // a service), then only files.
     s.rt.send(Command::StartRadio { seed: RadioSeed::Track(streams[0]) });
-    let radio = |st: &ViewState| st.queue.radio.as_ref().is_some_and(|r| r.title == "Радио · Stream song 0");
+    let radio = |st: &ViewState| st.queue.radio.as_ref().is_some_and(|r| r.title == RadioTitle::Seed("Stream song 0".into()));
     // The song cannot play: the radio's three picks wait.
     wait_for(&s.rt, "the stream's radio", |st| radio(st) && queued(st).len() >= 3);
     let q: Vec<TrackId> = queued(&s.rt.state()).into_iter().filter(|t| *t != streams[0]).collect();
@@ -1112,13 +1168,14 @@ fn a_dislike_leaves_the_home_and_its_undo_brings_it_back() {
         dislike: true,
     });
     wait_for(&s.rt, "the track to leave", |st| !hero_mix(st).contains(&t) && !st.home.mix.is_empty());
-    let undo = s
-        .rt
-        .state()
+    let st = s.rt.state();
+    let undo_label = nikgob_core::i18n::common_in(st.prefs.resolved_locale()).undo;
+    let undo = st
         .toasts
         .iter()
-        .find_map(|toast| toast.action.clone().filter(|(label, _)| label == "Отменить"))
+        .find_map(|toast| toast.action.clone().filter(|(label, _)| label == undo_label))
         .expect("an undo toast");
+    drop(st);
     assert_eq!(
         undo.1,
         Command::RecFeedback {
@@ -1178,7 +1235,7 @@ fn discovery_finds_new_songs_within_its_budget_and_keeps_them() {
     // «Слушать всё»: the discoveries play as a radio.
     s.rt.send(Command::PlayMix { id: MixId::Discover });
     wait_for(&s.rt, "the discoveries' radio", |st| {
-        st.queue.radio.as_ref().is_some_and(|r| r.title == "Новое для тебя") && st.player.current.is_some()
+        st.queue.radio.as_ref().is_some_and(|r| r.title == RadioTitle::Discover) && st.player.current.is_some()
     });
 
     // A dislike of a discovery takes it off the home at once.
@@ -1218,7 +1275,8 @@ fn downloaded_only_hides_new_music_on_the_home_and_plays_none() {
     std::thread::sleep(Duration::from_millis(300));
     let st = s.rt.state();
     assert!(st.queue.radio.is_none() && st.player.current.is_none(), "{:?}", st.queue.radio);
-    assert!(st.toasts.iter().any(|t| t.text.contains("Только скачанное")), "{:?}", st.toasts);
+    let expected = nikgob_core::i18n::errors_in(st.prefs.resolved_locale()).downloaded_only_no_new;
+    assert!(st.toasts.iter().any(|t| t.text == expected), "{:?}", st.toasts);
     drop(st);
     // Off again: they are back at once.
     let prefs = Prefs { mixes_downloaded_only: false, ..s.rt.state().prefs.clone() };
@@ -1429,11 +1487,12 @@ fn every_lane_names_its_artists() {
 #[test]
 fn the_mixes_of_the_day_stay_for_the_day() {
     let l = library(3, 6, 12, &[]);
-    let dir = std::env::temp_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let prefs = Prefs { language: nikgob_view::LangPref::Ru, ..Prefs::default() };
     let daily = |h: &nikgob_view::HomeView| -> Vec<(nikgob_view::MixKey, String, Vec<TrackId>)> {
         h.lanes.iter().filter(|c| c.key.is_daily()).map(|c| (c.key, c.title.clone(), c.tracks.iter().map(|t| t.id).collect())).collect()
     };
-    let first = daily(&nikgob_runtime::preview_home(&l.lib, &dir).unwrap().home);
+    let first = daily(&nikgob_runtime::preview_home_with(&l.lib, dir.path(), &prefs).unwrap().home);
     assert!(!first.is_empty(), "a library with a history has its mixes of the day");
     assert_eq!(first.iter().filter(|m| m.1.starts_with("Микс дня")).count(), 1, "one mix of the day");
     assert_eq!((first[0].0, first[0].1.as_str()), (nikgob_view::MixKey::Daily(0), "Микс дня"));
@@ -1451,7 +1510,7 @@ fn the_mixes_of_the_day_stay_for_the_day() {
             assert!(seen.insert(*t), "«{title}»: a song of another mix of its sort");
         }
     }
-    let home = nikgob_runtime::preview_home(&l.lib, &dir).unwrap().home;
+    let home = nikgob_runtime::preview_home_with(&l.lib, dir.path(), &prefs).unwrap().home;
     assert_eq!(daily(&home), first);
     let row: Vec<&nikgob_view::LaneCard> = home.lanes.iter().filter(|c| c.key != nikgob_view::MixKey::OnRepeat).collect();
     assert!(row.len() <= 10, "{}", row.len());
@@ -1726,8 +1785,11 @@ fn a_song_from_the_search_plays_alone_and_its_radio_goes_on() {
     });
     let st = s.rt.state();
     assert!(st.queue.prev.is_empty(), "the song alone: nothing before it");
-    assert_eq!(st.queue.radio.as_ref().unwrap().title, format!("Похожее на «{}»", st.player.current.as_ref().unwrap().title));
-    assert_eq!(st.player.context_line(), "Играет из поиска");
+    assert_eq!(
+        st.queue.radio.as_ref().unwrap().title,
+        RadioTitle::Autoplay(st.player.current.as_ref().unwrap().title.clone())
+    );
+    assert_eq!(st.player.context_header(nikgob_view::Locale::Ru).0, "Играет из поиска");
     drop(st);
 
     // Autoplay off: the song's own radio.
@@ -1740,7 +1802,61 @@ fn a_song_from_the_search_plays_alone_and_its_radio_goes_on() {
             && st.queue.radio.as_ref().is_some_and(|r| !r.autoplay && !r.extending)
             && !st.queue.next.is_empty()
     });
-    assert_eq!(s.rt.state().player.context_line(), "Играет из поиска", "the radio's queue keeps the search's name");
+    assert_eq!(s.rt.state().player.context_header(nikgob_view::Locale::Ru).0, "Играет из поиска", "the radio's queue keeps the search's name");
+}
+
+#[test]
+fn restoring_autoplay_and_search_radio_preserves_queue_origin() {
+    use nikgob_view::SearchPick;
+    let l = library(3, 6, 5, &[]);
+    let dir = tempfile::tempdir().unwrap();
+    let prefs_path = dir.path().join("prefs.json");
+    let picks: Vec<SearchPick> = [l.tracks[0], l.tracks[1], l.tracks[2], l.tracks[3]]
+        .into_iter()
+        .map(SearchPick::Library)
+        .collect();
+
+    // 1. Autoplay from a search pick preserves `QueueOrigin::Search` across restart.
+    let s = start_in(
+        &l.lib,
+        dir.path(),
+        Vec::new(),
+        Prefs { language: nikgob_view::LangPref::En, ..Prefs::default() },
+        Some(&prefs_path),
+    );
+    wait_for(&s.rt, "the home", home_ready);
+    s.rt.send(Command::PlaySearch { tracks: picks.clone(), start: 1, context: "поиска".into() });
+    wait_for(&s.rt, "autoplay active from search", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending)
+    });
+    drop(s);
+
+    let s = start_in(
+        &l.lib,
+        dir.path(),
+        Vec::new(),
+        Prefs { language: nikgob_view::LangPref::En, ..Prefs::default() },
+        Some(&prefs_path),
+    );
+    wait_for(&s.rt, "autoplay radio restored", |st| st.queue.radio.as_ref().is_some_and(|r| r.autoplay));
+    assert_eq!(s.rt.state().player.origin, nikgob_view::QueueOrigin::Search { service: None });
+    assert_eq!(s.rt.state().player.context_header(Locale::En).0, "Playing from search");
+    assert_eq!(s.rt.state().player.context_header(Locale::Ru).0, "Играет из поиска");
+
+    // 2. Search-started radio with autoplay off also preserves `QueueOrigin::Search` across restart.
+    let prefs = Prefs { autoplay: false, language: nikgob_view::LangPref::En, ..Prefs::default() };
+    s.rt.send(Command::SetPrefs(Box::new(prefs.clone())));
+    wait_for(&s.rt, "autoplay disabled", |st| !st.prefs.autoplay);
+    s.rt.send(Command::PlaySearch { tracks: picks, start: 2, context: "поиска".into() });
+    wait_for(&s.rt, "search radio active", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| !r.autoplay && !r.extending)
+    });
+    drop(s);
+
+    let s = start_in(&l.lib, dir.path(), Vec::new(), prefs, Some(&prefs_path));
+    wait_for(&s.rt, "search radio restored", |st| st.queue.radio.as_ref().is_some_and(|r| !r.autoplay));
+    assert_eq!(s.rt.state().player.origin, nikgob_view::QueueOrigin::Search { service: None });
+    assert_eq!(s.rt.state().player.context_header(Locale::En).0, "Playing from search");
 }
 
 /// «Трек из поиска → Остальные результаты поиска»: the results shown play
@@ -1902,4 +2018,298 @@ fn a_radio_started_during_the_pause_queues_what_plays_now() {
     wait_for(&s.rt, "the radio", |st| st.queue.radio.as_ref().is_some_and(|r| !r.extending) && st.queue.next.len() >= 2);
     let st = s.rt.state();
     assert!(st.queue.next.iter().all(|e| e.track.has_local), "{:?}", st.queue.next.iter().map(|e| &e.track.title).collect::<Vec<_>>());
+}
+
+#[test]
+fn active_daylist_and_style_mix_relocalize_on_language_switch() {
+    let l = library(3, 6, 5, &[]);
+    let dir = tempfile::tempdir().unwrap();
+    let prefs_path = dir.path().join("prefs.json");
+    let s = start(&l.lib, Vec::new(), Prefs { language: nikgob_view::LangPref::Ru, ..Prefs::default() }, Some(&prefs_path));
+    wait_for(&s.rt, "daylist and style mixes", |st| st.home.daylist.is_some() && !st.home.style_mixes.is_empty());
+
+    let ru_daylist = s.rt.state().home.daylist.clone().unwrap();
+    s.rt.send(Command::PlayMix { id: MixId::Daylist });
+    wait_for(&s.rt, "daylist playing in Ru", |st| {
+        st.queue
+            .radio
+            .as_ref()
+            .is_some_and(|r| r.title.title_in(Locale::Ru) == ru_daylist.title)
+            && st.player.cached_context().0 == format!("Играет из микса «{}»", ru_daylist.title)
+    });
+
+    s.rt.send(Command::SetPref(nikgob_view::PrefPatch::Language(nikgob_view::LangPref::En)));
+    wait_for(&s.rt, "daylist relocalized in En", |st| {
+        st.prefs.language == nikgob_view::LangPref::En
+            && st.home.daylist.as_ref().is_some_and(|d| {
+                d.title != ru_daylist.title
+                    && st.queue.radio.as_ref().is_some_and(|r| {
+                        r.title.title_in(Locale::En) == d.title && r.title_text == d.title
+                    })
+                    && st.player.cached_context().0 == format!("Playing from mix “{}”", d.title)
+            })
+    });
+
+    let en_daylist_title = s.rt.state().home.daylist.as_ref().unwrap().title.clone();
+    s.rt.send(Command::SetPref(nikgob_view::PrefPatch::Language(nikgob_view::LangPref::Ru)));
+    wait_for(&s.rt, "daylist relocalized back to Ru before restart", |st| {
+        st.prefs.language == nikgob_view::LangPref::Ru
+            && st
+                .queue
+                .radio
+                .as_ref()
+                .is_some_and(|r| r.title.title_in(Locale::Ru) == ru_daylist.title)
+    });
+    drop(s);
+
+    // Restart directly into En before Home rebuilds: persisted ActiveMixNaming relocalizes
+    // the restored Daylist run immediately without touching any Home card index.
+    let s = start(&l.lib, Vec::new(), Prefs { language: nikgob_view::LangPref::En, ..Prefs::default() }, Some(&prefs_path));
+    wait_for(&s.rt, "restored daylist relocalized in En before Home reliance", |st| {
+        st.queue
+            .radio
+            .as_ref()
+            .is_some_and(|r| r.title.title_in(Locale::En) == en_daylist_title)
+            && st.player.cached_context().0 == format!("Playing from mix “{}”", en_daylist_title)
+    });
+    wait_for(&s.rt, "home rebuilt after daylist restart", |st| !st.home.style_mixes.is_empty());
+
+    let en_style = s.rt.state().home.style_mixes[0].clone();
+    s.rt.send(Command::PlayMix { id: MixId::Style(0) });
+    wait_for(&s.rt, "style mix playing in En", |st| {
+        st.queue
+            .radio
+            .as_ref()
+            .is_some_and(|r| r.title.title_in(Locale::En) == en_style.title)
+            && st.player.cached_context().0 == format!("Playing from mix “{}”", en_style.title)
+    });
+
+    s.rt.send(Command::SetPref(nikgob_view::PrefPatch::Language(nikgob_view::LangPref::Ru)));
+    wait_for(&s.rt, "style mix relocalized in Ru", |st| {
+        st.prefs.language == nikgob_view::LangPref::Ru
+            && st.home.style_mixes.first().is_some_and(|m| {
+                m.title != en_style.title
+                    && st.queue.radio.as_ref().is_some_and(|r| {
+                        r.title.title_in(Locale::Ru) == m.title && r.title_text == m.title
+                    })
+                    && st.player.cached_context().0 == format!("Играет из микса «{}»", m.title)
+            })
+    });
+    let ru_style_title = s.rt.state().home.style_mixes[0].title.clone();
+    drop(s);
+
+    // Restart directly into En before Home rebuilds: persisted ActiveMixNaming relocalizes
+    // the restored Style run immediately without touching any Home card index.
+    let s = start(&l.lib, Vec::new(), Prefs { language: nikgob_view::LangPref::En, ..Prefs::default() }, Some(&prefs_path));
+    wait_for(&s.rt, "restored style mix relocalized in En before Home reliance", |st| {
+        st.queue
+            .radio
+            .as_ref()
+            .is_some_and(|r| r.title.title_in(Locale::En) == en_style.title)
+            && st.player.cached_context().0 == format!("Playing from mix “{}”", en_style.title)
+            && r_title_differs(&st.player.origin, Locale::En, &ru_style_title)
+    });
+}
+
+#[test]
+fn calm_wave_relocalizes_on_language_switch_and_restart() {
+    // Enough artists/tracks so Daily/Part mixes don't exceed OVERLAP against Calm,
+    // plus varied energy across tracks so Calm and Lively form distinct pools.
+    let ru_calm_titles = [
+        "тихая ночь", "дождь за окном", "медленный свет", "сон у реки", "мягкий ветер", "тёплый вечер",
+    ];
+    let mut named: Vec<(String, Vec<String>)> = Vec::new();
+    for a in 0..8 {
+        let name = format!("Тихий {a}");
+        let titles = ru_calm_titles.iter().map(|t| format!("{t} {a}")).collect();
+        named.push((name, titles));
+    }
+    let named_ref: Vec<(&str, Vec<&str>)> = named.iter().map(|(a, t)| (a.as_str(), t.iter().map(String::as_str).collect())).collect();
+    let named_ref: Vec<(&str, &[&str])> = named_ref.iter().map(|(a, t)| (*a, t.as_slice())).collect();
+    let l = library(5, 6, 6, &named_ref);
+    for (idx, &t) in l.tracks.iter().enumerate() {
+        if idx < 48 {
+            let v: Vec<f32> = (0..nikgob_recs::DIM).map(|i| -0.8 + ((idx + i) % 5) as f32 * 0.02).collect();
+            l.lib
+                .put_analysis(&Analysis {
+                    track_id: t,
+                    bliss_vector: v,
+                    analyzed_with: nikgob_recs::ANALYZED_WITH.to_owned(),
+                    source: AnalysisSource::File,
+                })
+                .unwrap();
+        }
+        let mut q = [3i8; nikgob_recs::embedding::COMPACT_DIM];
+        q[0] = ((idx % 40) as i8) - 20;
+        let c = nikgob_recs::Compact { scale: 0.01, q };
+        l.lib
+            .put_embedding(t, Some(&c.to_bytes()), nikgob_recs::EMBEDDED_WITH, AnalysisSource::File)
+            .unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let prefs_path = dir.path().join("prefs.json");
+    let base_prefs = Prefs {
+        mixes_profiles: false,
+        mixes_everything: false,
+        mixes_on_repeat: false,
+        ..Prefs::default()
+    };
+    let s = start_in(
+        &l.lib,
+        dir.path(),
+        Vec::new(),
+        Prefs { language: nikgob_view::LangPref::Ru, ..base_prefs.clone() },
+        Some(&prefs_path),
+    );
+    wait_for(&s.rt, "home ready", home_ready);
+    let lanes: Vec<_> = s.rt.state().home.lanes.iter().map(|l| (l.key, l.title.clone())).collect();
+    let ru_calm = s
+        .rt
+        .state()
+        .home
+        .lanes
+        .iter()
+        .find(|lane| lane.key == nikgob_view::MixKey::Calm)
+        .unwrap_or_else(|| panic!("no Calm lane in {lanes:?}"))
+        .clone();
+    s.rt.send(Command::PlayWave { preset: Some(nikgob_view::MixKey::Calm) });
+    wait_for(&s.rt, "calm wave playing in Ru", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| r.title == RadioTitle::Mix(ru_calm.mix_title()))
+            && st.player.origin == ru_calm.origin()
+    });
+    assert!(matches!(ru_calm.mix_title(), MixTitle::Side { calm: true, .. }));
+
+    s.rt.send(Command::SetPref(nikgob_view::PrefPatch::Language(nikgob_view::LangPref::En)));
+    wait_for(&s.rt, "calm wave relocalized to En", |st| {
+        st.prefs.language == nikgob_view::LangPref::En
+            && st.home.lanes.iter().find(|lane| lane.key == nikgob_view::MixKey::Calm).is_some_and(|lane| {
+                lane.display_title_in(Locale::En) != ru_calm.title
+                    && lane.display_title_in(Locale::En) != "Calm Mix"
+                    && st.queue.radio.as_ref().is_some_and(|r| r.title == RadioTitle::Mix(ru_calm.mix_title()))
+                    && st.player.origin == lane.origin()
+            })
+    });
+    let en_calm = s.rt.state().home.lanes.iter().find(|lane| lane.key == nikgob_view::MixKey::Calm).unwrap().clone();
+    assert_eq!(en_calm.mix_title(), ru_calm.mix_title());
+    let (en_header, _) = s.rt.state().player.context_header(Locale::En);
+    assert_eq!(en_header, format!("Playing from mix “{}”", en_calm.display_title_in(Locale::En)));
+
+    // Shuffling a Calm card passes `en_calm.origin()` through `Command::PlayTracks`
+    // and must also relocalize live when switching En -> Ru.
+    let calm_ids: Vec<_> = en_calm.tracks.iter().map(|t| t.id).collect();
+    s.rt.send(Command::PlayTracks { tracks: calm_ids, start: 0, context: en_calm.origin() });
+    wait_for(&s.rt, "shuffled calm card playing in En", |st| st.player.origin == en_calm.origin());
+
+    s.rt.send(Command::SetPref(nikgob_view::PrefPatch::Language(nikgob_view::LangPref::Ru)));
+    wait_for(&s.rt, "shuffled calm card relocalized back to Ru", |st| {
+        st.prefs.language == nikgob_view::LangPref::Ru && st.player.origin == ru_calm.origin()
+    });
+    let (ru_header, _) = s.rt.state().player.context_header(Locale::Ru);
+    assert_eq!(ru_header, format!("Играет из микса «{}»", ru_calm.display_title_in(Locale::Ru)));
+
+    // Start Calm wave again before shutdown so restart tests persisted `MixTitle::Side` radio restoration.
+    s.rt.send(Command::PlayWave { preset: Some(nikgob_view::MixKey::Calm) });
+    wait_for(&s.rt, "calm wave active again in Ru", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| r.title == RadioTitle::Mix(ru_calm.mix_title()))
+            && st.player.origin == ru_calm.origin()
+    });
+    drop(s);
+
+    // Restart directly into En: typed MixTitle::Side relocalizes the restored Calm wave immediately.
+    let s = start_in(
+        &l.lib,
+        dir.path(),
+        Vec::new(),
+        Prefs { language: nikgob_view::LangPref::En, ..base_prefs },
+        Some(&prefs_path),
+    );
+    wait_for(&s.rt, "restored calm wave relocalized in En before Home reliance", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| r.title == RadioTitle::Mix(en_calm.mix_title()))
+            && st.player.origin == nikgob_view::QueueOrigin::Mix(en_calm.mix_title())
+    });
+    let (restored_header, _) = s.rt.state().player.context_header(Locale::En);
+    assert_eq!(restored_header, format!("Playing from mix “{}”", en_calm.display_title_in(Locale::En)));
+}
+
+#[test]
+fn queue_explanations_relocalize_on_language_switch() {
+    let l = library(0, 0, 0, KNOWN);
+    let (yt, dz) = fakes();
+    let prefs = Prefs {
+        language: nikgob_view::LangPref::Ru,
+        graph_services: false,
+        graph_open_data: false,
+        ..Prefs::default()
+    };
+    let s = start(&l.lib, vec![yt, dz], prefs, None);
+    wait_for(&s.rt, "discoveries ready", |st| !st.home.discover.is_empty());
+
+    s.rt.send(Command::PlayMix { id: MixId::Discover });
+    wait_for(&s.rt, "discovery explanation in Ru", |st| {
+        st.queue.current_why.as_deref().is_some_and(|w| w.starts_with("Новое: "))
+            && st.queue.next.iter().any(|e| e.why.as_deref().is_some_and(|w| w.starts_with("Новое: ")))
+    });
+
+    s.rt.send(Command::SetPref(nikgob_view::PrefPatch::Language(nikgob_view::LangPref::En)));
+    wait_for(&s.rt, "discovery explanation relocalized to En", |st| {
+        st.prefs.language == nikgob_view::LangPref::En
+            && st.queue.current_why.as_deref().is_some_and(|w| w.starts_with("New: "))
+            && st.queue.next.iter().any(|e| e.why.as_deref().is_some_and(|w| w.starts_with("New: ")))
+            && st.queue.next.iter().all(|e| e.why.as_deref().is_none_or(|w| !w.starts_with("Новое: ")))
+    });
+
+    s.rt.send(Command::SetPref(nikgob_view::PrefPatch::Language(nikgob_view::LangPref::Ru)));
+    wait_for(&s.rt, "discovery explanation relocalized back to Ru", |st| {
+        st.prefs.language == nikgob_view::LangPref::Ru
+            && st.queue.current_why.as_deref().is_some_and(|w| w.starts_with("Новое: "))
+            && st.queue.next.iter().any(|e| e.why.as_deref().is_some_and(|w| w.starts_with("Новое: ")))
+    });
+    drop(s);
+
+    // Local radio pick explanation (`why_pick_pair`) also switches live with language.
+    let local = library(3, 6, 5, &[]);
+    let rs = start(
+        &local.lib,
+        Vec::new(),
+        Prefs { language: nikgob_view::LangPref::Ru, ..Prefs::default() },
+        None,
+    );
+    wait_for(&rs.rt, "local home ready", home_ready);
+    rs.rt.send(Command::StartRadio { seed: RadioSeed::Track(local.tracks[0]) });
+    wait_for(&rs.rt, "radio pick explanation in Ru", |st| {
+        st.queue.next.iter().any(|e| e.why.is_some())
+    });
+    let (explained_entry, ru_why) = rs
+        .rt
+        .state()
+        .queue
+        .next
+        .iter()
+        .find_map(|e| e.why.clone().map(|w| (e.entry, w)))
+        .unwrap();
+    assert!(
+        ru_why == "Следующий на альбоме"
+            || ru_why == "Похоже по звуку"
+            || ru_why.starts_with("После ")
+            || ru_why.starts_with("Часто "),
+        "unexpected Ru radio why: {ru_why}"
+    );
+
+    rs.rt.send(Command::SetPref(nikgob_view::PrefPatch::Language(nikgob_view::LangPref::En)));
+    wait_for(&rs.rt, "radio pick explanation relocalized to En", |st| {
+        st.prefs.language == nikgob_view::LangPref::En
+            && st.queue.next.iter().any(|e| {
+                e.entry == explained_entry
+                    && e.why.as_deref().is_some_and(|w| {
+                        w == "Next on album" || w == "Similar sound" || w.starts_with("Often ")
+                    })
+            })
+    });
+}
+
+fn r_title_differs(origin: &nikgob_view::QueueOrigin, loc: Locale, ru: &str) -> bool {
+    match origin {
+        nikgob_view::QueueOrigin::Mix(mt) => mt.title_in(loc) != ru,
+        _ => false,
+    }
 }

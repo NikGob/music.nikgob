@@ -206,7 +206,7 @@ impl Worker {
             return;
         }
         let (Some(cfg), Some(svc)) = (self.torrent_config(), self.import.as_ref()) else {
-            self.toast("Торренты недоступны", None);
+            self.toast_err("Торренты недоступны", None);
             self.torrents.pending.clear();
             self.inbox_torrents_not_started(false);
             return;
@@ -244,7 +244,7 @@ impl Worker {
             Err(e) => {
                 log::error!("torrent client: {e}");
                 self.torrents.pending.clear();
-                self.toast("Не запустился торрент-клиент", None);
+                self.toast_err("Не запустился торрент-клиент", None);
                 self.inbox_torrents_not_started(true);
             }
         }
@@ -268,7 +268,7 @@ impl Worker {
                 Ok(bytes) => self.add_payload(TorrentPayload::TorrentFile(bytes), None, None),
                 Err(e) => {
                     log::warn!("{}: {e}", path.display());
-                    self.toast("Не получилось прочитать .torrent", None);
+                    self.toast_err("Не получилось прочитать .torrent", None);
                 }
             },
             Command::AddMagnet(m) => {
@@ -276,7 +276,7 @@ impl Worker {
                 if m.starts_with("magnet:") {
                     self.add_payload(TorrentPayload::Magnet(m.clone()), None, Some(m));
                 } else {
-                    self.toast("Это не magnet-ссылка", None);
+                    self.toast_err("Это не magnet-ссылка", None);
                 }
             }
             // Import jobs (folders, files) are never paused; a cancel stops
@@ -287,7 +287,7 @@ impl Worker {
             Command::PauseJob(id, _) if crate::running::job_kind(id) == crate::running::JobKind::Direct => {}
             Command::CancelJob(id) if crate::running::job_kind(id) == crate::running::JobKind::Direct => self.cancel_run(id),
             Command::PauseJob(id, _) if id & crate::IMPORT_ID != 0 => {
-                self.toast("Импорт нельзя поставить на паузу — его можно только отменить", None);
+                self.toast_info("Импорт нельзя поставить на паузу — его можно только отменить", None);
             }
             Command::CancelJob(id) if id & crate::IMPORT_ID != 0 => self.cancel_import(id & !crate::IMPORT_ID),
             Command::PauseJob(id, pause) => self.with_client(Box::new(move |w, c| {
@@ -366,7 +366,7 @@ impl Worker {
         let (Some(c), Some(indexer), Some(svc)) =
             (self.candidates.get(result).cloned(), self.indexer.clone(), self.import.as_ref())
         else {
-            self.toast("Результат поиска устарел — найди заново", None);
+            self.toast_err("Результат поиска устарел — найди заново", None);
             return;
         };
         let cid = c.id.clone();
@@ -394,7 +394,7 @@ impl Worker {
             Ok(p) => then(self, p),
             Err(e) => {
                 log::warn!("fetching torrent: {e}");
-                self.toast(format!("Не скачать .torrent: {e}"), None);
+                self.toast_err(format!("Не скачать .torrent: {e}"), None);
                 self.publish(|s| {
                     if let Some(f) = s.downloads.files.as_mut().filter(|f| f.result == Some(result)) {
                         f.loading = false;
@@ -407,7 +407,7 @@ impl Worker {
 
     fn download_result(&mut self, result: usize, files: Option<Vec<usize>>) {
         self.publish(|s| s.downloads.files = None);
-        self.toast("Добавляю раздачу…", None);
+        self.toast_work("Добавляю раздачу…", None);
         self.fetch_payload(result, move |w, p| {
             let magnet = match &p {
                 TorrentPayload::Magnet(m) => Some(m.clone()),
@@ -558,7 +558,7 @@ impl Worker {
                     log::warn!("saving download: {e}");
                 }
                 if self.state.read().prefs.download_toasts {
-                    self.toast(format!("Качается: {name}"), None);
+                    self.toast_work(format!("Качается: {name}"), None);
                 }
                 self.poll_torrents();
             }
@@ -567,7 +567,7 @@ impl Worker {
                 if let Some(staging) = consume {
                     self.inbox_torrent_answered(&staging, false);
                 }
-                self.toast(format!("Не получилось добавить раздачу: {e}"), None);
+                self.toast_err(format!("Не получилось добавить раздачу: {e}"), None);
             }
         }
     }
@@ -752,7 +752,7 @@ impl Worker {
         self.torrents.history.truncate(100);
         self.torrents.last_view = None;
         if self.state.read().prefs.download_toasts {
-            self.toast(format!("Скачано: {}", t.name), None);
+            self.toast_ok(format!("Скачано: {}", t.name), None);
         }
         // Downloaded for a wishlist item: its files become the item's tracks.
         let item = self.lib.get_download(&t.info_hash).ok().flatten().and_then(|d| d.wishlist_id);

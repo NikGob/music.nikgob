@@ -2213,10 +2213,10 @@ where
             .filter(|p| Path::new(p).starts_with(old_dir))
             .count();
         if named > 0 {
-            return Err(ImportError::Other(format!(
-                "в {} лежат FLAC-оригиналы в папках альбомов ({named})",
-                old_dir.display()
-            )));
+            return Err(ImportError::NamedMastersInAlbumFolders {
+                dir: old_dir.to_path_buf(),
+                count: named,
+            });
         }
     }
     fsutil::create_dir_all(new_dir)?;
@@ -2331,10 +2331,7 @@ where
         let verified_size = fsutil::file_size(&tmp)?;
         if verified_size != out_bytes.len() as u64 {
             let _ = fsutil::remove_file(&tmp);
-            return Err(ImportError::Other(format!(
-                "sidecar verification failed for {}",
-                dst_json.display()
-            )));
+            return Err(ImportError::SidecarVerificationFailed { path: dst_json });
         }
         std::fs::rename(long_path(&tmp), long_path(&dst_json)).map_err(|e| {
             let _ = fsutil::remove_file(&tmp);

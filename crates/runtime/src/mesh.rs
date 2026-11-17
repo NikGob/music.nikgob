@@ -353,7 +353,8 @@ impl Worker {
         }
         self.mesh.forgetting.push((node_id.clone(), nikgob_library::now_ms()));
         self.mesh_publish();
-        self.toast(format!("Устройство «{name}» забыто"), Some(("Отменить".to_owned(), Command::MeshRestore { node_id })));
+        let undo = self.undo_action(Command::MeshRestore { node_id });
+        self.toast_info(format!("Устройство «{name}» забыто"), Some(undo));
     }
 
     fn mesh_publish(&mut self) {
@@ -369,15 +370,16 @@ impl Worker {
 
     /// Changes `[mesh]` in settings.toml; a failure is a toast.
     fn mesh_edit(&mut self, edit: impl FnOnce(&mut MeshSettings) -> bool) {
+        let err = nikgob_core::i18n::errors_in(self.locale());
         let Some(path) = self.settings_path.clone() else {
-            self.toast("Некуда сохранить настройки", None);
+            self.toast_err(err.no_settings_path, None);
             return;
         };
         let mut settings = match Settings::load(&path) {
             Ok(s) => s,
             Err(e) => {
                 log::error!("loading settings: {e}");
-                self.toast("settings.toml не читается — поправь файл вручную", None);
+                self.toast_err(err.settings_unreadable, None);
                 return;
             }
         };
@@ -386,7 +388,7 @@ impl Worker {
         }
         if let Err(e) = settings.save(&path) {
             log::error!("saving settings: {e}");
-            self.toast("Не удалось сохранить настройки", None);
+            self.toast_failed_save_prefs();
             return;
         }
         self.mesh.settings = settings.mesh;
@@ -532,12 +534,13 @@ impl Worker {
                     self.mesh.rows.iter().find(|r| r.id == node_id).map_or_else(|| n.view.name.clone(), |r| r.shown_name().to_owned())
                 });
                 self.mesh_publish();
-                self.toast(format!("Не удалось забыть «{}»: {why}", name.unwrap_or_else(|| "устройство".to_owned())), None);
+                let msg = nikgob_core::i18n::ErrorStrings::mesh_forget_failed_in(self.locale(), name.as_deref(), &why);
+                self.toast_err(msg, None);
             }
             Command::MeshSetSync { node_id, on } => {
                 if let Err(e) = self.lib.set_sync_off(&node_id, !on) {
                     log::error!("mesh: the sync switch not saved: {e}");
-                    self.toast("Не удалось сохранить настройку", None);
+                    self.toast_err(nikgob_core::i18n::errors_in(self.locale()).save_setting_failed, None);
                     return;
                 }
                 self.mesh.sync_off.retain(|o| *o != node_id);

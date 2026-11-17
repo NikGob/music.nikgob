@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use nikgob_core::i18n::Locale;
 use nikgob_core::model::{ArtistId, ReleaseId};
 
 use crate::analysis::{DIM, Vector};
@@ -54,28 +55,69 @@ pub struct StyleMix {
     /// Listened tracks in it.
     pub size: usize,
     /// The mean sound of its tracks on the mood axes (its words,
-    /// [`style_words`]).
+    /// [`style_words_in`]).
     pub axes: Axes,
 }
 
-/// What a style sounds like in one or two words («спокойное и мрачное»):
-/// the axes it leans on most, at least [`WORD_LEAN`] from the library's
-/// middle. `None` for a style in the middle of everything.
-pub fn style_words(a: Axes) -> Option<String> {
-    let mut words: Vec<(f32, &str)> = [
-        (a.energy, "энергичное", "спокойное"),
-        (a.brightness, "светлое", "мрачное"),
-        (a.steadiness, "ровное", "переменчивое"),
+/// One dominant sound trait along a mood axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StyleWord {
+    Energetic,
+    Calm,
+    Bright,
+    Dark,
+    Steady,
+    Shifting,
+}
+
+impl StyleWord {
+    /// Localized descriptor word for `self` in `loc`.
+    pub const fn word_in(self, loc: Locale) -> &'static str {
+        match (loc, self) {
+            (Locale::Ru, Self::Energetic) => "энергичное",
+            (Locale::Ru, Self::Calm) => "спокойное",
+            (Locale::Ru, Self::Bright) => "светлое",
+            (Locale::Ru, Self::Dark) => "мрачное",
+            (Locale::Ru, Self::Steady) => "ровное",
+            (Locale::Ru, Self::Shifting) => "переменчивое",
+            (Locale::En, Self::Energetic) => "energetic",
+            (Locale::En, Self::Calm) => "calm",
+            (Locale::En, Self::Bright) => "bright",
+            (Locale::En, Self::Dark) => "dark",
+            (Locale::En, Self::Steady) => "steady",
+            (Locale::En, Self::Shifting) => "shifting",
+        }
+    }
+}
+
+/// The dominant sound traits of `a` (at least [`WORD_LEAN`] from the library's
+/// middle), strongest first.
+pub fn style_traits(a: Axes) -> Vec<StyleWord> {
+    let mut words: Vec<(f32, StyleWord)> = [
+        (a.energy, StyleWord::Energetic, StyleWord::Calm),
+        (a.brightness, StyleWord::Bright, StyleWord::Dark),
+        (a.steadiness, StyleWord::Steady, StyleWord::Shifting),
     ]
     .into_iter()
     .filter(|(x, _, _)| x.abs() >= WORD_LEAN)
     .map(|(x, up, down)| (x.abs(), if x > 0.0 { up } else { down }))
     .collect();
     words.sort_by(|x, y| y.0.total_cmp(&x.0));
+    words.into_iter().map(|(_, w)| w).collect()
+}
+
+/// What a style sounds like in one or two words («спокойное и мрачное» /
+/// «calm and dark»): the axes it leans on most, at least [`WORD_LEAN`] from
+/// the library's middle. `None` for a style in the middle of everything.
+pub fn style_words_in(a: Axes, loc: Locale) -> Option<String> {
+    let words = style_traits(a);
     match words.as_slice() {
         [] => None,
-        [(_, a)] => Some((*a).to_owned()),
-        [(_, a), (_, b), ..] => Some(format!("{a} и {b}")),
+        [w] => Some(w.word_in(loc).to_owned()),
+        [a, b, ..] => Some(match loc {
+            Locale::Ru => format!("{} и {}", a.word_in(loc), b.word_in(loc)),
+            Locale::En => format!("{} and {}", a.word_in(loc), b.word_in(loc)),
+        }),
     }
 }
 
@@ -400,15 +442,20 @@ mod tests {
     #[test]
     fn a_style_is_named_by_its_sound() {
         let ax = |energy, brightness, steadiness| Axes { energy, brightness, steadiness };
-        assert_eq!(style_words(ax(0.05, -0.1, 0.0)), None);
-        assert_eq!(style_words(ax(-0.6, -0.3, 0.1)).as_deref(), Some("спокойное и мрачное"));
-        assert_eq!(style_words(ax(0.1, 0.5, 0.0)).as_deref(), Some("светлое"));
-        assert_eq!(style_words(ax(0.3, 0.0, -0.9)).as_deref(), Some("переменчивое и энергичное"));
+        assert_eq!(style_words_in(ax(0.05, -0.1, 0.0), Locale::Ru), None);
+        assert_eq!(style_words_in(ax(0.05, -0.1, 0.0), Locale::En), None);
+        assert_eq!(style_words_in(ax(-0.6, -0.3, 0.1), Locale::Ru).as_deref(), Some("спокойное и мрачное"));
+        assert_eq!(style_words_in(ax(-0.6, -0.3, 0.1), Locale::En).as_deref(), Some("calm and dark"));
+        assert_eq!(style_words_in(ax(0.1, 0.5, 0.0), Locale::Ru).as_deref(), Some("светлое"));
+        assert_eq!(style_words_in(ax(0.1, 0.5, 0.0), Locale::En).as_deref(), Some("bright"));
+        assert_eq!(style_words_in(ax(0.3, 0.0, -0.9), Locale::Ru).as_deref(), Some("переменчивое и энергичное"));
+        assert_eq!(style_words_in(ax(0.3, 0.0, -0.9), Locale::En).as_deref(), Some("shifting and energetic"));
+        assert_eq!(style_traits(ax(0.3, 0.0, -0.9)), [StyleWord::Shifting, StyleWord::Energetic]);
         // The two genres of the library sound opposite.
         let (cat, idx, input) = genres(false);
         let taste = Taste::build(&cat, &input, 0);
         let mixes = Recs::new(&cat, &taste, &idx).style_mixes(&[], 1);
-        let words: Vec<Option<String>> = mixes.iter().map(|m| style_words(m.axes)).collect();
+        let words: Vec<Option<String>> = mixes.iter().map(|m| style_words_in(m.axes, Locale::Ru)).collect();
         assert_eq!(words.len(), 2);
         assert!(words.iter().all(Option::is_some) && words[0] != words[1], "{words:?}");
     }

@@ -411,14 +411,20 @@ fn clock(ms: u32) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// A song's row on a pair's card: its title, its length and format.
-pub(crate) fn side_option(s: &SameSide) -> v::ConfirmOption {
+/// A song's row on a pair's card in `loc`: its title, its length and format.
+pub(crate) fn side_option_in(s: &SameSide, loc: nikgob_core::i18n::Locale) -> v::ConfirmOption {
     let mut detail: Vec<String> = Vec::new();
     if let Some(ms) = s.duration_ms {
         detail.push(clock(ms));
     }
-    detail.push(nikgob_core::quality::label(&s.codec, s.bitrate, None));
+    detail.push(nikgob_core::quality::label_in(&s.codec, s.bitrate, None, loc));
     v::ConfirmOption { label: s.title.clone(), detail: detail.join(" · "), recommended: false }
+}
+
+/// A song's row on a pair's card: its title, its length and format.
+#[allow(dead_code)]
+pub(crate) fn side_option(s: &SameSide) -> v::ConfirmOption {
+    side_option_in(s, nikgob_core::i18n::locale())
 }
 
 /// The two files of a pair in the order the card shows them: the one that
@@ -428,14 +434,21 @@ pub(crate) fn card_sides(o: &SameAudioOffer) -> (&SameSide, &SameSide) {
     if o.b.added_at > o.a.added_at { (&o.b, &o.a) } else { (&o.a, &o.b) }
 }
 
-/// A song's row on the card of a pair on two albums: its title, its album,
+/// A song's row on the card of a pair on two albums in `loc`: its title, its album,
 /// length and format.
-pub(crate) fn album_option(s: &SameSide) -> v::ConfirmOption {
-    let mut o = side_option(s);
+pub(crate) fn album_option_in(s: &SameSide, loc: nikgob_core::i18n::Locale) -> v::ConfirmOption {
+    let mut o = side_option_in(s, loc);
     if !s.album.is_empty() {
         o.detail = format!("{} · {}", s.album, o.detail);
     }
     o
+}
+
+/// A song's row on the card of a pair on two albums: its title, its album,
+/// length and format.
+#[allow(dead_code)]
+pub(crate) fn album_option(s: &SameSide) -> v::ConfirmOption {
+    album_option_in(s, nikgob_core::i18n::locale())
 }
 
 /// The two files of the pair are on two albums (or loose): one recording
@@ -444,9 +457,9 @@ pub(crate) fn on_two_albums(o: &SameAudioOffer) -> bool {
     !o.a.same_release(&o.b)
 }
 
-/// The «Подтверди» card of a pair: on one album, which file holds the
+/// The «Подтверди» card of a pair in `loc`: on one album, which file holds the
 /// other song; on two albums, whether the two are one song.
-pub(crate) fn pair_card(id: u64, o: &SameAudioOffer) -> v::Confirm {
+pub(crate) fn pair_card_in(id: u64, o: &SameAudioOffer, loc: nikgob_core::i18n::Locale) -> v::Confirm {
     let (first, second) = card_sides(o);
     if on_two_albums(o) {
         return v::Confirm {
@@ -454,7 +467,7 @@ pub(crate) fn pair_card(id: u64, o: &SameAudioOffer) -> v::Confirm {
             title: o.artist.clone(),
             origin: String::new(),
             question: "Одна и та же песня?".into(),
-            options: vec![album_option(first), album_option(second)],
+            options: vec![album_option_in(first, loc), album_option_in(second, loc)],
             skip_label: "Разные песни".into(),
             accept_label: "Одна песня".into(),
             pick: None,
@@ -466,12 +479,19 @@ pub(crate) fn pair_card(id: u64, o: &SameAudioOffer) -> v::Confirm {
         title: o.album.clone(),
         origin: String::new(),
         question: "В каком файле другая песня?".into(),
-        options: vec![side_option(first), side_option(second)],
+        options: vec![side_option_in(first, loc), side_option_in(second, loc)],
         skip_label: "Всё верно".into(),
         accept_label: "В файле другая песня".into(),
         pick: None,
         yes_no: false,
     }
+}
+
+/// The «Подтверди» card of a pair: on one album, which file holds the
+/// other song; on two albums, whether the two are one song.
+#[cfg(test)]
+pub(crate) fn pair_card(id: u64, o: &SameAudioOffer) -> v::Confirm {
+    pair_card_in(id, o, nikgob_core::i18n::locale())
 }
 
 impl SameAudioJob {
@@ -568,6 +588,7 @@ impl Worker {
     /// «Подтверди»: a card per pair of playing files that sound the same
     /// under different titles (none while a file of theirs is handled).
     pub(crate) fn publish_same_audio(&mut self) {
+        let loc = self.locale();
         let offers = if self.import.is_some() { self.lib.same_audio_offers().unwrap_or_default() } else { Vec::new() };
         let j = &mut self.same_audio;
         j.shown.clear();
@@ -586,7 +607,7 @@ impl Worker {
                     id
                 }
             };
-            confirms.push(pair_card(id, &o));
+            confirms.push(pair_card_in(id, &o, loc));
             j.shown.insert(id, o);
         }
         self.publish(|s| {
@@ -650,7 +671,7 @@ impl Worker {
             return;
         }
         let Some(svc) = &self.import else {
-            self.toast("Импорт недоступен", None);
+            self.toast_err("Импорт недоступен", None);
             return;
         };
         let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
@@ -739,14 +760,14 @@ impl Worker {
                         self.reload_after_import();
                         // The track is looked for again, without that file.
                         self.wish_again(track);
-                        self.toast(
+                        self.toast_ok(
                             format!("«{title}»: файл в Корзине, ищу заново"),
                             Some(("Вернуть".into(), Command::UndoWrongFile(track))),
                         );
                     }
                     Err(e) => {
                         log::warn!("same audio: «{title}» stays: {e}");
-                        self.toast(format!("Не получилось убрать файл «{title}»"), None);
+                        self.toast_err(format!("Не получилось убрать файл «{title}»"), None);
                     }
                 }
                 self.publish_same_audio();
@@ -758,15 +779,15 @@ impl Worker {
                         self.reload_after_import();
                         // The file is back: what looks for it stops.
                         self.wish_file_back(track);
-                        self.toast("Файл вернулся", None);
+                        self.toast_ok("Файл вернулся", None);
                     }
                     Ok(false) => {
                         self.reload_after_import();
-                        self.toast("Файл не вернулся: его место занято", None);
+                        self.toast_err("Файл не вернулся: его место занято", None);
                     }
                     Err(e) => {
                         log::warn!("same audio: undo of {track}: {e}");
-                        self.toast("Не получилось вернуть файл", None);
+                        self.toast_err("Не получилось вернуть файл", None);
                     }
                 }
                 self.publish_same_audio();

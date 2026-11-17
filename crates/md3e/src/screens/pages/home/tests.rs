@@ -168,6 +168,7 @@ fn lane(title: &str) -> LaneCard {
     LaneCard {
         key: nikgob_view::MixKey::Everything,
         title: title.to_owned(),
+        mix_title: None,
         short_titles: Vec::new(),
         artists: vec!["Kevin Penkin".to_owned()],
         new_artists: Vec::new(),
@@ -506,20 +507,21 @@ fn a_shortcut_is_new_only_when_its_picture_or_name_is() {
 /// whatever its click does.
 #[test]
 fn a_playing_tile_and_mix_are_told() {
+    use nikgob_view::{MixTitle, QueueOrigin};
     let mut st = ViewState::default();
-    let tile = MixCard { id: MixId::Daylist, title: "Утро".into(), kicker: String::new(), subtitle: String::new(), covers: Vec::new() };
+    let tile = MixCard { id: MixId::Daylist, title: "Утро".into(), mix_title: None, kicker: String::new(), subtitle: String::new(), covers: Vec::new() };
     assert!(!tile_playing(&st, &tile));
     st.player.status = Status::Playing;
-    st.player.context = Some("микса «Утро»".into());
+    st.player.origin = QueueOrigin::Mix(MixTitle::Custom("Утро".into()));
     assert!(tile_playing(&st, &tile));
-    st.player.context = Some("микса «Утро 2»".into());
+    st.player.origin = QueueOrigin::Mix(MixTitle::Custom("Утро 2".into()));
     assert!(!tile_playing(&st, &tile));
-    st.player.context = Some("микса «Утро»".into());
+    st.player.origin = QueueOrigin::Mix(MixTitle::Custom("Утро".into()));
     st.player.status = Status::Paused;
     assert!(!tile_playing(&st, &tile), "paused: at rest");
     let l = lane("Всё вперемешку");
     st.player.status = Status::Playing;
-    st.player.context = Some(l.context());
+    st.player.origin = l.origin();
     assert!(lane_playing(&st, &l), "started from its page, it plays though its click starts a wave");
 }
 
@@ -527,7 +529,7 @@ fn a_playing_tile_and_mix_are_told() {
 /// still a section of its own.
 #[test]
 fn the_daylist_leads_the_tiles_of_the_day() {
-    let card = |id, title: &str| MixCard { id, title: title.into(), kicker: String::new(), subtitle: String::new(), covers: Vec::new() };
+    let card = |id, title: &str| MixCard { id, title: title.into(), mix_title: None, kicker: String::new(), subtitle: String::new(), covers: Vec::new() };
     let mut h = HomeView::default();
     assert!(day_tiles(&h).is_empty());
     assert!(!sections(&h, false, false).contains(&Section::OfDay));

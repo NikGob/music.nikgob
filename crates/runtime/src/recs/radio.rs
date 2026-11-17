@@ -101,7 +101,7 @@ const ASKED_KEEP: usize = 200;
 pub(crate) struct RadioRun {
     id: u64,
     state: Engine,
-    title: String,
+    pub(crate) title: v::RadioTitle,
     ctx: EventContext,
     /// Seeds the engine's jitter.
     seed: u64,
@@ -136,7 +136,7 @@ pub(crate) struct RadioRun {
     /// Picks queued so far and how many of them new.
     queued: (usize, usize),
     /// Why each new candidate is offered: where it was found.
-    via: HashMap<RemoteId, String>,
+    via: HashMap<RemoteId, nikgob_core::i18n::PerLocale<String>>,
     /// The library's songs that found each new pick of a wave
     /// ([`SEEDS_KEEP`] picks at most): the log of new music learns how far
     /// their finds are to be trusted.
@@ -163,6 +163,36 @@ pub(crate) struct RadioRun {
     /// A wave whose first picks found nothing waits for the top-ups of its
     /// filters instead of ending ([`Refill`]).
     refill: Option<Refill>,
+    /// Locale-neutral naming inputs for active dynamic home-mix radios (`Daylist`, `Style`)
+    /// so language switches and restarts relocalize titles without depending on Home slots.
+    pub(super) mix_naming: Option<ActiveMixNaming>,
+}
+
+/// Locale-neutral naming inputs persisted on an active radio run whose mix
+/// title is synthesized dynamically (`Daylist`, `Style`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(super) enum ActiveMixNaming {
+    Daylist {
+        part: nikgob_recs::DayPart,
+        centre: [f32; 3],
+        day: i64,
+    },
+    Style {
+        artists: Vec<String>,
+        total_artists: usize,
+    },
+}
+
+impl ActiveMixNaming {
+    fn title_in(&self, loc: v::Locale) -> v::MixTitle {
+        let title = match self {
+            Self::Daylist { part, centre, day } => {
+                nikgob_recs::daylist_title_in(loc, nikgob_recs::Axes::from_array(*centre), *part, *day)
+            }
+            Self::Style { artists, total_artists } => super::style_title(artists, *total_artists, loc),
+        };
+        v::MixTitle::Custom(title)
+    }
 }
 
 /// A wave waiting for the top-ups of its filters (each pick of a wave of
@@ -217,6 +247,8 @@ fn outcome_of(complete: bool, position_ms: u32, duration_ms: Option<u32>, scrub:
 pub(crate) struct RadioSave {
     state: Engine,
     title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<v::RadioTitle>,
     context: EventContext,
     seed: u64,
     streams: Vec<(TrackId, RemoteId)>,
@@ -231,6 +263,8 @@ pub(crate) struct RadioSave {
     /// plain «Моя волна»).
     #[serde(default)]
     wave_preset: Option<v::MixKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mix_naming: Option<ActiveMixNaming>,
 }
 
 /// The library songs an ordinary radio's new finds are found around: a
@@ -319,8 +353,8 @@ pub(crate) struct RadioState {
     autoplay_dry: Option<u64>,
     /// The card «Моя волна» was started from, by the run it started.
     pub(crate) wave_preset: Option<(u64, Option<v::MixKey>)>,
-    /// The user's scenes for the wave's header, of a snapshot.
-    pub(crate) scenes: Option<(std::sync::Weak<super::Snapshot>, Vec<v::WaveSceneCard>)>,
+    /// The user's scenes for the wave's header, of a snapshot and locale.
+    pub(crate) scenes: Option<(std::sync::Weak<super::Snapshot>, v::Locale, Vec<v::WaveSceneCard>)>,
     /// The wave's open pool, of a snapshot.
     pub(crate) wave_pool: Option<super::wave::WavePool>,
     /// The run whose extension on its way keeps to what plays while
@@ -372,8 +406,8 @@ pub(crate) enum RadioMsg {
         /// A wave's open pool, built or kept for its snapshot.
         wave_pool: Option<super::wave::WavePool>,
         /// The user's scenes for the wave's header, found for a snapshot
-        /// on the way.
-        scenes: Option<(std::sync::Weak<super::Snapshot>, Vec<v::WaveSceneCard>)>,
+        /// and locale on the way.
+        scenes: Option<(std::sync::Weak<super::Snapshot>, v::Locale, Vec<v::WaveSceneCard>)>,
         /// What a wave's picks asked, ready for the worker.
         wave_asked: Option<super::wave::WaveAsked>,
     },
@@ -396,7 +430,7 @@ pub(crate) enum RadioMsg {
         /// Answers to keep: cache key and tracks.
         answers: Vec<(String, Vec<StreamTrack>)>,
         /// Where each was found ([`nikgob_recs::explain::new_found`]).
-        via: Vec<(RemoteId, String)>,
+        via: Vec<(RemoteId, nikgob_core::i18n::PerLocale<String>)>,
     },
 }
 
@@ -488,22 +522,6 @@ fn origin_of(state: &Engine, autoplay: bool) -> EventOrigin {
     } else {
         EventOrigin::Radio
     }
-}
-
-/// The queue's context line: «Играет из радио «Кино»» / «… микса «Спокойное»».
-/// «… радио по альбому «nyan.pop»» of a list's radio ([`list_title`]).
-pub(super) fn context_of(title: &str) -> String {
-    match (title.strip_prefix("Радио · "), title.strip_prefix("Радио по ")) {
-        (Some(rest), _) => format!("радио «{rest}»"),
-        (None, Some(rest)) => format!("радио по {rest}"),
-        _ => format!("микса «{title}»"),
-    }
-}
-
-/// The title of a list's radio: «Радио по альбому «nyan.pop»» (`of`
-/// «альбому» or «плейлисту»).
-fn list_title(of: &str, name: &str) -> String {
-    format!("Радио по {of} «{name}»")
 }
 
 /// One new-music call; `None` when its second request did not go because
@@ -604,20 +622,20 @@ impl Worker {
         match seed {
             v::RadioSeed::Track(t) => {
                 let title = self.lib.get_track(t).ok().flatten().map_or_else(String::new, |t| t.title);
-                self.start_radio(RadioSeed::Track(t), format!("Радио · {title}"), EventContext::Radio, Some(t));
+                self.start_radio(RadioSeed::Track(t), v::RadioTitle::Seed(title), EventContext::Radio, Some(t));
             }
             v::RadioSeed::Artist(a) => {
                 let name = self.lib.get_artist(a).ok().flatten().map_or_else(String::new, |a| a.name);
-                self.start_radio(RadioSeed::Artist(a), format!("Радио · {name}"), EventContext::Radio, None);
+                self.start_radio(RadioSeed::Artist(a), v::RadioTitle::Seed(name), EventContext::Radio, None);
             }
             v::RadioSeed::Stream(r) => {
                 let Some(t) = self.stream_track(&r) else {
                     log::warn!("radio of an unknown stream track {r}");
-                    self.toast("Нечего играть", None);
+                    self.toast_nothing_to_play();
                     return;
                 };
                 let Some(id) = self.upsert_streams(std::slice::from_ref(&t)).first().copied() else { return };
-                let title = format!("Радио · {}", t.title);
+                let title = v::RadioTitle::Seed(t.title.clone());
                 // A track of the library (liked, in a playlist) is its own seed.
                 let in_catalog = self.snapshot().is_some_and(|s| s.catalog.get(id).is_some());
                 let seed = if in_catalog { RadioSeed::Track(id) } else { self.stream_seed(id, &t) };
@@ -626,11 +644,19 @@ impl Worker {
             v::RadioSeed::Album(r) => {
                 let title = self.lib.get_release(r).ok().flatten().map_or_else(String::new, |r| r.title);
                 let (ids, _) = self.release_tracks_for(r, None, None);
-                self.start_list_radio(&ids, &[], "альбому", &title);
+                self.start_list_radio_titled(&ids, &[], v::RadioTitle::Album(title));
             }
             v::RadioSeed::Playlist(p) => {
                 let (ids, name) = self.playlist_tracks(p, None);
-                self.start_list_radio(&ids, &[], "плейлисту", &name);
+                let title = if p == v::LIKED_PLAYLIST {
+                    v::RadioTitle::Playlist {
+                        name: nikgob_core::i18n::nav_in(v::Locale::Ru).liked.to_owned(),
+                        liked: true,
+                    }
+                } else {
+                    v::RadioTitle::Playlist { name, liked: false }
+                };
+                self.start_list_radio_titled(&ids, &[], title);
             }
             v::RadioSeed::StreamAlbum(r) => self.stream_list_radio(r, true),
             v::RadioSeed::StreamPlaylist(r) => self.stream_list_radio(r, false),
@@ -642,7 +668,15 @@ impl Worker {
     /// The list is only the seed: the radio's picks, filtered as any
     /// radio's, play first.
     pub(crate) fn start_list_radio(&mut self, ids: &[TrackId], streams: &[StreamTrack], of: &str, name: &str) {
-        let title = list_title(of, name);
+        let title = if of == "альбому" {
+            v::RadioTitle::Album(name.to_owned())
+        } else {
+            v::RadioTitle::Playlist { name: name.to_owned(), liked: false }
+        };
+        self.start_list_radio_titled(ids, streams, title);
+    }
+
+    fn start_list_radio_titled(&mut self, ids: &[TrackId], streams: &[StreamTrack], title: v::RadioTitle) {
         let snap = self.snapshot();
         let seed = {
             let index = self.analysis.index().read();
@@ -655,7 +689,7 @@ impl Worker {
             )
         };
         let Some(seed) = seed else {
-            self.toast("Нечего играть", None);
+            self.toast_nothing_to_play();
             return;
         };
         self.start_radio(seed, title, EventContext::Radio, None);
@@ -672,7 +706,7 @@ impl Worker {
 
     /// Starts a radio: `first` plays at once (a track's radio), the rest
     /// comes as it is picked.
-    pub(crate) fn start_radio(&mut self, seed: RadioSeed, title: String, ctx: EventContext, first: Option<TrackId>) {
+    pub(crate) fn start_radio(&mut self, seed: RadioSeed, title: v::RadioTitle, ctx: EventContext, first: Option<TrackId>) {
         // The seed track is the user's choice; the rest the radio's.
         let mut state = Engine::new(seed);
         // A wave starts from what waves learnt before.
@@ -711,9 +745,10 @@ impl Worker {
             slots: Vec::new(),
             wave_dry: None,
             refill: None,
+            mix_naming: None,
         };
-        log::info!("radio «{}» starts ({:?})", run.title, run.state.seed);
-        let context = context_of(&run.title);
+        log::info!("radio «{}» starts ({:?})", run.title.title_in(v::Locale::Ru), run.state.seed);
+        let origin = run.title.to_queue_origin();
         r.run = Some(run);
         self.radio_add_discoveries();
         self.radio_fetch_new();
@@ -721,7 +756,7 @@ impl Worker {
             Some(t) => {
                 // A radio keeps the shuffle button as it is.
                 self.new_list(None);
-                self.queue.set_ordered(&[t], 0, Some(context));
+                self.queue.set_ordered(&[t], 0, origin);
                 self.play_context = ctx;
                 self.play_context_id = self.recs.radio.run.as_ref().map(|r| seed_context_id(&r.state.seed, false));
                 let generation = self.queue.generation();
@@ -747,7 +782,7 @@ impl Worker {
         state: Engine,
         picks: Vec<Pick>,
         streams: Vec<StreamTrack>,
-        title: String,
+        title: v::RadioTitle,
         ctx: EventContext,
     ) {
         self.user_switch(origin_of(&state, false));
@@ -786,8 +821,13 @@ impl Worker {
             slots: Vec::new(),
             wave_dry: None,
             refill: None,
+            mix_naming: None,
         });
-        log::info!("radio «{}» starts from its picks ({:?})", self.recs.radio.run.as_ref().map_or("", |r| &r.title), state.seed);
+        log::info!(
+            "radio «{}» starts from its picks ({:?})",
+            self.recs.radio.run.as_ref().map_or(std::borrow::Cow::Borrowed(""), |r| r.title.title_in(v::Locale::Ru)),
+            state.seed
+        );
         self.radio_add_discoveries();
         self.radio_fetch_new();
         self.radio_extended(id, state, picks, None);
@@ -800,7 +840,7 @@ impl Worker {
         match &r.run {
             Some(run) if run.queue_gen.is_none_or(|g| g == generation) => true,
             Some(run) => {
-                log::info!("radio «{}» ends: the queue was replaced", run.title);
+                log::info!("radio «{}» ends: the queue was replaced", run.title.title_in(v::Locale::Ru));
                 r.run = None;
                 // A wave's pool goes with it.
                 r.wave_pool = None;
@@ -819,12 +859,17 @@ impl Worker {
         // queue waits for (nothing ahead) show.
         let nothing_ahead = self.queue.upcoming().is_empty();
         let wave = self.wave_view();
-        self.recs.radio.run.as_ref().map(|r| v::RadioView {
-            title: r.title.clone(),
-            extending: (r.extending || r.want) && nothing_ahead,
-            autoplay: r.autoplay,
-            kind: r.kind(),
-            wave,
+        let loc = self.state.read().prefs.resolved_locale();
+        self.recs.radio.run.as_ref().map(|r| {
+            v::RadioView {
+                title: r.title.clone(),
+                extending: (r.extending || r.want) && nothing_ahead,
+                autoplay: r.autoplay,
+                kind: r.kind(),
+                wave,
+                ..Default::default()
+            }
+            .with_locale(loc)
         })
     }
 
@@ -900,7 +945,7 @@ impl Worker {
         r.run = Some(RadioRun {
             id: r.seq,
             state,
-            title: format!("Похожее на «{title}»"),
+            title: v::RadioTitle::Autoplay(title.clone()),
             ctx: EventContext::Radio,
             seed: fastrand::u64(..),
             queue_gen: Some(generation),
@@ -926,6 +971,7 @@ impl Worker {
             slots: Vec::new(),
             wave_dry: None,
             refill: None,
+            mix_naming: None,
         });
         log::info!("autoplay: the queue goes on with a radio of «{title}»");
         self.radio_fetch_new();
@@ -1013,7 +1059,7 @@ impl Worker {
             })
             .map(|e| e.id)
             .collect();
-        log::info!("radio «{}»: the source changed, {} upcoming go", run.title, drop.len());
+        log::info!("radio «{}»: the source changed, {} upcoming go", run.title.title_in(v::Locale::Ru), drop.len());
         self.sleep_replacing(&drop);
         for id in drop {
             self.queue.remove(id);
@@ -1056,7 +1102,7 @@ impl Worker {
             return;
         };
         if let Some(f) = facts {
-            log::info!("radio «{}»: its seed is beyond the catalog, by its {} artists", run.title, f.artists.len());
+            log::info!("radio «{}»: its seed is beyond the catalog, by its {} artists", run.title.title_in(v::Locale::Ru), f.artists.len());
             run.state.set_seed_facts(f);
         }
         run.want = false;
@@ -1144,10 +1190,13 @@ impl Worker {
             _ => None,
         };
         let lib = self.lib.clone();
+        let loc = self.state.read().prefs.resolved_locale();
         // The header's scenes, when this snapshot has none yet (they scan
         // the library: not on the worker).
-        let has_scenes = self.recs.radio.scenes.as_ref().is_some_and(|(w, _)| std::sync::Weak::ptr_eq(w, &Arc::downgrade(&snap)));
-        let profiles = (!has_scenes).then(|| self.recs.home.as_ref().map(|h| h.blend_profiles.clone()).unwrap_or_default());
+        let has_scenes = self.recs.radio.scenes.as_ref().is_some_and(|(w, cached_loc, _)| {
+            *cached_loc == loc && std::sync::Weak::ptr_eq(w, &Arc::downgrade(&snap))
+        });
+        let profiles = (!has_scenes).then(|| self.recs.home.as_ref().map(|h| h.blend_profiles_in(loc)).unwrap_or_default());
         let tx = self.recs.tx.clone();
         let spawned = self.recs.picker.send(super::picker::Lane::Radio, move || {
             let t0 = std::time::Instant::now();
@@ -1171,7 +1220,7 @@ impl Worker {
                 cands.len(),
                 state.wave_bandit().and_then(|b| b.current_scene())
             );
-            let scenes = profiles.map(|p| (Arc::downgrade(&snap), super::wave::scenes(&snap, &p)));
+            let scenes = profiles.map(|p| (Arc::downgrade(&snap), loc, super::wave::scenes(&snap, &p, loc)));
             // What the picks ask, its library work done here.
             let asks = state.take_wave_asks();
             let asked = (!local_only).then(|| super::wave::prepare_asks(&lib, cands, asks, room));
@@ -1379,7 +1428,7 @@ impl Worker {
         let mut explained = !first_batch;
         let lately = self.played_lately();
         let mut ids = Vec::with_capacity(picks.len());
-        let mut whys: Vec<Option<String>> = Vec::with_capacity(picks.len());
+        let mut whys: Vec<Option<nikgob_core::i18n::PerLocale<String>>> = Vec::with_capacity(picks.len());
         // The pick each queued id is of: a pick not queued is forgotten by
         // the radio (its state took it as served).
         let mut items: Vec<Item> = Vec::with_capacity(picks.len());
@@ -1394,7 +1443,7 @@ impl Worker {
                             let before = ids.last().copied().or(seed_track);
                             let lib = &self.lib;
                             let title = |t: TrackId| lib.get_track(t).ok().flatten().map(|t| t.title);
-                            snap.as_ref().and_then(|s| s.recs().why_pick(p, before, &title))
+                            snap.as_ref().and_then(|s| s.recs().why_pick_pair(p, before, &title))
                         };
                         ids.push(*t);
                         whys.push(why);
@@ -1489,7 +1538,7 @@ impl Worker {
         }
         if went_dry {
             log::info!("wave: its filter has nothing left");
-            self.toast("Нечего играть", None);
+            self.toast_nothing_to_play();
         }
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         let new_now = ids.iter().filter(|t| run.streams.contains_key(t)).count();
@@ -1497,7 +1546,7 @@ impl Worker {
         run.queued.1 += new_now;
         log::info!(
             "radio «{}»: {} more, {new_now} new; {} of {} new so far ({:.0} %), {} new left",
-            run.title,
+            run.title.title_in(v::Locale::Ru),
             ids.len(),
             run.queued.1,
             run.queued.0,
@@ -1534,17 +1583,18 @@ impl Worker {
             None if ids.is_empty() => {
                 self.recs.radio.run = None;
                 self.next_origin = None;
-                self.toast("Нечего играть", None);
+                self.toast_nothing_to_play();
                 self.publish_player();
             }
             None => {
-                let (context, ctx) = (context_of(&run.title), run.ctx);
+                let origin = run.title.to_queue_origin();
+                let ctx = run.ctx;
                 // A radio's picks are a path: they keep their order (or play
                 // shuffled under shuffle with «Перемешивать радио и
                 // автовоспроизведение»); the shuffle button stays as it is.
                 self.new_list(None);
                 let shuffled = self.shuffle_radio();
-                self.queue.set_path(&ids, Some(context), shuffled);
+                self.queue.set_path(&ids, origin, shuffled);
                 self.play_context = ctx;
                 self.play_context_id = None;
                 let generation = self.queue.generation();
@@ -1708,7 +1758,7 @@ impl Worker {
             self.want_preview(*tid, (r.service == Service::Youtube).then(|| r.id.clone()));
         }
         if let Some(run) = self.recs.radio.run.as_ref() {
-            log::info!("radio «{}»: {} new music joined the queue ({} of {} new so far)", run.title, ids.len(), run.queued.1, run.queued.0);
+            log::info!("radio «{}»: {} new music joined the queue ({} of {} new so far)", run.title.title_in(v::Locale::Ru), ids.len(), run.queued.1, run.queued.0);
         }
         self.preload_next();
         self.publish_player();
@@ -1759,7 +1809,7 @@ impl Worker {
             return;
         }
         let id = run.id;
-        log::info!("radio «{}»: {} new left, asking around {} of its tracks", run.title, run.state.new_left(), calls.len());
+        log::info!("radio «{}»: {} new left, asking around {} of its tracks", run.title.title_in(v::Locale::Ru), run.state.new_left(), calls.len());
         if let Some(run) = self.recs.radio.run.as_mut() {
             run.asked.extend(asked);
         }
@@ -1798,7 +1848,7 @@ impl Worker {
         if run.extending {
             return;
         }
-        log::info!("radio «{}»: YouTube Music's pause is over, it picks again", run.title);
+        log::info!("radio «{}»: YouTube Music's pause is over, it picks again", run.title.title_in(v::Locale::Ru));
         if run.resume {
             self.radio_extend();
         } else {
@@ -1869,7 +1919,7 @@ impl Worker {
                 }
                 None => usize::from(streak < nikgob_recs::radio::SKIP_SHIFT),
             };
-            log::info!("radio «{}»: a skip ({streak} running), the tail past {keep} is picked again", run.title);
+            log::info!("radio «{}»: a skip ({streak} running), the tail past {keep} is picked again", run.title.title_in(v::Locale::Ru));
             run.redo = Some(run.redo.map_or(keep, |k| k.min(keep)));
         }
         // What a dislike of it asked waits for its end too.
@@ -1949,7 +1999,7 @@ impl Worker {
         let up = self.queue.upcoming();
         let Some(at) = up.iter().position(|e| e.track == track && run.added.contains(&e.id)) else { return };
         let gone = up[at];
-        log::info!("radio «{}»: a new song queued no longer fits by its preview; it is replaced", run.title);
+        log::info!("radio «{}»: a new song queued no longer fits by its preview; it is replaced", run.title.title_in(v::Locale::Ru));
         let own = misfit_slot(up, gone.id);
         reanchor(&mut run.slots, gone.id, own);
         run.added.remove(&gone.id);
@@ -2052,7 +2102,7 @@ impl Worker {
         self.recs.radio.run = None;
         self.recs.radio.wave_pool = None;
         self.next_origin = None;
-        self.toast("Нечего играть", None);
+        self.toast_nothing_to_play();
         self.radio_stops_waiting();
         self.publish_player();
     }
@@ -2107,7 +2157,7 @@ impl Worker {
         if run.extending {
             run.marks.push(Mark::Liked(item.clone(), vector));
         }
-        log::info!("radio «{}»: an unfamiliar track liked, its neighbours come next", run.title);
+        log::info!("radio «{}»: an unfamiliar track liked, its neighbours come next", run.title.title_in(v::Locale::Ru));
         let call = match run.streams.get(&track) {
             Some(r) if r.service == Service::Youtube => Some(Call::Radio(r.id.clone())),
             Some(r) if matches!(r.service, Service::Deezer | Service::Soundcloud) => Some(Call::Related(r.service, r.id.clone())),
@@ -2148,7 +2198,7 @@ impl Worker {
             run.marks.push(Mark::Removed(item.clone()));
         }
         run.state.removed(item);
-        log::info!("radio «{}»: a dislike, its tail is picked again", run.title);
+        log::info!("radio «{}»: a dislike, its tail is picked again", run.title.title_in(v::Locale::Ru));
         if playing && skips {
             run.redo = Some(0);
         } else {
@@ -2171,7 +2221,7 @@ impl Worker {
             run.marks.push(Mark::Removed(item.clone()));
         }
         run.state.removed(item);
-        log::info!("radio «{}»: a pick taken out, its tail is picked again", run.title);
+        log::info!("radio «{}»: a pick taken out, its tail is picked again", run.title.title_in(v::Locale::Ru));
         self.radio_repick(0);
     }
 
@@ -2255,7 +2305,7 @@ impl Worker {
             return;
         }
         let id = run.id;
-        let seed_name = run.title.strip_prefix("Радио · ").unwrap_or(&run.title).to_owned();
+        let seed_name = run.title.seed_name().unwrap_or("").to_owned();
         let mut calls: Vec<(Call, String)> = Vec::new();
         let artist_call = |w: &Worker, a: ArtistId, prefer: &[Service]| -> Option<(Call, String)> {
             let name = w.lib.get_artist(a).ok().flatten()?.name;
@@ -2338,8 +2388,8 @@ impl Worker {
         // The cache first; the rest from services that can be asked now.
         let now = nikgob_library::now_ms();
         let mut cached = Vec::new();
-        let mut via: Vec<(RemoteId, String)> = Vec::new();
-        let mut asks: Vec<(Arc<dyn StreamService>, Call, String, String, String)> = Vec::new();
+        let mut via: Vec<(RemoteId, nikgob_core::i18n::PerLocale<String>)> = Vec::new();
+        let mut asks: Vec<(Arc<dyn StreamService>, Call, String, nikgob_core::i18n::PerLocale<String>, String)> = Vec::new();
         for (call, seed) in calls {
             let (service, key) = match &call {
                 Call::Radio(v) => (Service::Youtube, cache_key(Service::Youtube, "radio", v)),
@@ -2353,7 +2403,7 @@ impl Worker {
                 .flatten()
                 .filter(|(at, _)| now - at < NEW_TTL_MS)
                 .and_then(|(_, json)| serde_json::from_str(&json).ok());
-            let why = nikgob_recs::explain::new_found(&seed, service.display_name());
+            let why = nikgob_core::i18n::PerLocale::init(|loc| nikgob_recs::explain::new_found(&seed, service.display_name(), loc));
             if let Some(tracks) = hit {
                 via.extend(tracks.iter().map(|t| (t.id.clone(), why.clone())));
                 cached.extend(tracks);
@@ -2430,7 +2480,8 @@ impl Worker {
         let wave_preset = r.wave_preset.filter(|(id, _)| *id == run.id).and_then(|(_, k)| k);
         Some(RadioSave {
             state: run.state.clone(),
-            title: run.title.clone(),
+            title: run.title.title_in(v::Locale::Ru).into_owned(),
+            kind: Some(run.title.clone()),
             context: run.ctx,
             seed: run.seed,
             streams: run.streams.iter().map(|(t, r)| (*t, r.clone())).collect(),
@@ -2438,6 +2489,7 @@ impl Worker {
             autoplay: run.autoplay,
             added_at: places_of(&queue_order(&self.queue), &run.added),
             wave_preset,
+            mix_naming: run.mix_naming.clone(),
         })
     }
 
@@ -2450,17 +2502,27 @@ impl Worker {
         r.seq += 1;
         // A wave keeps the card it was started from.
         r.wave_preset = matches!(save.state.seed, RadioSeed::Wave(_)).then_some((r.seq, save.wave_preset));
-        log::info!("radio «{}» goes on", save.title);
+        let mut title = save.kind.unwrap_or_else(|| v::RadioTitle::from_legacy(&save.title));
+        if matches!(save.wave_preset, Some(v::MixKey::Calm))
+            && title == v::RadioTitle::Mix(v::MixTitle::Mood(nikgob_core::i18n::MoodKind::Calm))
+        {
+            title = v::RadioTitle::Mix(v::MixTitle::Side {
+                calm: true,
+                flavor: v::SideMixFlavor::Plain,
+            });
+        }
+        log::info!("radio «{}» goes on", title.title_in(v::Locale::Ru));
         let mut state = save.state;
         if is_wave(&state.seed) {
             state.set_wave_memory(super::cache_read(&self.lib, WAVE_MEMORY_KEY).unwrap_or_default());
         }
         self.streaming.learn(&save.pool);
+        let origin = title.to_queue_origin();
         let r = &mut self.recs.radio;
         r.run = Some(RadioRun {
             id: r.seq,
             state,
-            title: save.title,
+            title,
             ctx: save.context,
             seed: save.seed,
             queue_gen: Some(self.queue.generation()),
@@ -2486,8 +2548,50 @@ impl Worker {
             slots: Vec::new(),
             wave_dry: None,
             refill: None,
+            mix_naming: save.mix_naming,
         });
+        let loc = self.state.read().prefs.resolved_locale();
+        if !self.relocalize_active_radio(loc) {
+            // Preserve the queue's own origin for autoplay and search-started radios;
+            // only fill a missing origin or upgrade legacy `"микса «Спокойное»"` waves.
+            let normalize_calm_legacy = !save.autoplay
+                && matches!(save.wave_preset, Some(v::MixKey::Calm))
+                && self.queue.origin == v::QueueOrigin::Mix(v::MixTitle::Mood(nikgob_core::i18n::MoodKind::Calm));
+            if !save.autoplay && (self.queue.origin == v::QueueOrigin::None || normalize_calm_legacy) {
+                self.queue.set_origin(origin);
+            }
+        }
         self.play_context = self.recs.radio.run.as_ref().map_or(self.play_context, |r| r.ctx);
+    }
+
+    pub(super) fn set_run_mix_naming(&mut self, naming: ActiveMixNaming) {
+        if let Some(run) = self.recs.radio.run.as_mut() {
+            run.mix_naming = Some(naming);
+        }
+    }
+
+    /// Recomputes dynamic home-mix radio/queue titles (`Daylist`, `Style`)
+    /// from the run's persisted locale-neutral naming inputs.
+    pub(super) fn relocalize_active_radio(&mut self, loc: v::Locale) -> bool {
+        let Some(mt) = self
+            .recs
+            .radio
+            .run
+            .as_ref()
+            .and_then(|r| r.mix_naming.as_ref())
+            .map(|naming| naming.title_in(loc))
+        else {
+            return false;
+        };
+        let qgen = self.queue.generation();
+        let Some(run) = self.recs.radio.run.as_mut() else {
+            return false;
+        };
+        run.title = v::RadioTitle::Mix(mt.clone());
+        if run.queue_gen == Some(qgen) {
+            self.queue.set_origin(v::QueueOrigin::Mix(mt));
+        }
+        true
     }
 }
 
@@ -2536,7 +2640,7 @@ mod tests {
         let mut q = crate::queue::Queue::default();
         let tracks: Vec<TrackId> = (0..4).map(|_| TrackId::new()).collect();
         // Playing, the radio's misfit, the user's song, the radio's tail.
-        q.set_path(&tracks, None, false);
+        q.set_path(&tracks, v::QueueOrigin::None, false);
         let up: Vec<Entry> = q.upcoming().to_vec();
         let (misfit, user, tail) = (up[0], up[1], up[2]);
         let slot = misfit_slot(&up, misfit.id).unwrap();
@@ -2572,7 +2676,7 @@ mod tests {
         let run = |shape: &[&str]| {
             let mut q = crate::queue::Queue::default();
             let tracks: Vec<TrackId> = (0..=shape.len()).map(|_| TrackId::new()).collect();
-            q.set_path(&tracks, None, false);
+            q.set_path(&tracks, v::QueueOrigin::None, false);
             let up: Vec<Entry> = q.upcoming().to_vec();
             let mut slots = Vec::new();
             for (k, name) in shape.iter().enumerate() {
@@ -2660,6 +2764,7 @@ mod tests {
         let save = RadioSave {
             state: Engine::new(RadioSeed::Wave(nikgob_recs::wave::WaveSeed::plain(0.25))),
             title: "Моя волна".into(),
+            kind: Some(v::RadioTitle::Wave),
             context: EventContext::HomeSection,
             seed: 1,
             streams: Vec::new(),
@@ -2667,14 +2772,19 @@ mod tests {
             autoplay: false,
             added_at: Vec::new(),
             wave_preset: Some(v::MixKey::Calm),
+            mix_naming: None,
         };
         let json = serde_json::to_value(&save).unwrap();
         let back: RadioSave = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(back.wave_preset, Some(v::MixKey::Calm));
+        assert_eq!(back.kind, Some(v::RadioTitle::Wave));
         let mut old = json;
         old.as_object_mut().unwrap().remove("wave_preset");
+        old.as_object_mut().unwrap().remove("kind");
         let back: RadioSave = serde_json::from_value(old).unwrap();
         assert_eq!(back.wave_preset, None);
+        assert_eq!(back.kind, None);
+        assert_eq!(v::RadioTitle::from_legacy(&back.title), v::RadioTitle::Wave);
     }
 
     fn song(id: &str, artist: &str) -> StreamTrack {
@@ -2739,9 +2849,57 @@ mod tests {
 
     #[test]
     fn contexts_read_as_phrases() {
-        assert_eq!(context_of("Радио · Кино"), "радио «Кино»");
-        assert_eq!(context_of("Спокойное"), "микса «Спокойное»");
-        assert_eq!(context_of(&list_title("альбому", "nyan.pop")), "радио по альбому «nyan.pop»");
-        assert_eq!(list_title("плейлисту", "P"), "Радио по плейлисту «P»");
+        assert_eq!(v::RadioTitle::Seed("Кино".into()).to_queue_origin().header_in(v::Locale::Ru, false).0, "Играет из радио «Кино»");
+        assert_eq!(v::RadioTitle::Mix(v::MixTitle::Energy { calm: true }).to_queue_origin().header_in(v::Locale::Ru, false).0, "Играет из микса «Спокойный микс»");
+        assert_eq!(v::RadioTitle::Album("nyan.pop".into()).to_queue_origin().header_in(v::Locale::Ru, false).0, "Играет из радио по альбому «nyan.pop»");
+        assert_eq!(
+            v::RadioTitle::Playlist { name: "P".into(), liked: false }.title_in(v::Locale::Ru),
+            "Радио по плейлисту «P»"
+        );
+        assert_eq!(
+            v::RadioTitle::Playlist { name: "Любимые".into(), liked: true }.to_queue_origin(),
+            v::QueueOrigin::Radio(v::RadioOrigin::Liked)
+        );
+    }
+
+    #[test]
+    fn active_mix_naming_side_relocalizes_and_round_trips() {
+        let side = v::MixTitle::Side {
+            calm: true,
+            flavor: v::SideMixFlavor::Russian,
+        };
+        assert_eq!(side.title_in(v::Locale::Ru), "Русские песни потише");
+        assert_eq!(side.title_in(v::Locale::En), "Calm Russian Songs");
+        let rt = v::RadioTitle::Mix(side);
+        let json = serde_json::to_string(&rt).unwrap();
+        let back: v::RadioTitle = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, rt);
+
+        // Legacy RadioSave JSON without `kind` or `mix_naming` migrates side mixes cleanly.
+        let mut old = serde_json::to_value(RadioSave {
+            state: Engine::new(RadioSeed::Wave(nikgob_recs::wave::WaveSeed::plain(0.25))),
+            title: "Спокойное без слов".into(),
+            kind: None,
+            context: EventContext::HomeSection,
+            seed: 1,
+            streams: Vec::new(),
+            pool: Vec::new(),
+            autoplay: false,
+            added_at: Vec::new(),
+            wave_preset: Some(v::MixKey::Calm),
+            mix_naming: None,
+        })
+        .unwrap();
+        old.as_object_mut().unwrap().remove("kind");
+        old.as_object_mut().unwrap().remove("mix_naming");
+        let back: RadioSave = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            v::RadioTitle::from_legacy(&back.title),
+            v::RadioTitle::Mix(v::MixTitle::Side {
+                calm: true,
+                flavor: v::SideMixFlavor::Instrumental,
+            })
+        );
+        assert_eq!(v::RadioTitle::from_legacy(&back.title).title_in(v::Locale::En), "Calm Instrumental");
     }
 }

@@ -616,7 +616,7 @@ impl Worker {
         }
         let Some(svc) = &self.import else { return };
         let Some(enc) = Mp3Encoder::find() else {
-            self.toast("Нужен ffmpeg, чтобы сделать MP3", None);
+            self.toast_err("Нужен ffmpeg, чтобы сделать MP3", None);
             return;
         };
         let (lib, trash, tx) = (self.lib.clone(), svc.config().trash_dir.clone(), svc.internal());
@@ -659,7 +659,7 @@ impl Worker {
     pub(crate) fn fake_to_mp3(&mut self, track: TrackId) {
         if self.quality.busy {
             log::info!("quality: a conversion runs, {track} waits for the next click");
-            self.toast(BUSY, None);
+            self.toast_info(BUSY, None);
             return;
         }
         let src = self
@@ -680,17 +680,17 @@ impl Worker {
         if !check_fresh(&file_path(self.res.root(), &src.locator), &check) {
             log::warn!("quality: {} changed since its check, left as it is", src.locator);
             self.quality.kick();
-            self.toast("Файл изменился после проверки — проверю его заново", None);
+            self.toast_info("Файл изменился после проверки — проверю его заново", None);
             return;
         }
         let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
         let codec = nikgob_core::quality::codec_name(&src.codec);
         let Some(svc) = &self.import else {
-            self.toast("Импорт недоступен", None);
+            self.toast_err("Импорт недоступен", None);
             return;
         };
         let Some(enc) = Mp3Encoder::find() else {
-            self.toast("Нужен ffmpeg, чтобы сделать MP3", None);
+            self.toast_err("Нужен ffmpeg, чтобы сделать MP3", None);
             return;
         };
         let (lib, trash, tx) = (self.lib.clone(), svc.config().trash_dir.clone(), svc.internal());
@@ -712,7 +712,7 @@ impl Worker {
     pub(crate) fn undo_fake_to_mp3(&mut self, pairs: Vec<(SourceId, SourceId)>) {
         if self.quality.busy {
             log::info!("quality: a conversion runs, the undo of {} files waits for the next click", pairs.len());
-            self.toast(BUSY, None);
+            self.toast_info(BUSY, None);
             return;
         }
         let Some(svc) = &self.import else { return };
@@ -769,25 +769,24 @@ impl Worker {
         match m {
             Msg::Restored { done, failed } => {
                 self.quality.busy = false;
-                let text = match (done, failed) {
-                    (0, 0) => "Возвращать нечего: все FLAC на месте".to_owned(),
-                    (d, 0) => format!("Вернул FLAC: {d}"),
-                    (d, f) => format!("Вернул FLAC: {d}, не получилось: {f}"),
-                };
-                self.toast(text, None);
+                match (done, failed) {
+                    (0, 0) => self.toast_info("Возвращать нечего: все FLAC на месте", None),
+                    (d, 0) => self.toast_ok(format!("Вернул FLAC: {d}"), None),
+                    (d, f) => self.toast_err(format!("Вернул FLAC: {d}, не получилось: {f}"), None),
+                }
                 self.reload_after_import();
                 self.publish_fake_offers();
             }
             Msg::Converted { done, failed } => {
                 self.quality.busy = false;
                 let d = done.len();
-                let text = match failed {
-                    0 => format!("Сделал MP3: {d} · FLAC в Корзине"),
-                    f => format!("Сделал MP3: {d}, не получилось: {f}"),
-                };
                 // What this answer made, taken back in one step.
-                let undo = (!done.is_empty()).then(|| ("Отменить".to_owned(), v::Command::UndoFakeToMp3(done)));
-                self.toast(text, undo);
+                let undo = (!done.is_empty()).then(|| self.undo_action(v::Command::UndoFakeToMp3(done)));
+                if failed == 0 {
+                    self.toast_ok(format!("Сделал MP3: {d} · FLAC в Корзине"), undo);
+                } else {
+                    self.toast_err(format!("Сделал MP3: {d}, не получилось: {f}", f = failed), undo);
+                }
                 self.reload_after_import();
                 self.publish_fake_offers();
             }
@@ -796,14 +795,12 @@ impl Worker {
                 match result {
                     Ok(pair) => {
                         log::info!("quality: {track} plays its MP3 now, the {codec} is in the Trash");
-                        self.toast(
-                            format!("«{title}»: сделал MP3 · {codec} в Корзине"),
-                            Some(("Отменить".into(), v::Command::UndoFakeToMp3(vec![pair]))),
-                        );
+                        let undo = self.undo_action(v::Command::UndoFakeToMp3(vec![pair]));
+                        self.toast_ok(format!("«{title}»: сделал MP3 · {codec} в Корзине"), Some(undo));
                     }
                     Err(e) => {
                         log::warn!("quality: turning {track} into an MP3: {e}");
-                        self.toast(format!("Не получилось сделать MP3 из «{title}»"), None);
+                        self.toast_err(format!("Не получилось сделать MP3 из «{title}»"), None);
                     }
                 }
                 self.reload_after_import();

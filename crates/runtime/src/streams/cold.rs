@@ -74,7 +74,7 @@ use nikgob_view as v;
 
 use super::export::{self, ExportData, Item, Outcome, Play};
 use super::songs::{Probe, Shelf};
-use super::{Msg, error_text};
+use super::{Msg, error_text_in};
 use crate::Worker;
 use crate::import::{IMPORT_ID, Internal};
 
@@ -994,7 +994,7 @@ async fn fetch_service(job: u64, svc: Arc<dyn StreamService>, tx: Sender<Interna
 impl Worker {
     fn cold_job(&mut self, origin: Origin, title: String) -> Option<u64> {
         if self.streaming.cold.jobs.values().any(|j| j.origin == origin) {
-            self.toast("Этот импорт уже идёт · смотри «Загрузки»", None);
+            self.toast_info("Этот импорт уже идёт · смотри «Загрузки»", None);
             return None;
         }
         self.streaming.cold.next += 1;
@@ -1014,18 +1014,19 @@ impl Worker {
             },
         );
         self.publish_cold_jobs();
-        self.toast("Импорт начался · смотри «Загрузки»", None);
+        self.toast_work("Импорт начался · смотри «Загрузки»", None);
         Some(id)
     }
 
     /// `Command::ImportFromService`.
     pub(crate) fn import_from_service(&mut self, service: Service) {
         let Some(svc) = self.service(service) else {
-            self.toast(self.off_text(service), None);
+            self.toast_err(self.off_text(service), None);
             return;
         };
         if !svc.account().is_logged_in() {
-            self.toast(format!("Сначала войди в {}", service.display_name()), None);
+            let msg = nikgob_core::i18n::ErrorStrings::sign_in_service_first_in(self.locale(), service.display_name());
+            self.toast_err(msg, None);
             return;
         }
         let Some(job) = self.cold_job(Origin::Service(service), format!("Импорт из {}", service.display_name()))
@@ -1115,14 +1116,20 @@ impl Worker {
                 counts.likes = liked.len();
                 counts.new_likes = self.apply_remote_likes(service, liked, true, false);
             }
-            Err(e) => problems.push(format!("лайки: {}", error_text(e))),
+            Err(e) => problems.push(nikgob_core::i18n::ErrorStrings::cold_problem_likes_in(
+                self.locale(),
+                &error_text_in(e, self.locale()),
+            )),
         }
         match &f.recent {
             Ok(recent) => {
                 counts.plays = recent.len();
                 counts.new_plays = self.store_recent(recent);
             }
-            Err(e) => problems.push(format!("история: {}", error_text(e))),
+            Err(e) => problems.push(nikgob_core::i18n::ErrorStrings::cold_problem_history_in(
+                self.locale(),
+                &error_text_in(e, self.locale()),
+            )),
         }
         if f.missed > 0 {
             problems.push(format!("не открылись плейлисты: {}", f.missed));
@@ -1399,6 +1406,7 @@ impl Worker {
         if !j.problems.is_empty() && error.is_none() {
             subtitle.push_str(&format!(" · не всё: {}", j.problems.join("; ")));
         }
+        let has_new = j.counts.new_plays + j.counts.new_likes + j.counts.new_saved + j.counts.new_playlists > 0;
         let _ = self.lib.log_job("import", &j.title, &subtitle, error.as_deref());
         let cold = &mut self.streaming.cold;
         cold.history.push_front(v::Job {
@@ -1412,12 +1420,18 @@ impl Worker {
             queued: false,
             controllable: false,
             pausable: false,
-            error,
+            error: error.clone(),
             at: nikgob_library::now_ms(),
         });
         cold.history.truncate(HISTORY_KEEP);
         self.publish_cold_jobs();
-        self.toast(text, None);
+        if error.is_some() {
+            self.toast_err(text, None);
+        } else if has_new {
+            self.toast_ok(text, None);
+        } else {
+            self.toast_info(text, None);
+        }
         self.after_like_change(crate::Held::Tracks(None), Vec::new());
         self.publish_wishlist();
         self.wish_tick();

@@ -260,8 +260,9 @@ impl Worker {
     /// Changes `[soulseek]` with `f` and applies it; false when
     /// settings.toml could not be read or written (the user was told).
     fn soulseek_edit(&mut self, f: impl FnOnce(&mut SoulseekSettings)) -> bool {
+        let err = nikgob_core::i18n::errors_in(self.locale());
         let Some(path) = self.settings_path.clone() else {
-            self.toast("Некуда сохранить настройки", None);
+            self.toast_err(err.no_settings_path, None);
             return false;
         };
         // A file that does not parse is not replaced by defaults: it holds
@@ -270,14 +271,14 @@ impl Worker {
             Ok(s) => s,
             Err(e) => {
                 log::error!("loading settings: {e}");
-                self.toast("settings.toml не читается — поправь файл вручную", None);
+                self.toast_err(err.settings_unreadable, None);
                 return false;
             }
         };
         f(&mut settings.soulseek);
         if let Err(e) = settings.save(&path) {
             log::error!("saving settings: {e}");
-            self.toast("Не удалось сохранить настройки", None);
+            self.toast_failed_save_prefs();
             return false;
         }
         self.soulseek_apply();
@@ -307,14 +308,14 @@ impl Worker {
         if !saved {
             return;
         }
+        let err = nikgob_core::i18n::errors_in(self.locale());
         let on = self.state.read().prefs.source_on(SourceKey::Soulseek);
-        let text = match (self.soulseek.source().is_some(), on) {
-            (true, _) => "Soulseek подключён",
-            (false, false) => "Soulseek сохранён — включи его в «Источниках скачивания»",
-            (false, true) if remote => "Soulseek сохранён, но утилита не отвечает",
-            (false, true) => "Soulseek сохранён, но не подключился",
-        };
-        self.toast(text, None);
+        match (self.soulseek.source().is_some(), on) {
+            (true, _) => self.toast_ok(err.soulseek_connected, None),
+            (false, false) => self.toast_info(err.soulseek_enable_in_sources, None),
+            (false, true) if remote => self.toast_err(err.soulseek_daemon_unresponsive, None),
+            (false, true) => self.toast_err(err.soulseek_not_connected, None),
+        }
     }
 
     /// Soulseek uploads at once (1 to 10).

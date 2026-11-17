@@ -44,6 +44,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use nikgob_core::i18n::Locale;
 use nikgob_core::model::{ArtistId, TrackId, UnixMs};
 use serde::{Deserialize, Serialize};
 
@@ -549,31 +550,65 @@ pub enum Kind {
     Lively,
 }
 
-impl Kind {
-    pub fn title(self) -> String {
-        match self {
-            Self::Instrumental => "Без слов".into(),
-            Self::InstrumentalSoundtracks => "Саундтреки без слов".into(),
-            Self::Sung(l) => lang_adjective(l).map_or_else(|| "Песни".into(), |a| format!("{a} песни")),
-            Self::Songs => "Песни".into(),
-            Self::Soundtracks => "Саундтреки".into(),
-            Self::Calm => "Спокойное".into(),
-            Self::Lively => "Бодрое".into(),
+/// Loudness disambiguator when two or more taste profiles share a [`Kind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Loudness {
+    Quiet,
+    Loud,
+}
+
+impl Loudness {
+    /// Localized loudness word appended to a profile kind (`"потише"` / `"quieter"`).
+    pub const fn word_in(self, loc: Locale) -> &'static str {
+        match (loc, self) {
+            (Locale::Ru, Self::Quiet) => "потише",
+            (Locale::Ru, Self::Loud) => "погромче",
+            (Locale::En, Self::Quiet) => "quieter",
+            (Locale::En, Self::Loud) => "louder",
         }
     }
 }
 
-/// The adjective of a language's songs, when the language has one.
-pub fn lang_adjective(l: Lang) -> Option<&'static str> {
-    match l {
-        Lang::Russian => Some("Русские"),
-        Lang::Japanese => Some("Японские"),
-        Lang::Korean => Some("Корейские"),
-        Lang::English => Some("Английские"),
-        Lang::Spanish => Some("Испанские"),
-        Lang::French => Some("Французские"),
-        Lang::German => Some("Немецкие"),
-        Lang::Other => None,
+impl Kind {
+    /// Localized name of `self` in `loc`.
+    pub fn title_in(self, loc: Locale) -> String {
+        match (loc, self) {
+            (Locale::Ru, Self::Instrumental) => "Без слов".into(),
+            (Locale::Ru, Self::InstrumentalSoundtracks) => "Саундтреки без слов".into(),
+            (Locale::Ru, Self::Sung(l)) => lang_adjective_in(l, Locale::Ru).map_or_else(|| "Песни".into(), |a| format!("{a} песни")),
+            (Locale::Ru, Self::Songs) => "Песни".into(),
+            (Locale::Ru, Self::Soundtracks) => "Саундтреки".into(),
+            (Locale::Ru, Self::Calm) => "Спокойное".into(),
+            (Locale::Ru, Self::Lively) => "Бодрое".into(),
+            (Locale::En, Self::Instrumental) => "Instrumental".into(),
+            (Locale::En, Self::InstrumentalSoundtracks) => "Instrumental Soundtracks".into(),
+            (Locale::En, Self::Sung(l)) => lang_adjective_in(l, Locale::En).map_or_else(|| "Songs".into(), |a| format!("{a} Songs")),
+            (Locale::En, Self::Songs) => "Songs".into(),
+            (Locale::En, Self::Soundtracks) => "Soundtracks".into(),
+            (Locale::En, Self::Calm) => "Calm".into(),
+            (Locale::En, Self::Lively) => "Upbeat".into(),
+        }
+    }
+}
+
+/// The adjective of a language's songs in `loc`, when the language has one.
+pub const fn lang_adjective_in(l: Lang, loc: Locale) -> Option<&'static str> {
+    match (loc, l) {
+        (Locale::Ru, Lang::Russian) => Some("Русские"),
+        (Locale::Ru, Lang::Japanese) => Some("Японские"),
+        (Locale::Ru, Lang::Korean) => Some("Корейские"),
+        (Locale::Ru, Lang::English) => Some("Английские"),
+        (Locale::Ru, Lang::Spanish) => Some("Испанские"),
+        (Locale::Ru, Lang::French) => Some("Французские"),
+        (Locale::Ru, Lang::German) => Some("Немецкие"),
+        (Locale::En, Lang::Russian) => Some("Russian"),
+        (Locale::En, Lang::Japanese) => Some("Japanese"),
+        (Locale::En, Lang::Korean) => Some("Korean"),
+        (Locale::En, Lang::English) => Some("English"),
+        (Locale::En, Lang::Spanish) => Some("Spanish"),
+        (Locale::En, Lang::French) => Some("French"),
+        (Locale::En, Lang::German) => Some("German"),
+        (_, Lang::Other) => None,
     }
 }
 
@@ -619,7 +654,7 @@ impl Stats {
         }
         if let Some(&(l, s)) = self.langs.first()
             && s >= at
-            && lang_adjective(l).is_some()
+            && lang_adjective_in(l, Locale::Ru).is_some()
         {
             return Kind::Sung(l);
         }
@@ -1047,36 +1082,46 @@ impl Profiles {
         crate::regions::Regions::from_parts(centres, lanes, tau)
     }
 
-    /// The name of profile `j` and its subtitle, by `style`; `artist`
+    /// Loudness disambiguator for profile `j` among all profiles of the same [`Kind`].
+    pub fn kind_loudness(&self, j: usize) -> Option<Loudness> {
+        let p = &self.list[j];
+        let same: Vec<usize> = (0..self.list.len()).filter(|&o| self.list[o].kind == p.kind).collect();
+        if same.len() < 2 {
+            return None;
+        }
+        let mut by = same;
+        by.sort_by(|a, b| self.list[*a].stats.energy.total_cmp(&self.list[*b].stats.energy).then(a.cmp(b)));
+        let r = by.iter().position(|o| *o == j).unwrap_or(0);
+        if r == 0 {
+            Some(Loudness::Quiet)
+        } else if r == by.len() - 1 {
+            Some(Loudness::Loud)
+        } else {
+            None
+        }
+    }
+
+    /// The name of profile `j` and its subtitle in `loc`, by `style`; `artist`
     /// names an artist. A word of loudness tells apart profiles of one
     /// kind, the main artist what is still alike.
-    pub fn name(&self, j: usize, style: NameStyle, artist: &dyn Fn(ArtistId) -> Option<String>) -> (String, String) {
+    pub fn name_in(&self, j: usize, style: NameStyle, loc: Locale, artist: &dyn Fn(ArtistId) -> Option<String>) -> (String, String) {
         let names: Vec<String> = self.list[j].stats.artists.iter().filter_map(|a| artist(*a)).collect();
         if style == NameStyle::Artists && !names.is_empty() {
-            let title = match names.len() {
-                1 => names[0].clone(),
-                2 => format!("{} и {}", names[0], names[1]),
-                _ => format!("{}, {} и другие", names[0], names[1]),
+            let title = match (loc, names.len()) {
+                (_, 1) => names[0].clone(),
+                (Locale::Ru, 2) => format!("{} и {}", names[0], names[1]),
+                (Locale::Ru, _) => format!("{}, {} и другие", names[0], names[1]),
+                (Locale::En, 2) => format!("{} & {}", names[0], names[1]),
+                (Locale::En, _) => format!("{}, {} & more", names[0], names[1]),
             };
             return (title, names.iter().skip(2).take(3).cloned().collect::<Vec<_>>().join(", "));
         }
-        let base = |j: usize| -> String {
-            let p = &self.list[j];
-            let same: Vec<usize> = (0..self.list.len()).filter(|&o| self.list[o].kind == p.kind).collect();
-            if same.len() < 2 {
-                return p.kind.title();
+        let base = |idx: usize| -> String {
+            let p = &self.list[idx];
+            match self.kind_loudness(idx) {
+                Some(loud) => format!("{}, {}", p.kind.title_in(loc), loud.word_in(loc)),
+                None => p.kind.title_in(loc),
             }
-            let mut by: Vec<usize> = same.clone();
-            by.sort_by(|a, b| self.list[*a].stats.energy.total_cmp(&self.list[*b].stats.energy).then(a.cmp(b)));
-            let r = by.iter().position(|o| *o == j).unwrap_or(0);
-            let word = if r == 0 {
-                "потише"
-            } else if r == by.len() - 1 {
-                "погромче"
-            } else {
-                ""
-            };
-            if word.is_empty() { p.kind.title() } else { format!("{}, {word}", p.kind.title()) }
         };
         let mut title = base(j);
         let twin = (0..self.list.len()).any(|o| o != j && base(o) == title);
@@ -1371,13 +1416,23 @@ mod tests {
         l.add(cloud(&mut rng, [6.0, 6.0], 40, 0.8), sung(Lang::Other), 30, 1.0);
         let p = l.build(None, 0);
         let artist = |a: ArtistId| Some(format!("A{}", a.0.as_u128()));
-        let mut names: Vec<String> = (0..p.len()).map(|j| p.name(j, NameStyle::Kind, &artist).0).collect();
+        let mut names: Vec<String> = (0..p.len()).map(|j| p.name_in(j, NameStyle::Kind, Locale::Ru, &artist).0).collect();
         names.sort();
         assert_eq!(names, ["Песни", "Русские песни, погромче", "Русские песни, потише", "Саундтреки без слов"]);
-        let (title, sub) = p.name(0, NameStyle::Artists, &artist);
+        let mut en_names: Vec<String> = (0..p.len()).map(|j| p.name_in(j, NameStyle::Kind, Locale::En, &artist).0).collect();
+        en_names.sort();
+        assert_eq!(en_names, ["Instrumental Soundtracks", "Russian Songs, louder", "Russian Songs, quieter", "Songs"]);
+        let (title, sub) = p.name_in(0, NameStyle::Artists, Locale::Ru, &artist);
         assert!(title.ends_with(" и другие") && title.starts_with('A'), "{title} / {sub}");
-        let (_, sub) = p.name(0, NameStyle::Kind, &artist);
+        let (en_title, en_sub) = p.name_in(0, NameStyle::Artists, Locale::En, &artist);
+        assert!(en_title.ends_with(" & more") && en_title.starts_with('A'), "{en_title} / {en_sub}");
+        let (_, sub) = p.name_in(0, NameStyle::Kind, Locale::Ru, &artist);
         assert_eq!(sub.split(", ").count(), 3);
+        assert_eq!(Kind::Instrumental.title_in(Locale::En), "Instrumental");
+        assert_eq!(Kind::Soundtracks.title_in(Locale::En), "Soundtracks");
+        assert_eq!(Kind::Calm.title_in(Locale::En), "Calm");
+        assert_eq!(Kind::Lively.title_in(Locale::En), "Upbeat");
+        assert_eq!(Kind::Sung(Lang::Japanese).title_in(Locale::En), "Japanese Songs");
     }
 
     #[test]

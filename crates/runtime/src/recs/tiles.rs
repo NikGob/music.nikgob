@@ -6,17 +6,17 @@
 
 use std::collections::HashMap;
 
+use nikgob_core::i18n::{Locale, tracks_count_in};
 use nikgob_core::model::{ArtistId, Event, TrackId};
 use nikgob_library::{Library, LyricsLevel, RecTrack};
-use nikgob_recs::tiles::civil;
 use nikgob_recs::{
     Item, LyricsKind, Pick, PlaylistFacts, TILES_PER_DAY, TileHistory, TileKind, TileMix, TilesInput, TrackFacts,
-    like_title,
+    tile_title_in, year_ago_title_in,
 };
 use nikgob_view as v;
 use serde::{Deserialize, Serialize};
 
-use super::{BuildInput, CoverRef, Snapshot, cache_read, cache_write, covers_of, still_fits, tracks_count};
+use super::{BuildInput, CoverRef, Snapshot, cache_read, cache_write, covers_of, still_fits};
 
 /// The day's board.
 const DAY_KEY: &str = "recs.tiles";
@@ -33,10 +33,18 @@ const HOME_BOARD: usize = HOME_TILES + 3;
 /// A tile of the home.
 pub(crate) struct TileHome {
     pub kind: TileKind,
+    /// Locale-neutral parameter (`2025-2`, `1990`, `ja`, track/artist id, …).
+    pub param: String,
+    /// Locale-neutral subject (artist name, cleaned song title, playlist/franchise name, …).
+    pub subject: String,
+    /// Local day the tile was built for (used for `YearAgo` relocalization).
+    pub today: i64,
+    /// Total duration of its picks in ms.
+    pub ms: u64,
     pub title: String,
-    /// «1 ч 4 мин»: how long its songs play.
+    /// «1 ч 4 мин» / «1 hr 4 min»: how long its songs play.
     pub duration: String,
-    /// «25 треков · за месяц», «Kevin Penkin, Pedro Silva и другие».
+    /// «25 треков» / «25 tracks», «каждый раз другое — жми и узнаешь».
     pub subtitle: String,
     pub picks: Vec<Pick>,
     pub covers: Vec<CoverRef>,
@@ -47,8 +55,57 @@ impl TileHome {
         v::MixId::Tile(view_kind(self.kind))
     }
 
-    pub fn kicker(&self) -> &'static str {
-        self.kind.kicker()
+    pub fn kicker(&self, loc: Locale) -> &'static str {
+        self.kind.kicker_in(loc)
+    }
+
+    /// Invariant Russian title used as canonical analytics context key (`mix:{title}`).
+    pub fn ru_title(&self) -> String {
+        self.title_in(Locale::Ru)
+    }
+
+    /// Renders this tile's title in `loc`.
+    pub fn title_in(&self, loc: Locale) -> String {
+        lines(self.kind, &self.param, &self.subject, self.picks.len(), self.today, loc).0
+    }
+
+    /// Typed relocalizable title for this tile so shuffles, plays and restarts survive locale switches.
+    pub fn mix_title(&self) -> v::MixTitle {
+        use nikgob_core::i18n::{PerLocale, TileStatic};
+        match view_kind(self.kind) {
+            v::TileKind::OnRepeat => v::MixTitle::Tile(TileStatic::OnRepeat),
+            v::TileKind::Rediscover => v::MixTitle::Tile(TileStatic::Rediscover),
+            v::TileKind::FirstLikes => v::MixTitle::Tile(TileStatic::FirstLikes),
+            v::TileKind::FreshLikes => v::MixTitle::Tile(TileStatic::FreshLikes),
+            v::TileKind::Unplayed => v::MixTitle::Tile(TileStatic::Unplayed),
+            v::TileKind::DeepCuts => v::MixTitle::Tile(TileStatic::DeepCuts),
+            v::TileKind::Long => v::MixTitle::Tile(TileStatic::Long),
+            v::TileKind::Short => v::MixTitle::Tile(TileStatic::Short),
+            v::TileKind::SingAlong => v::MixTitle::Tile(TileStatic::SingAlong),
+            v::TileKind::Unfinished => v::MixTitle::Tile(TileStatic::Unfinished),
+            v::TileKind::NotDownloaded => v::MixTitle::Tile(TileStatic::NotDownloaded),
+            v::TileKind::Lottery => v::MixTitle::Tile(TileStatic::Lottery),
+            v::TileKind::BecauseYouLiked => match v::MixTitle::from_legacy(&self.ru_title()) {
+                mt @ v::MixTitle::BecauseYouLiked(_) => mt,
+                _ => v::MixTitle::Localized(PerLocale::init(|loc| self.title_in(loc))),
+            },
+            v::TileKind::YearAgo
+            | v::TileKind::Season
+            | v::TileKind::ArtistOfDay
+            | v::TileKind::Comeback
+            | v::TileKind::Language
+            | v::TileKind::Decade
+            | v::TileKind::Soundtrack
+            | v::TileKind::Playlist => v::MixTitle::Localized(PerLocale::init(|loc| self.title_in(loc))),
+        }
+    }
+
+    /// Recomputes all localized strings in place when switching `Locale`.
+    pub fn relocalize(&mut self, loc: Locale) {
+        let (title, subtitle) = lines(self.kind, &self.param, &self.subject, self.picks.len(), self.today, loc);
+        self.title = title;
+        self.subtitle = subtitle;
+        self.duration = hours_minutes(self.ms, loc);
     }
 }
 
@@ -169,34 +226,46 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     board
         .into_iter()
         .filter(|t| !matches!(t.kind, TileKind::OnRepeat | TileKind::Lottery | TileKind::Language))
-        .filter_map(|t| home_of(snap, tiles, today, t))
+        .filter_map(|t| home_of(snap, tiles, today, t, input.locale))
         .take(HOME_TILES)
         .collect()
 }
 
-/// «1 ч 4 мин», «2 ч», «45 мин» of `ms`.
-pub(crate) fn hours_minutes(ms: u64) -> String {
+/// «1 ч 4 мин» / «1 hr 4 min», «2 ч» / «2 hr», «45 мин» / «45 min» of `ms`.
+pub(crate) fn hours_minutes(ms: u64, loc: Locale) -> String {
     let m = ((ms + 30_000) / 60_000).max(1);
-    match (m / 60, m % 60) {
-        (0, m) => format!("{m} мин"),
-        (h, 0) => format!("{h} ч"),
-        (h, m) => format!("{h} ч {m} мин"),
+    match loc {
+        Locale::Ru => match (m / 60, m % 60) {
+            (0, m) => format!("{m} мин"),
+            (h, 0) => format!("{h} ч"),
+            (h, m) => format!("{h} ч {m} мин"),
+        },
+        Locale::En => match (m / 60, m % 60) {
+            (0, m) => format!("{m} min"),
+            (h, 0) => format!("{h} hr"),
+            (h, m) => format!("{h} hr {m} min"),
+        },
     }
 }
 
 /// «каждый раз другое — жми и узнаешь»: the lottery's line, all it says.
-pub(crate) const LOTTERY_SUBTITLE: &str = "каждый раз другое — жми и узнаешь";
+pub(crate) const fn lottery_subtitle_in(loc: Locale) -> &'static str {
+    match loc {
+        Locale::Ru => "каждый раз другое — жми и узнаешь",
+        Locale::En => "different every time — tap to find out",
+    }
+}
 
 /// A tile as the home shows it: what is still allowed of it, its lines and
 /// covers. `None` when nothing is left. The lottery shows no covers: what
 /// it plays is drawn at the click.
-fn home_of(snap: &Snapshot, facts: &TilesInput, today: i64, t: TileMix) -> Option<TileHome> {
+fn home_of(snap: &Snapshot, facts: &TilesInput, today: i64, t: TileMix, loc: Locale) -> Option<TileHome> {
     let no_streams = HashMap::new();
     let picks: Vec<Pick> = t.picks.into_iter().filter(|p| still_fits(snap, p, &no_streams)).collect();
     if picks.is_empty() {
         return None;
     }
-    let (title, subtitle) = lines(t.kind, t.title, picks.len(), today);
+    let (title, subtitle) = lines(t.kind, &t.param, &t.subject, picks.len(), today, loc);
     let covers = if t.kind == TileKind::Lottery { Vec::new() } else { covers_of(snap, &picks, &no_streams) };
     let ms: u64 = picks
         .iter()
@@ -207,7 +276,11 @@ fn home_of(snap: &Snapshot, facts: &TilesInput, today: i64, t: TileMix) -> Optio
         .sum();
     Some(TileHome {
         kind: t.kind,
-        duration: hours_minutes(ms),
+        param: t.param,
+        subject: t.subject,
+        today,
+        ms,
+        duration: hours_minutes(ms, loc),
         title,
         subtitle,
         picks,
@@ -216,49 +289,18 @@ fn home_of(snap: &Snapshot, facts: &TilesInput, today: i64, t: TileMix) -> Optio
 }
 
 /// A tile's title and subtitle: what it is and how many songs, short
-/// enough for a tile. `title` is the recipe's («Kevin Penkin», «Лето
-/// 2025»), `n` the songs.
-fn lines(kind: TileKind, title: String, n: usize, today: i64) -> (String, String) {
-    // A board kept from before the titles changed reads as today's.
+/// enough for a tile. `param` and `subject` come from [`TileMix`], `n` the songs.
+fn lines(kind: TileKind, param: &str, subject: &str, n: usize, today: i64, loc: Locale) -> (String, String) {
     let title = match kind {
-        TileKind::OnRepeat => "На повторе".to_owned(),
-        TileKind::Rediscover => "Забытое любимое".to_owned(),
-        TileKind::FirstLikes => "Первые лайки".to_owned(),
-        TileKind::FreshLikes => "Свежие лайки".to_owned(),
-        TileKind::Unplayed => "Ждут своего часа".to_owned(),
-        TileKind::DeepCuts => "Глубже у любимых".to_owned(),
-        TileKind::Long => "Длинные треки".to_owned(),
-        TileKind::Short => "Короткие треки".to_owned(),
-        TileKind::SingAlong => "Песни с текстом".to_owned(),
-        TileKind::Unfinished => "Недослушанные альбомы".to_owned(),
-        TileKind::NotDownloaded => "Ещё не скачано".to_owned(),
-        TileKind::Lottery => "Лотерея".to_owned(),
-        TileKind::YearAgo => {
-            let mut month = month_year(today - 365);
-            if let Some(first) = month.get(..2) {
-                month = first.to_uppercase() + &month[2..];
-            }
-            month
-        }
-        TileKind::BecauseYouLiked if !title.starts_with("Похоже на ") => like_title(&title),
-        _ => title,
+        TileKind::YearAgo => year_ago_title_in(today, loc),
+        _ => tile_title_in(kind, param, subject, loc),
     };
     // The name says what it is; the line under it, how many songs.
     let subtitle = match kind {
-        TileKind::Lottery => LOTTERY_SUBTITLE.to_owned(),
-        _ => tracks_count(n),
+        TileKind::Lottery => lottery_subtitle_in(loc).to_owned(),
+        _ => tracks_count_in(loc, n as u64),
     };
     (title, subtitle)
-}
-
-const MONTHS: [&str; 12] = [
-    "январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
-];
-
-/// «октябрь 2025» of a local day number.
-fn month_year(day: i64) -> String {
-    let (y, m, _) = civil(day);
-    format!("{} {y}", MONTHS[(m as usize).clamp(1, 12) - 1])
 }
 
 /// One tile of a previewed day: its kind, title, subtitle and song count.
@@ -273,6 +315,7 @@ pub fn preview_tile_days(lib: &Library, days: usize) -> Result<Vec<Vec<PreviewTi
     crate::analysis::load_offline(lib, &index, &nikgob_view::Prefs::default());
     let (_, utc_offset_min) = super::local_day();
     let mut shown: TileHistory = cache_read(lib, SHOWN_KEY).unwrap_or_default();
+    let loc = nikgob_core::i18n::locale();
     let mut out = Vec::with_capacity(days);
     for d in 0..days {
         let now = super::recs_now() + d as i64 * nikgob_recs::taste::DAY_MS;
@@ -283,7 +326,7 @@ pub fn preview_tile_days(lib: &Library, days: usize) -> Result<Vec<Vec<PreviewTi
         shown.record(day, &board);
         let tiles = board
             .into_iter()
-            .filter_map(|t| home_of(&snap, &input, day, t))
+            .filter_map(|t| home_of(&snap, &input, day, t, loc))
             .map(|t| (view_kind(t.kind), t.title, t.subtitle, t.picks.len()))
             .collect();
         out.push(tiles);
@@ -299,16 +342,19 @@ pub fn preview_ready_tiles(lib: &Library) -> Result<Vec<(v::TileKind, String, us
     let (_, utc_offset_min) = super::local_day();
     let (snap, input, _) = super::read_snapshot(lib, &index, super::recs_now(), utc_offset_min, &[], false)?;
     let shown: TileHistory = cache_read(lib, SHOWN_KEY).unwrap_or_default();
+    let loc = nikgob_core::i18n::locale();
     Ok(snap
         .recs()
         .ready_tiles(&input, &shown)
         .into_iter()
-        .map(|t| (view_kind(t.kind), t.title, t.picks.len()))
+        .map(|t| (view_kind(t.kind), t.title_in(loc), t.picks.len()))
         .collect())
 }
 
 #[cfg(test)]
 mod tests {
+    use nikgob_recs::month_year_in;
+
     use super::*;
 
     #[test]
@@ -317,32 +363,84 @@ mod tests {
             assert_eq!(format!("{k:?}"), format!("{:?}", view_kind(k)));
         }
         assert_eq!(TileKind::ALL.len(), v::TileKind::ALL.len());
-        assert_eq!(month_year(20_748 - 365), "октябрь 2025");
+        assert_eq!(month_year_in(20_748 - 365, Locale::Ru), "Октябрь 2025");
+        assert_eq!(month_year_in(20_748 - 365, Locale::En), "October 2025");
     }
 
     /// Every tile says what it is in a title and a subtitle that fit a
     /// tile.
     #[test]
     fn every_tile_has_a_name_and_its_count() {
-        for k in TileKind::ALL {
-            let (title, subtitle) = lines(k, "Kevin Penkin".into(), 25, 20_748);
-            assert!(!title.is_empty() && title.chars().count() <= 24, "{k:?}: {title}");
-            assert!(subtitle.chars().count() <= 40, "{k:?}: {subtitle} ({})", subtitle.chars().count());
-            assert_ne!(k.kicker().to_lowercase(), title.to_lowercase(), "{k:?}: the kicker repeats the title");
-            assert!(k.kicker().chars().count() <= 16, "{k:?}: {}", k.kicker());
-            if k != TileKind::Lottery {
-                assert_eq!(subtitle, tracks_count(25), "{k:?}: the count only");
+        for loc in Locale::ALL {
+            for k in TileKind::ALL {
+                let param = match k {
+                    TileKind::Season => "2025-2",
+                    TileKind::Language => "ja",
+                    TileKind::Decade => "1990",
+                    _ => "",
+                };
+                let (title, subtitle) = lines(k, param, "Kevin Penkin", 25, 20_748, loc);
+                assert!(!title.is_empty() && title.chars().count() <= 24, "{loc:?} {k:?}: {title}");
+                assert!(subtitle.chars().count() <= 40, "{loc:?} {k:?}: {subtitle} ({})", subtitle.chars().count());
+                assert_ne!(k.kicker_in(loc).to_lowercase(), title.to_lowercase(), "{loc:?} {k:?}: the kicker repeats the title");
+                assert!(k.kicker_in(loc).chars().count() <= 16, "{loc:?} {k:?}: {}", k.kicker_in(loc));
+                if k != TileKind::Lottery {
+                    assert_eq!(subtitle, tracks_count_in(loc, 25), "{loc:?} {k:?}: the count only");
+                }
             }
         }
-        let line = |k| lines(k, String::new(), 13, 20_748);
+        let line = |k| lines(k, "", "", 13, 20_748, Locale::Ru);
         assert_eq!(line(TileKind::YearAgo).0, "Октябрь 2025");
-        assert_eq!(line(TileKind::Season).1, "13 треков");
-        assert_eq!(line(TileKind::Lottery).1, LOTTERY_SUBTITLE);
+        assert_eq!(line(TileKind::Lottery).1, lottery_subtitle_in(Locale::Ru));
         // A board kept from before the titles changed.
-        let kept = |k, t: &str| lines(k, t.into(), 13, 20_748).0;
-        assert_eq!(kept(TileKind::BecauseYouLiked, "Underground River (opening version)"), "Похоже на Underground River");
-        assert_eq!(kept(TileKind::BecauseYouLiked, "Похоже на Разгром"), "Похоже на Разгром");
-        assert_eq!(kept(TileKind::NotDownloaded, "Лайкнутое без файла"), "Ещё не скачано");
-        assert_eq!(kept(TileKind::ArtistOfDay, "Eve"), "Eve");
+        let kept = |k, t: &str, loc| lines(k, "", t, 13, 20_748, loc).0;
+        assert_eq!(kept(TileKind::BecauseYouLiked, "Underground River (opening version)", Locale::Ru), "Похоже на Underground River");
+        assert_eq!(kept(TileKind::BecauseYouLiked, "Underground River (opening version)", Locale::En), "Similar to Underground River");
+        assert_eq!(kept(TileKind::BecauseYouLiked, "Похоже на Разгром", Locale::Ru), "Похоже на Разгром");
+        assert_eq!(kept(TileKind::BecauseYouLiked, "Похоже на Разгром", Locale::En), "Similar to Разгром");
+        assert_eq!(kept(TileKind::NotDownloaded, "Лайкнутое без файла", Locale::Ru), "Ещё не скачано");
+        assert_eq!(kept(TileKind::ArtistOfDay, "Eve", Locale::Ru), "Eve");
+    }
+
+    #[test]
+    fn dynamic_tiles_produce_relocalizable_mix_titles() {
+        let make = |kind: TileKind, param: &str, subject: &str| TileHome {
+            kind,
+            param: param.into(),
+            subject: subject.into(),
+            today: 20_748,
+            ms: 0,
+            title: String::new(),
+            duration: String::new(),
+            subtitle: String::new(),
+            picks: Vec::new(),
+            covers: Vec::new(),
+        };
+        let year_ago = make(TileKind::YearAgo, "", "").mix_title();
+        assert_eq!(year_ago.title_in(Locale::Ru), "Октябрь 2025");
+        assert_eq!(year_ago.title_in(Locale::En), "October 2025");
+        let decade = make(TileKind::Decade, "1990", "").mix_title();
+        assert_eq!(decade.title_in(Locale::Ru), "Из 90-х");
+        assert_eq!(decade.title_in(Locale::En), "From the 90s");
+        let season = make(TileKind::Season, "2025-2", "").mix_title();
+        assert_eq!(season.title_in(Locale::Ru), "Лето 2025");
+        assert_eq!(season.title_in(Locale::En), "Summer 2025");
+        let round: v::MixTitle = serde_json::from_str(&serde_json::to_string(&year_ago).unwrap()).unwrap();
+        assert_eq!(round, year_ago);
+
+        // Card titles and typed queue mix titles agree identically for every TileKind across all locales.
+        for k in TileKind::ALL {
+            let param = match k {
+                TileKind::Season => "2025-2",
+                TileKind::Language => "ja",
+                TileKind::Decade => "1990",
+                _ => "",
+            };
+            let tile = make(k, param, "Eve");
+            let mt = tile.mix_title();
+            for loc in Locale::ALL {
+                assert_eq!(mt.title_in(loc), tile.title_in(loc), "{loc:?} {k:?}");
+            }
+        }
     }
 }

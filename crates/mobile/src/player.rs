@@ -363,7 +363,7 @@ impl Player {
             o.output = true;
         }
         let p = &state.player;
-        let line = p.context_line();
+        let line = p.cached_context().0;
         let lw = header.width() - 2.0 * 48.0;
         let g = text::line(&ui, line, TypeRole::LabelLarge.style(), s.on_surface_variant, lw);
         let gr = Rect::from_center_size(header.center(), g.size());

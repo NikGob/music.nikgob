@@ -226,7 +226,7 @@ impl Worker {
                     self.upgrade_drop(i.id);
                 }
             }
-            self.toast(format!("Лучше не нашёл: {name}"), None);
+            self.toast_info(format!("Лучше не нашёл: {name}"), None);
             return;
         }
         // Something of the album on its way or waiting in «Подтверди».
@@ -240,11 +240,11 @@ impl Worker {
             return;
         }
         if self.import.is_none() {
-            self.toast("Импорт недоступен", None);
+            self.toast_err("Импорт недоступен", None);
             return;
         }
         if !self.can_download() {
-            self.toast_open("Нужен источник скачивания", "Настроить", v::Link::Setting(v::SettingLink::Torrents));
+            self.toast_open(v::ToastKind::Error, "Нужен источник скачивания", "Настроить", v::Link::Setting(v::SettingLink::Torrents));
             return;
         }
         // An offer must beat its worst file at least; each track then takes
@@ -281,7 +281,7 @@ impl Worker {
         self.put_item(&item);
         log::info!("upgrade: the user asks for a better copy of {name}: {} of its files can get one (worst {floor})", can.len());
         let wishlist = v::Link::Route(v::Route::Downloads(v::DownloadsTab::Wishlist));
-        self.toast_open(format!("Ищу качество лучше: «{}»", r.title), "Открыть", wishlist);
+        self.toast_open(v::ToastKind::Working, format!("Ищу качество лучше: «{}»", r.title), "Открыть", wishlist);
         self.streaming.wish.upgrade_runs.push(Instant::now());
         self.wish_search(item);
         self.publish_wishlist();
@@ -465,7 +465,7 @@ impl Worker {
         let plan: Vec<PlanRow> = st.plan.into_iter().filter(|r| r.path.exists()).collect();
         if plan.is_empty() {
             log::warn!("upgrade: the files of the copy for {} are gone, it looks again", self.item_title(id));
-            self.toast("Скачанные файлы пропали — поищу снова", None);
+            self.toast_err("Скачанные файлы пропали — поищу снова", None);
             self.wish_retry(id);
             return;
         }
@@ -527,15 +527,14 @@ impl Worker {
             self.upgrade_done(item);
         }
         let what = crate::streams::plural(n, "файл", "файла", "файлов");
-        self.toast(
+        let undo = self.undo_action(Command::UndoBetterAlbum(rep.release));
+        self.push_toast(
+            v::ToastKind::Success,
             format!("«{album}»: заменил {n} {what} · прежние в Корзине"),
-            Some(("Отменить".into(), Command::UndoBetterAlbum(rep.release))),
+            Some(undo),
+            None,
+            true,
         );
-        self.publish(|s| {
-            if let Some(t) = s.toasts.last_mut() {
-                t.long = true;
-            }
-        });
         true
     }
 
@@ -576,12 +575,11 @@ impl Worker {
         if !left.is_empty() {
             self.streaming.wish.album.undo.insert(release, left);
         }
-        let text = if failed == 0 {
-            format!("Вернул прежние файлы: {done}")
+        if failed == 0 {
+            self.toast_ok(format!("Вернул прежние файлы: {done}"), None);
         } else {
-            format!("Вернул прежние файлы: {done}, не получилось: {failed}")
-        };
-        self.toast(text, retry);
+            self.toast_err(format!("Вернул прежние файлы: {done}, не получилось: {failed}"), retry);
+        }
         for i in self.lib.wishlist_for_release(release).unwrap_or_default() {
             if i.origin == WishlistOrigin::Upgrade && i.scope == WishlistScope::Album && done > 0 {
                 self.set_item(i.id, |i| {

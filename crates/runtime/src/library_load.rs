@@ -36,6 +36,7 @@ struct Job {
     release_sort: v::ReleaseSort,
     track_sort: v::TrackSort,
     only_local: bool,
+    locale: nikgob_core::i18n::Locale,
 }
 
 /// The library's pages of load `seq`.
@@ -213,7 +214,7 @@ fn read(res: &mut Resolver, job: &Job) -> Loaded {
         "треки",
         lib.tracks_filtered(0, FIRST_TRACKS as u32, track_key, crate::track_filter(only_local)),
     );
-    let track_rows = rows.iter().map(|r| res.track(r)).collect();
+    let track_rows = rows.iter().map(|r| res.track_in(r, job.locale)).collect();
     let ms = started.elapsed().as_millis();
     if ms >= 250 {
         log::info!(
@@ -261,6 +262,7 @@ impl Worker {
                 release_sort: s.library.release_sort,
                 track_sort: s.library.track_sort,
                 only_local: s.prefs.library_only_downloaded,
+                locale: s.prefs.resolved_locale(),
             }
         };
         let job = match &self.library_load.jobs {
@@ -292,8 +294,9 @@ impl Worker {
             return;
         }
         self.library_load.shown = l.seq;
+        let loc = self.locale();
         for what in &l.errors {
-            self.toast(format!("Ошибка: {what}"), None);
+            self.toast_err(nikgob_core::i18n::ErrorStrings::error_with_in(loc, what), None);
         }
         // Rows of «Треки» asked since this load was: they are newer.
         let tracks_fresh = l.tracks_asked == self.library_load.tracks_asked;

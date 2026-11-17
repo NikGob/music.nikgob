@@ -3,6 +3,7 @@
 
 use fastframe_now_playing::{self as np, NowPlaying};
 use fastframe_tray::{self as tray, Tray};
+use nikgob_core::i18n::{self, Locale};
 use nikgob_view::{Command, Repeat, Status, ViewState};
 
 /// What the desktop asked the app itself to do (beyond player commands).
@@ -18,12 +19,15 @@ pub struct Desktop {
     controls: NowPlaying,
     last_track: Option<String>,
     last_label: Option<bool>,
+    last_locale: Locale,
 }
 
 pub use crate::icon_art::icon_rgba;
 
 impl Desktop {
     pub fn start(wake: impl Fn() + Send + Sync + Clone + 'static) -> Self {
+        let loc = i18n::locale();
+        let n = i18n::nav_in(loc);
         let tray = Tray::spawn(
             tray::Config {
                 id: "music.nikgob",
@@ -33,13 +37,13 @@ impl Desktop {
                 themed_icon: false,
                 menu_on_click: false,
                 menu: vec![
-                    tray::MenuItem::action("show", "Показать / скрыть"),
+                    tray::MenuItem::action("show", n.tray_show_hide),
                     tray::MenuItem::Separator,
-                    tray::MenuItem::action("play-pause", "Играть"),
-                    tray::MenuItem::action("next", "Следующий"),
-                    tray::MenuItem::action("previous", "Предыдущий"),
+                    tray::MenuItem::action("play-pause", n.tray_play),
+                    tray::MenuItem::action("next", n.tray_next),
+                    tray::MenuItem::action("previous", n.tray_previous),
                     tray::MenuItem::Separator,
-                    tray::MenuItem::action("quit", "Выход"),
+                    tray::MenuItem::action("quit", n.tray_quit),
                 ],
             },
             wake.clone(),
@@ -53,6 +57,7 @@ impl Desktop {
             controls,
             last_track: None,
             last_label: None,
+            last_locale: loc,
         }
     }
 
@@ -152,10 +157,20 @@ impl Desktop {
             self.controls.seeked(p.position_now());
         }
         let playing = p.status == Status::Playing;
-        if (self.last_label != Some(playing) || changed)
+        let loc = i18n::locale();
+        let locale_changed = self.last_locale != loc;
+        if (locale_changed || self.last_label != Some(playing) || changed)
             && let Some(t) = self.tray.as_mut()
         {
-            t.set_label("play-pause", if playing { "Пауза" } else { "Играть" });
+            let n = i18n::nav_in(loc);
+            if locale_changed {
+                t.set_label("show", n.tray_show_hide);
+                t.set_label("next", n.tray_next);
+                t.set_label("previous", n.tray_previous);
+                t.set_label("quit", n.tray_quit);
+                self.last_locale = loc;
+            }
+            t.set_label("play-pause", if playing { n.tray_pause } else { n.tray_play });
             let tip = match &p.current {
                 Some(c) => format!("music.nikgob\n{} — {}", c.title, c.artist),
                 None => "music.nikgob".to_owned(),

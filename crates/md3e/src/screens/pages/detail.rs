@@ -534,7 +534,7 @@ pub fn artist(
                 "artist-top",
                 &a.top_tracks,
                 Lead::Cover,
-                &PlayFrom::Tracks(ids, a.card.name.clone()),
+                &PlayFrom::Tracks(ids, nikgob_view::QueueOrigin::Artist(a.card.name.clone())),
                 state,
                 pages,
                 out,
@@ -824,7 +824,7 @@ pub fn playlist(
     let liked = id == LIKED_PLAYLIST;
     let ctx = ui.ctx().clone();
     let (edit_key, add_key) = (Id::new(("pl-edit", id)), Id::new(("pl-add", id)));
-    let nav = with_bar(ui, &p.card.name, pages, |ui, pages| {
+    let nav = with_bar(ui, p.card.display_name(), pages, |ui, pages| {
         let size = cover_size(ui);
         header(ui, size, p.card.cover.as_ref(), None, |ui| {
             ui.label(TypeRole::LabelLarge.style().rich("ПЛЕЙЛИСТ", s.primary));
@@ -1020,7 +1020,8 @@ pub fn mix(
     let local_only = state.prefs.mixes_downloaded_only;
     let with_new = world.is_none() && state.prefs.mixes_with_new && !local_only;
     let can_blend = world.is_none() && l.blend_base.is_some_and(|b| state.home.blend_profiles.iter().any(|p| p.key != b));
-    let nav = with_bar(ui, &l.title, pages, |ui, pages| {
+    let mix_title = l.title.as_str();
+    let nav = with_bar(ui, mix_title, pages, |ui, pages| {
         let mut nav = None;
         let size = cover_size(ui);
         // The card's mosaic, «С новым» with a new song's cover fourth.
@@ -1042,10 +1043,10 @@ pub fn mix(
             |ui| {
                 ui.label(TypeRole::LabelLarge.style().rich("МИКС", s.primary));
                 // A name too long for the bar's one line is said whole here.
-                let bar = TypeRole::DisplaySmall.style().job(&l.title, s.on_surface);
+                let bar = TypeRole::DisplaySmall.style().job(mix_title, s.on_surface);
                 let bar_w = crate::typography::layout(ui.painter(), bar).size().x;
                 if bar_w > ui.ctx().content_rect().width() - size - 160.0 {
-                    ui.label(TypeRole::HeadlineSmall.style().rich(&l.title, s.on_surface));
+                    ui.label(TypeRole::HeadlineSmall.style().rich(mix_title, s.on_surface));
                 }
                 let tail = format!("{n} {} · {}", common::plural(n, "трек", "трека", "треков"), common::fmt_total(total));
                 let width = ui.available_width();
@@ -1094,13 +1095,14 @@ pub fn mix(
             return nav;
         }
         let ids = l.tracks.iter().map(|t| t.id).collect();
-        let from = PlayFrom::Tracks(ids, l.context());
+        let origin = l.origin();
+        let from = PlayFrom::Tracks(ids, origin.clone());
         let nav = widgets::track_list_ext(ui, "mix", &l.tracks, Lead::Cover, &from, TrackListOpts::default(), state, pages, out).or(nav);
         if new_rows.is_empty() {
             return nav;
         }
         // The new songs under its own, in the order they play.
-        let from = super::streams::StreamFrom::Rows(l.context());
+        let from = super::streams::StreamFrom::Rows(origin);
         super::streams::track_rows(ui, "mix-new", new_rows, false, &from, state, pages, out).or(nav)
     });
     if world.is_none() {

@@ -24,6 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use nikgob_core::i18n::{Locale, TileStatic};
 use nikgob_core::model::{ArtistId, EventType, ReleaseId, TrackId, UnixMs};
 use serde::{Deserialize, Serialize};
 
@@ -162,29 +163,54 @@ impl TileKind {
 
     /// The quiet label over the tile's title: why the tile is here, never
     /// the title again.
-    pub const fn kicker(self) -> &'static str {
-        match self {
-            Self::OnRepeat => "Чаще всего",
-            Self::YearAgo => "Год назад",
-            Self::Season => "Капсула времени",
-            Self::Rediscover => "Давно не играло",
-            Self::FirstLikes => "С самого начала",
-            Self::FreshLikes => "Недавно",
-            Self::Unplayed => "Не играло",
-            Self::DeepCuts => "Твои исполнители",
-            Self::ArtistOfDay => "Исполнитель дня",
-            Self::Comeback => "Давно не слышал",
-            Self::BecauseYouLiked => "Тебе понравилось",
-            Self::Long => "Длинное",
-            Self::Short => "Короткое",
-            Self::SingAlong => "Подпевай",
-            Self::Language => "По языку",
-            Self::Decade => "По годам",
-            Self::Soundtrack => "Саундтрек",
-            Self::Playlist => "Из плейлиста",
-            Self::Unfinished => "Не дослушал",
-            Self::NotDownloaded => "Не скачано",
-            Self::Lottery => "Наугад",
+    pub const fn kicker_in(self, loc: Locale) -> &'static str {
+        match loc {
+            Locale::Ru => match self {
+                Self::OnRepeat => "Чаще всего",
+                Self::YearAgo => "Год назад",
+                Self::Season => "Капсула времени",
+                Self::Rediscover => "Давно не играло",
+                Self::FirstLikes => "С самого начала",
+                Self::FreshLikes => "Недавно",
+                Self::Unplayed => "Не играло",
+                Self::DeepCuts => "Твои исполнители",
+                Self::ArtistOfDay => "Исполнитель дня",
+                Self::Comeback => "Давно не слышал",
+                Self::BecauseYouLiked => "Тебе понравилось",
+                Self::Long => "Длинное",
+                Self::Short => "Короткое",
+                Self::SingAlong => "Подпевай",
+                Self::Language => "По языку",
+                Self::Decade => "По годам",
+                Self::Soundtrack => "Саундтрек",
+                Self::Playlist => "Из плейлиста",
+                Self::Unfinished => "Не дослушал",
+                Self::NotDownloaded => "Не скачано",
+                Self::Lottery => "Наугад",
+            },
+            Locale::En => match self {
+                Self::OnRepeat => "Most Played",
+                Self::YearAgo => "A Year Ago",
+                Self::Season => "Time Capsule",
+                Self::Rediscover => "Long Unplayed",
+                Self::FirstLikes => "From the Start",
+                Self::FreshLikes => "Recently",
+                Self::Unplayed => "Never Played",
+                Self::DeepCuts => "Your Artists",
+                Self::ArtistOfDay => "Daily Artist",
+                Self::Comeback => "Long Unheard",
+                Self::BecauseYouLiked => "You Liked",
+                Self::Long => "Extended",
+                Self::Short => "Brief",
+                Self::SingAlong => "Sing Along",
+                Self::Language => "By Language",
+                Self::Decade => "By Decade",
+                Self::Soundtrack => "Soundtrack",
+                Self::Playlist => "From Playlist",
+                Self::Unfinished => "In Progress",
+                Self::NotDownloaded => "Online Only",
+                Self::Lottery => "Random Pick",
+            },
         }
     }
 
@@ -245,9 +271,10 @@ pub struct TilesInput {
     pub artist_names: HashMap<ArtistId, String>,
 }
 
-/// «Похоже на Underground River»: a song's title without what its brackets
-/// add («(Opening Theme)», «[Remastered]»).
-pub fn like_title(song: &str) -> String {
+/// A song's short title without what its brackets add («(Opening Theme)»,
+/// «[Remastered]»): the locale-neutral subject stored on a
+/// [`TileKind::BecauseYouLiked`] tile.
+pub fn like_subject(song: &str) -> String {
     let mut short = song.to_owned();
     for open in ['(', '[', '（', '【'] {
         if let Some(i) = short.find(open)
@@ -257,19 +284,123 @@ pub fn like_title(song: &str) -> String {
         }
     }
     let short = short.trim();
-    format!("Похоже на {}", if short.is_empty() { song.trim() } else { short })
+    if short.is_empty() { song.trim().to_owned() } else { short.to_owned() }
+}
+
+/// «Похоже на Underground River» / «Similar to Underground River»: a song's
+/// title without what its brackets add («(Opening Theme)», «[Remastered]»).
+pub fn like_title_in(song: &str, loc: Locale) -> String {
+    let subject = like_subject(song);
+    match loc {
+        Locale::Ru => format!("Похоже на {subject}"),
+        Locale::En => format!("Similar to {subject}"),
+    }
 }
 
 /// One tile of a day.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TileMix {
     pub kind: TileKind,
-    /// What it was picked for (an artist id, «ja», «2000»…; empty for the
+    /// What it was picked for (an artist id, «ja», «2000», «2025-2»…; empty for the
     /// kinds without a parameter).
     pub param: String,
-    /// «На повторе», «Kevin Penkin», «Лето 2025».
-    pub title: String,
+    /// The locale-neutral subject needed to render dynamic titles
+    /// (artist name, cleaned seed song title, soundtrack franchise name,
+    /// playlist name; empty when `kind` and `param` suffice).
+    #[serde(default, alias = "title")]
+    pub subject: String,
     pub picks: Vec<Pick>,
+}
+
+impl TileMix {
+    /// Localized display title for this tile.
+    pub fn title_in(&self, loc: Locale) -> String {
+        tile_title_in(self.kind, &self.param, &self.subject, loc)
+    }
+}
+
+/// Localized display title for a tile from its kind, parameter, and subject.
+pub fn tile_title_in(kind: TileKind, param: &str, subject: &str, loc: Locale) -> String {
+    match kind {
+        TileKind::OnRepeat => TileStatic::OnRepeat.title_in(loc).into(),
+        TileKind::YearAgo => match loc {
+            Locale::Ru => "Год назад".into(),
+            Locale::En => "A Year Ago".into(),
+        },
+        TileKind::Season => param
+            .split_once('-')
+            .and_then(|(y, s)| Some((y.parse::<i32>().ok()?, s.parse::<u32>().ok()?)))
+            .map(|season| season_title_in(season, loc))
+            .unwrap_or_else(|| subject.to_owned()),
+        TileKind::Rediscover => TileStatic::Rediscover.title_in(loc).into(),
+        TileKind::FirstLikes => TileStatic::FirstLikes.title_in(loc).into(),
+        TileKind::FreshLikes => TileStatic::FreshLikes.title_in(loc).into(),
+        TileKind::Unplayed => TileStatic::Unplayed.title_in(loc).into(),
+        TileKind::DeepCuts => TileStatic::DeepCuts.title_in(loc).into(),
+        TileKind::ArtistOfDay | TileKind::Comeback | TileKind::Soundtrack | TileKind::Playlist => {
+            subject.to_owned()
+        }
+        TileKind::BecauseYouLiked => {
+            // Legacy cached rows baked `"Похоже на …"` directly into `title` (aliased to `subject`).
+            let raw = subject.strip_prefix("Похоже на ").unwrap_or(subject);
+            like_title_in(raw, loc)
+        }
+        TileKind::Long => TileStatic::Long.title_in(loc).into(),
+        TileKind::Short => TileStatic::Short.title_in(loc).into(),
+        TileKind::SingAlong => TileStatic::SingAlong.title_in(loc).into(),
+        TileKind::Language => Script::from_key(param)
+            .map(|s| s.title_in(loc).to_owned())
+            .unwrap_or_else(|| subject.to_owned()),
+        TileKind::Decade => param
+            .parse::<i32>()
+            .map(|decade| decade_title_in(decade, loc))
+            .unwrap_or_else(|_| subject.to_owned()),
+        TileKind::Unfinished => TileStatic::Unfinished.title_in(loc).into(),
+        TileKind::NotDownloaded => TileStatic::NotDownloaded.title_in(loc).into(),
+        TileKind::Lottery => TileStatic::Lottery.title_in(loc).into(),
+    }
+}
+
+/// «Октябрь 2025» / «October 2025»: the localized month and year for a local day number.
+pub fn month_year_in(day: i64, loc: Locale) -> String {
+    let (year, month, _) = civil(day);
+    let m = month.saturating_sub(1) as usize % 12;
+    let name = match loc {
+        Locale::Ru => [
+            "Январь",
+            "Февраль",
+            "Март",
+            "Апрель",
+            "Май",
+            "Июнь",
+            "Июль",
+            "Август",
+            "Сентябрь",
+            "Октябрь",
+            "Ноябрь",
+            "Декабрь",
+        ][m],
+        Locale::En => [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ][m],
+    };
+    format!("{name} {year}")
+}
+
+/// The localized display title for [`TileKind::YearAgo`] relative to `today` (`local_day`).
+pub fn year_ago_title_in(today: i64, loc: Locale) -> String {
+    month_year_in(today - 365, loc)
 }
 
 /// The tiles shown on the last days: kinds and parameters by local day.
@@ -325,12 +456,30 @@ impl Script {
         }
     }
 
-    const fn title(self) -> &'static str {
-        match self {
-            Self::Japanese => "Японское",
-            Self::Korean => "Корейское",
-            Self::Cyrillic => "По-русски",
-            Self::Latin => "Зарубежное",
+    fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "ja" => Some(Self::Japanese),
+            "ko" => Some(Self::Korean),
+            "ru" => Some(Self::Cyrillic),
+            "latin" => Some(Self::Latin),
+            _ => None,
+        }
+    }
+
+    const fn title_in(self, loc: Locale) -> &'static str {
+        match loc {
+            Locale::Ru => match self {
+                Self::Japanese => "Японское",
+                Self::Korean => "Корейское",
+                Self::Cyrillic => "По-русски",
+                Self::Latin => "Зарубежное",
+            },
+            Locale::En => match self {
+                Self::Japanese => "Japanese",
+                Self::Korean => "Korean",
+                Self::Cyrillic => "Russian",
+                Self::Latin => "International",
+            },
         }
     }
 }
@@ -363,12 +512,23 @@ pub fn script_of(text: &str) -> Option<Script> {
     }
 }
 
-/// «Из 90-х», «Из 2000-х».
-fn decade_title(decade: i32) -> String {
-    if (1900..2000).contains(&decade) {
-        format!("Из {}-х", decade - 1900)
-    } else {
-        format!("Из {decade}-х")
+/// «Из 90-х», «Из 2000-х» / «From the 90s», «From the 2000s».
+fn decade_title_in(decade: i32, loc: Locale) -> String {
+    match loc {
+        Locale::Ru => {
+            if (1900..2000).contains(&decade) {
+                format!("Из {}-х", decade - 1900)
+            } else {
+                format!("Из {decade}-х")
+            }
+        }
+        Locale::En => {
+            if (1910..2000).contains(&decade) {
+                format!("From the {}s", decade - 1900)
+            } else {
+                format!("From the {decade}s")
+            }
+        }
     }
 }
 
@@ -465,8 +625,12 @@ pub fn season_of(year: i32, month: u32) -> (i32, u32) {
     }
 }
 
-fn season_title((year, s): (i32, u32)) -> String {
-    let name = ["Зима", "Весна", "Лето", "Осень"][s as usize % 4];
+fn season_title_in((year, s): (i32, u32), loc: Locale) -> String {
+    let idx = s as usize % 4;
+    let name = match loc {
+        Locale::Ru => ["Зима", "Весна", "Лето", "Осень"][idx],
+        Locale::En => ["Winter", "Spring", "Summer", "Autumn"][idx],
+    };
     format!("{name} {year}")
 }
 
@@ -576,16 +740,16 @@ impl<'r, 'a> Board<'r, 'a> {
 
     /// The tile of `cands` under the diversity rules in the smooth order
     /// (`exempt`: an artist the artist rule does not apply to).
-    fn smooth(&self, kind: TileKind, param: String, title: String, cands: Cands, exempt: Option<ArtistId>) -> Option<TileMix> {
+    fn smooth(&self, kind: TileKind, param: String, subject: String, cands: Cands, exempt: Option<ArtistId>) -> Option<TileMix> {
         if cands.len() < kind.min() {
             return None;
         }
         let picks = smooth_picks(self.recs, kind, cands, exempt);
-        Some(TileMix { kind, param, title, picks })
+        Some(TileMix { kind, param, subject, picks })
     }
 
     /// The tile of `order` as it is.
-    fn as_is(&self, kind: TileKind, param: String, title: String, order: Vec<usize>) -> Option<TileMix> {
+    fn as_is(&self, kind: TileKind, param: String, subject: String, order: Vec<usize>) -> Option<TileMix> {
         if order.len() < kind.min() {
             return None;
         }
@@ -597,7 +761,7 @@ impl<'r, 'a> Board<'r, 'a> {
                 reason: Reason::Tile(kind),
             })
             .collect();
-        Some(TileMix { kind, param, title, picks })
+        Some(TileMix { kind, param, subject, picks })
     }
 
     /// The parameter of the day among `options` (best first, each enough
@@ -626,7 +790,7 @@ impl<'r, 'a> Board<'r, 'a> {
                         (c >= ON_REPEAT_MIN_COMPLETES).then(|| (i, self.recs.taste.hot_at(i) + 0.01 * c as f32))
                     })
                     .collect();
-                self.smooth(kind, none(), "На повторе".into(), cands, None)
+                self.smooth(kind, none(), none(), cands, None)
             }
             TileKind::YearAgo => {
                 let cands = self
@@ -636,7 +800,7 @@ impl<'r, 'a> Board<'r, 'a> {
                         (p > 0).then(|| (i, p as f32 + 0.01 * self.aff(i)))
                     })
                     .collect();
-                self.smooth(kind, none(), "Год назад".into(), cands, None)
+                self.smooth(kind, none(), none(), cands, None)
             }
             TileKind::Season => self.season(),
             TileKind::Rediscover => {
@@ -650,7 +814,7 @@ impl<'r, 'a> Board<'r, 'a> {
                     })
                     .map(|i| (i, self.aff(i)))
                     .collect();
-                self.smooth(kind, none(), "Забытое любимое".into(), cands, None)
+                self.smooth(kind, none(), none(), cands, None)
             }
             TileKind::FirstLikes => {
                 let mut liked: Vec<(usize, UnixMs)> = self
@@ -659,7 +823,7 @@ impl<'r, 'a> Board<'r, 'a> {
                     .filter(|(_, t)| self.now - t >= FIRST_LIKES_AFTER_MS)
                     .collect();
                 liked.sort_by_key(|(i, t)| (*t, *i));
-                self.as_is(kind, none(), "Первые лайки".into(), liked.into_iter().map(|(i, _)| i).collect())
+                self.as_is(kind, none(), none(), liked.into_iter().map(|(i, _)| i).collect())
             }
             TileKind::FreshLikes => {
                 let mut liked: Vec<(usize, UnixMs)> = self
@@ -668,7 +832,7 @@ impl<'r, 'a> Board<'r, 'a> {
                     .filter(|(_, t)| self.now - t < ON_REPEAT_MS)
                     .collect();
                 liked.sort_by_key(|(i, t)| (std::cmp::Reverse(*t), *i));
-                self.as_is(kind, none(), "Свежие лайки".into(), liked.into_iter().map(|(i, _)| i).collect())
+                self.as_is(kind, none(), none(), liked.into_iter().map(|(i, _)| i).collect())
             }
             TileKind::Unplayed => {
                 let mut rng = self.rng(kind, 0);
@@ -678,7 +842,7 @@ impl<'r, 'a> Board<'r, 'a> {
                     .filter(|&i| self.fact(i).is_some_and(|f| self.now - f.added_at >= UNPLAYED_AFTER_MS))
                     .map(|i| (i, rng.f32()))
                     .collect();
-                self.smooth(kind, none(), "Ждут своего часа".into(), cands, None)
+                self.smooth(kind, none(), none(), cands, None)
             }
             TileKind::DeepCuts => self.deep_cuts(),
             TileKind::ArtistOfDay => self.artist_of_day(),
@@ -690,8 +854,7 @@ impl<'r, 'a> Board<'r, 'a> {
                     _ => (SHORT_FROM_MS..=SHORT_MS).contains(&ms),
                 };
                 let tracks = self.all().filter(|&i| self.fact(i).and_then(|f| f.duration_ms).is_some_and(fits)).collect();
-                let title = if kind == TileKind::Long { "Длинные треки" } else { "Короткие треки" };
-                self.smooth(kind, none(), title.into(), self.by_love(kind, tracks), None)
+                self.smooth(kind, none(), none(), self.by_love(kind, tracks), None)
             }
             TileKind::SingAlong => {
                 let mut rng = self.rng(kind, 0);
@@ -706,7 +869,7 @@ impl<'r, 'a> Board<'r, 'a> {
                         Some((i, words + self.love(i) + 0.5 * rng.f32()))
                     })
                     .collect();
-                self.smooth(kind, none(), "Со словами".into(), cands, None)
+                self.smooth(kind, none(), none(), cands, None)
             }
             TileKind::Language => self.language(),
             TileKind::Decade => self.decade(),
@@ -722,7 +885,7 @@ impl<'r, 'a> Board<'r, 'a> {
                     .map(|i| (i, self.recs.taste.liked_time_at(i).unwrap_or(0)))
                     .collect();
                 liked.sort_by_key(|(i, t)| (std::cmp::Reverse(*t), *i));
-                self.as_is(kind, none(), "Ещё не скачано".into(), liked.into_iter().map(|(i, _)| i).collect())
+                self.as_is(kind, none(), none(), liked.into_iter().map(|(i, _)| i).collect())
             }
             TileKind::Lottery => {
                 // The board's draw only says the tile can play; a click
@@ -731,7 +894,7 @@ impl<'r, 'a> Board<'r, 'a> {
                 (picks.len() >= kind.min()).then(|| TileMix {
                     kind,
                     param: none(),
-                    title: "Лотерея".into(),
+                    subject: none(),
                     picks,
                 })
             }
@@ -763,9 +926,9 @@ impl<'r, 'a> Board<'r, 'a> {
         // The latest first.
         seasons.sort_by_key(|s| std::cmp::Reverse(s.0));
         let options = seasons.into_iter().map(|(s, t)| (format!("{}-{}", s.0, s.1), (s, t))).collect();
-        let (param, (s, tracks)) = self.choose(TileKind::Season, options)?;
+        let (param, (_, tracks)) = self.choose(TileKind::Season, options)?;
         let cands = tracks.into_iter().map(|(i, n)| (i, n as f32 + 0.01 * self.aff(i))).collect();
-        self.smooth(TileKind::Season, param, season_title(s), cands, None)
+        self.smooth(TileKind::Season, param, String::new(), cands, None)
     }
 
     /// Plays of each artist (any credit) over the catalog.
@@ -811,7 +974,7 @@ impl<'r, 'a> Board<'r, 'a> {
                 }
             }
         }
-        self.smooth(TileKind::DeepCuts, String::new(), "Глубже у любимых".into(), cands, None)
+        self.smooth(TileKind::DeepCuts, String::new(), String::new(), cands, None)
     }
 
     /// An artist's tile: their songs by affinity.
@@ -898,8 +1061,8 @@ impl<'r, 'a> Board<'r, 'a> {
             .map(|(i, c)| (self.recs.info(i).id.to_string(), (i, c)))
             .collect();
         let (param, (seed, cands)) = self.choose(TileKind::BecauseYouLiked, options)?;
-        let title = like_title(&self.fact(seed).map(|f| f.title.clone()).unwrap_or_default());
-        self.smooth(TileKind::BecauseYouLiked, param, title, cands, None)
+        let subject = like_subject(&self.fact(seed).map(|f| f.title.clone()).unwrap_or_default());
+        self.smooth(TileKind::BecauseYouLiked, param, subject, cands, None)
     }
 
     /// Songs grouped by a key: the groups of [`TILE_MIN`] or more that are
@@ -924,17 +1087,17 @@ impl<'r, 'a> Board<'r, 'a> {
     fn language(&self) -> Option<TileMix> {
         let groups = self.groups(|i| self.fact(i).and_then(|f| script_of(&format!("{} {}", f.title, f.artist))));
         let options = groups.into_iter().map(|(s, v)| (s.key().to_owned(), (s, v))).collect();
-        let (param, (script, tracks)) = self.choose(TileKind::Language, options)?;
+        let (param, (_, tracks)) = self.choose(TileKind::Language, options)?;
         let cands = self.by_love(TileKind::Language, tracks);
-        self.smooth(TileKind::Language, param, script.title().into(), cands, None)
+        self.smooth(TileKind::Language, param, String::new(), cands, None)
     }
 
     fn decade(&self) -> Option<TileMix> {
         let groups = self.groups(|i| self.fact(i).and_then(|f| f.year).filter(|y| *y >= 1900).map(|y| y / 10 * 10));
         let options = groups.into_iter().map(|(d, v)| (d.to_string(), (d, v))).collect();
-        let (param, (decade, tracks)) = self.choose(TileKind::Decade, options)?;
+        let (param, (_, tracks)) = self.choose(TileKind::Decade, options)?;
         let cands = self.by_love(TileKind::Decade, tracks);
-        self.smooth(TileKind::Decade, param, decade_title(decade), cands, None)
+        self.smooth(TileKind::Decade, param, String::new(), cands, None)
     }
 
     fn soundtrack(&self) -> Option<TileMix> {
@@ -1035,7 +1198,7 @@ impl<'r, 'a> Board<'r, 'a> {
         }
         left.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         let order: Vec<usize> = left.into_iter().flat_map(|(_, t)| t).collect();
-        self.as_is(TileKind::Unfinished, String::new(), "Недослушанные альбомы".into(), order)
+        self.as_is(TileKind::Unfinished, String::new(), String::new(), order)
     }
 }
 
@@ -1202,10 +1365,16 @@ mod tests {
         assert_eq!(civil(20_748), (2026, 10, 22));
         assert_eq!(civil(-1), (1969, 12, 31));
         assert_eq!(season_of(2024, 12), (2025, 0));
-        assert_eq!(season_title(season_of(2025, 7)), "Лето 2025");
-        assert_eq!(season_title(season_of(2025, 1)), "Зима 2025");
-        assert_eq!(decade_title(1990), "Из 90-х");
-        assert_eq!(decade_title(2000), "Из 2000-х");
+        assert_eq!(season_title_in(season_of(2025, 7), Locale::Ru), "Лето 2025");
+        assert_eq!(season_title_in(season_of(2025, 1), Locale::Ru), "Зима 2025");
+        assert_eq!(season_title_in(season_of(2025, 7), Locale::En), "Summer 2025");
+        assert_eq!(season_title_in(season_of(2025, 1), Locale::En), "Winter 2025");
+        assert_eq!(decade_title_in(1990, Locale::Ru), "Из 90-х");
+        assert_eq!(decade_title_in(2000, Locale::Ru), "Из 2000-х");
+        assert_eq!(decade_title_in(1990, Locale::En), "From the 90s");
+        assert_eq!(decade_title_in(2000, Locale::En), "From the 2000s");
+        assert_eq!(year_ago_title_in(20_748, Locale::Ru), "Октябрь 2025");
+        assert_eq!(year_ago_title_in(20_748, Locale::En), "October 2025");
     }
 
     #[test]
@@ -1265,9 +1434,16 @@ mod tests {
         assert_eq!(get(TileKind::OnRepeat).unwrap().picks.len(), 11, "the disliked one is out");
         assert_eq!(get(TileKind::YearAgo).unwrap().picks.len(), 10);
         let season = get(TileKind::Season).unwrap();
-        match season.title.as_str() {
-            "Лето 2025" => assert_eq!(sorted(&season.picks), (40..52).collect::<Vec<_>>()),
-            "Осень 2025" => assert_eq!(sorted(&season.picks), (20..30).collect::<Vec<_>>()),
+        assert!(season.subject.is_empty());
+        match season.title_in(Locale::Ru).as_str() {
+            "Лето 2025" => {
+                assert_eq!(season.title_in(Locale::En), "Summer 2025");
+                assert_eq!(sorted(&season.picks), (40..52).collect::<Vec<_>>());
+            }
+            "Осень 2025" => {
+                assert_eq!(season.title_in(Locale::En), "Autumn 2025");
+                assert_eq!(sorted(&season.picks), (20..30).collect::<Vec<_>>());
+            }
             other => panic!("{other}"),
         }
         assert_eq!(ids(&get(TileKind::FirstLikes).unwrap().picks), (100..115).collect::<Vec<_>>(), "earliest first");
@@ -1295,11 +1471,13 @@ mod tests {
         events.extend((0..5).map(|k| complete(3, NOW - k * DAY_MS)));
         let taste = TasteInput { events, ..Default::default() };
         let comeback = tile(&cat, &idx, &taste, &input, TileKind::Comeback).unwrap();
-        assert_eq!(comeback.title, "Artist 7");
+        assert_eq!(comeback.subject, "Artist 7");
+        assert_eq!(comeback.title_in(Locale::Ru), "Artist 7");
+        assert_eq!(comeback.title_in(Locale::En), "Artist 7");
         assert_eq!(comeback.param, aid(7).to_string());
         assert_eq!(comeback.picks.len(), 30);
         assert!(ids(&comeback.picks).iter().all(|i| *i >= 1_000), "the songs played most");
-        assert_eq!(tile(&cat, &idx, &taste, &input, TileKind::ArtistOfDay).unwrap().title, "Artist 7");
+        assert_eq!(tile(&cat, &idx, &taste, &input, TileKind::ArtistOfDay).unwrap().title_in(Locale::En), "Artist 7");
         // Deep cuts: songs of the most played artists played once or never
         // (artist 3's track 3 was played five times).
         let deep = sorted(&tile(&cat, &idx, &taste, &input, TileKind::DeepCuts).unwrap().picks);
@@ -1319,7 +1497,7 @@ mod tests {
             let taste = Taste::build(&cat, &taste, NOW + d * DAY_MS);
             let recs = Recs::new(&cat, &taste, &idx);
             let t = recs.tile(TileKind::ArtistOfDay, &input, &history).unwrap();
-            assert!(!seen.contains(&t.param), "{} again on day {d}", t.title);
+            assert!(!seen.contains(&t.param), "{} again on day {d}", t.subject);
             seen.push(t.param.clone());
             history.record(recs.local_day(), std::slice::from_ref(&t));
         }
@@ -1350,9 +1528,14 @@ mod tests {
         let sing = get(TileKind::SingAlong).unwrap();
         assert_eq!(sorted(&sing.picks), (40..50).collect::<Vec<_>>(), "plain lyrics do not count");
         let liked = get(TileKind::BecauseYouLiked).unwrap();
-        assert_eq!(liked.title, "Похоже на Song 200");
-        assert_eq!(like_title("Underground River (Opening Theme)"), "Похоже на Underground River");
-        assert_eq!(like_title("(It's) Here"), "Похоже на (It's) Here");
+        assert_eq!(liked.subject, "Song 200");
+        assert_eq!(liked.title_in(Locale::Ru), "Похоже на Song 200");
+        assert_eq!(liked.title_in(Locale::En), "Similar to Song 200");
+        assert_eq!(like_subject("Underground River (Opening Theme)"), "Underground River");
+        assert_eq!(like_title_in("Underground River (Opening Theme)", Locale::Ru), "Похоже на Underground River");
+        assert_eq!(like_title_in("Underground River (Opening Theme)", Locale::En), "Similar to Underground River");
+        assert_eq!(like_title_in("(It's) Here", Locale::Ru), "Похоже на (It's) Here");
+        assert_eq!(like_title_in("(It's) Here", Locale::En), "Similar to (It's) Here");
         assert_eq!(liked.picks.len(), 30);
         assert!(ids(&liked.picks).contains(&200));
     }
@@ -1397,15 +1580,22 @@ mod tests {
         };
         let get = |k| tile(&cat, &idx, &taste, &input, k);
         let lang = get(TileKind::Language).unwrap();
-        assert!(["Японское", "По-русски"].contains(&lang.title.as_str()), "{}", lang.title);
+        assert!(lang.subject.is_empty());
+        assert!(["Японское", "По-русски"].contains(&lang.title_in(Locale::Ru).as_str()), "{}", lang.title_in(Locale::Ru));
+        assert!(["Japanese", "Russian"].contains(&lang.title_in(Locale::En).as_str()), "{}", lang.title_in(Locale::En));
         assert_eq!(lang.picks.len(), 20, "Latin is almost everything: no tile of its own");
         let decade = get(TileKind::Decade).unwrap();
-        assert!(["Из 2010-х", "Из 80-х"].contains(&decade.title.as_str()), "{}", decade.title);
+        assert!(decade.subject.is_empty());
+        assert!(["Из 2010-х", "Из 80-х"].contains(&decade.title_in(Locale::Ru).as_str()), "{}", decade.title_in(Locale::Ru));
+        assert!(["From the 2010s", "From the 80s"].contains(&decade.title_in(Locale::En).as_str()), "{}", decade.title_in(Locale::En));
         let ost = get(TileKind::Soundtrack).unwrap();
-        assert_eq!(ost.title, "Made in Abyss");
+        assert_eq!(ost.subject, "Made in Abyss");
+        assert_eq!(ost.title_in(Locale::Ru), "Made in Abyss");
+        assert_eq!(ost.title_in(Locale::En), "Made in Abyss");
         assert_eq!(ost.picks.len(), 10, "both volumes");
         let playlist = get(TileKind::Playlist).unwrap();
-        assert_eq!(playlist.title, "Вечером");
+        assert_eq!(playlist.subject, "Вечером");
+        assert_eq!(playlist.title_in(Locale::En), "Вечером");
         assert_eq!(sorted(&playlist.picks), (60..75).collect::<Vec<_>>());
         assert_eq!(sorted(&get(TileKind::NotDownloaded).unwrap().picks), (100..110).collect::<Vec<_>>());
         assert!(get(TileKind::Unfinished).is_none(), "four songs left are fewer than eight");
@@ -1483,5 +1673,48 @@ mod tests {
                 assert!(!w[0].contains(k), "{k:?} two days in a row: {days:?}");
             }
         }
+    }
+
+    #[test]
+    fn localized_titles_and_kickers_for_all_kinds() {
+        for loc in [Locale::Ru, Locale::En] {
+            for kind in TileKind::ALL {
+                let kicker = kind.kicker_in(loc);
+                assert!(!kicker.is_empty());
+                assert!(kicker.chars().count() <= 16, "{loc:?} {kind:?} kicker too long: {kicker}");
+
+                let (param, subject) = match kind {
+                    TileKind::Season => ("2025-2", ""),
+                    TileKind::ArtistOfDay | TileKind::Comeback => ("artist-1", "Kevin Penkin"),
+                    TileKind::BecauseYouLiked => ("track-1", "Kevin Penkin"),
+                    TileKind::Language => ("ja", ""),
+                    TileKind::Decade => ("1990", ""),
+                    TileKind::Soundtrack => ("made in abyss", "Made in Abyss"),
+                    TileKind::Playlist => ("p1", "Evening"),
+                    _ => ("", ""),
+                };
+                let title = if kind == TileKind::YearAgo {
+                    year_ago_title_in(20_748, loc)
+                } else {
+                    tile_title_in(kind, param, subject, loc)
+                };
+                assert!(!title.is_empty());
+                assert!(title.chars().count() <= 24, "{loc:?} {kind:?} title too long: {title}");
+                assert_ne!(
+                    kicker.to_lowercase(),
+                    title.to_lowercase(),
+                    "{loc:?} {kind:?} kicker repeats title: {kicker}"
+                );
+            }
+        }
+        // Legacy BecauseYouLiked cached rows store rendered Russian title as subject.
+        let legacy = TileMix {
+            kind: TileKind::BecauseYouLiked,
+            param: "track-1".into(),
+            subject: "Похоже на Underground River".into(),
+            picks: Vec::new(),
+        };
+        assert_eq!(legacy.title_in(Locale::Ru), "Похоже на Underground River");
+        assert_eq!(legacy.title_in(Locale::En), "Similar to Underground River");
     }
 }

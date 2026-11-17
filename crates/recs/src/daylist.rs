@@ -19,6 +19,7 @@
 //!   (energy × brightness × steadiness, 2–3 per cell), picked by the day
 //!   and the part, so a name holds for its part of the day.
 
+use nikgob_core::i18n::Locale;
 use nikgob_core::model::TrackId;
 
 use crate::analysis::{DIM, Vector};
@@ -174,6 +175,40 @@ const ADJECTIVES: [&[&str]; 8] = [
     &["Бодрый", "Солнечный", "Звонкий"],
 ];
 
+/// English adjectives by the cell of the axes (same 8-cell grid as [`ADJECTIVES`]).
+const ADJECTIVES_EN: [&[&str]; 8] = [
+    // Quiet, dark, restless.
+    &["Gloomy", "Misty", "Dusky"],
+    // Quiet, dark, steady.
+    &["Mellow", "Quiet", "Deep"],
+    // Quiet, bright, restless.
+    &["Dreamy", "Airy", "Light"],
+    // Quiet, bright, steady.
+    &["Serene", "Gentle", "Warm"],
+    // Loud, dark, restless.
+    &["Stormy", "Rebellious", "Edgy"],
+    // Loud, dark, steady.
+    &["Driven", "Punchy", "Fierce"],
+    // Loud, bright, restless.
+    &["Vibrant", "Playful", "Vivid"],
+    // Loud, bright, steady.
+    &["Upbeat", "Sunny", "Crisp"],
+];
+
+const fn part_en(part: DayPart) -> &'static str {
+    match part {
+        DayPart::Morning => "Morning",
+        DayPart::Day => "Afternoon",
+        DayPart::Evening => "Evening",
+        DayPart::Night => "Night",
+    }
+}
+
+fn weekday_en(day: i64) -> &'static str {
+    const NAMES: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    NAMES[(day + 3).rem_euclid(7) as usize]
+}
+
 fn cell(a: Axes) -> usize {
     usize::from(a.energy >= 0.0) * 4 + usize::from(a.brightness >= 0.0) * 2 + usize::from(a.steadiness >= 0.0)
 }
@@ -198,14 +233,19 @@ fn agree(masculine: &str, gender: Gender) -> String {
     format!("{stem}{ending}")
 }
 
-/// The daylist's name: «Тягучий вечер четверга». `day` is the local day the
-/// part belongs to ([`DayPart::day_of`]); the adjective is the centre's,
-/// picked by the day and the part.
-pub fn daylist_title(centre: Axes, part: DayPart, day: i64) -> String {
-    let words = ADJECTIVES[cell(centre)];
-    let pick = Rng::derive(day as u64, 0xDA7 + part.index() as u64).below(words.len());
-    let (noun, gender) = noun(part);
-    format!("{} {noun} {}", agree(words[pick], gender), weekday_genitive(day))
+/// The daylist's name in `loc` («Тягучий вечер четверга» / «Mellow Thursday Evening»).
+/// `day` is the local day the part belongs to ([`DayPart::day_of`]); the adjective
+/// is the centre's, picked by the day and the part.
+pub fn daylist_title_in(loc: Locale, centre: Axes, part: DayPart, day: i64) -> String {
+    let idx = cell(centre);
+    let pick = Rng::derive(day as u64, 0xDA7 + part.index() as u64).below(ADJECTIVES[idx].len());
+    match loc {
+        Locale::Ru => {
+            let (noun, gender) = noun(part);
+            format!("{} {noun} {}", agree(ADJECTIVES[idx][pick], gender), weekday_genitive(day))
+        }
+        Locale::En => format!("{} {} {}", ADJECTIVES_EN[idx][pick], weekday_en(day), part_en(part)),
+    }
 }
 
 #[cfg(test)]
@@ -255,8 +295,9 @@ mod tests {
             assert_eq!(agree(m, Gender::Neuter), n);
             assert_eq!(agree(m, Gender::Feminine), f);
         }
-        for c in ADJECTIVES {
+        for (c, c_en) in ADJECTIVES.iter().zip(ADJECTIVES_EN) {
             assert!((2..=3).contains(&c.len()));
+            assert_eq!(c.len(), c_en.len());
         }
         assert_eq!(agree("Синий", Gender::Feminine), "Синяя");
         assert_eq!(agree("Синий", Gender::Neuter), "Синее");
@@ -268,27 +309,53 @@ mod tests {
         assert_eq!(weekday_genitive(0), "четверга");
         assert_eq!(weekday_genitive(4), "понедельника");
         assert_eq!(weekday_genitive(-1), "среды");
+        assert_eq!(weekday_en(0), "Thursday");
+        assert_eq!(weekday_en(4), "Monday");
+        assert_eq!(weekday_en(-1), "Wednesday");
         let words = |a: Axes| ADJECTIVES[cell(a)];
+        let words_en = |a: Axes| ADJECTIVES_EN[cell(a)];
         let quiet_dark_steady = Axes::from_array([-0.4, -0.3, 0.2]);
-        let title = daylist_title(quiet_dark_steady, DayPart::Evening, 0);
+        let title = daylist_title_in(Locale::Ru, quiet_dark_steady, DayPart::Evening, 0);
         assert!(title.ends_with(" вечер четверга"), "{title}");
         assert!(words(quiet_dark_steady).iter().any(|w| title.starts_with(w)), "{title}");
+        let title_en = daylist_title_in(Locale::En, quiet_dark_steady, DayPart::Evening, 0);
+        assert!(title_en.ends_with(" Thursday Evening"), "{title_en}");
+        assert!(words_en(quiet_dark_steady).iter().any(|w| title_en.starts_with(w)), "{title_en}");
+
         let loud_bright_steady = Axes::from_array([0.4, 0.3, 0.2]);
-        let title = daylist_title(loud_bright_steady, DayPart::Morning, 4);
+        let title = daylist_title_in(Locale::Ru, loud_bright_steady, DayPart::Morning, 4);
         assert!(title.ends_with("ое утро понедельника"), "{title}");
+        let title_en = daylist_title_in(Locale::En, loud_bright_steady, DayPart::Morning, 4);
+        assert!(title_en.ends_with(" Monday Morning"), "{title_en}");
+        let title_day_en = daylist_title_in(Locale::En, loud_bright_steady, DayPart::Day, 4);
+        assert!(title_day_en.ends_with(" Monday Afternoon"), "{title_day_en}");
+
         let quiet_dark_restless = Axes::from_array([-0.4, -0.3, -0.2]);
-        let title = daylist_title(quiet_dark_restless, DayPart::Night, 1);
+        let title = daylist_title_in(Locale::Ru, quiet_dark_restless, DayPart::Night, 1);
         assert!(title.ends_with("ая ночь пятницы"), "{title}");
+        let title_en = daylist_title_in(Locale::En, quiet_dark_restless, DayPart::Night, 1);
+        assert!(title_en.ends_with(" Friday Night"), "{title_en}");
         // 02:00 of a Saturday is still Friday's night.
         let ts = 2 * DAY_MS + 2 * HOUR_MS;
         let day = DayPart::day_of(ts, 0);
         assert_eq!(DayPart::at(ts, 0), DayPart::Night);
-        assert!(daylist_title(quiet_dark_restless, DayPart::Night, day).ends_with("пятницы"));
+        assert!(daylist_title_in(Locale::Ru, quiet_dark_restless, DayPart::Night, day).ends_with("пятницы"));
+        assert!(daylist_title_in(Locale::En, quiet_dark_restless, DayPart::Night, day).ends_with(" Friday Night"));
         // The same day and part, the same name; the days vary it.
-        assert_eq!(daylist_title(quiet_dark_steady, DayPart::Evening, 9), daylist_title(quiet_dark_steady, DayPart::Evening, 9));
+        assert_eq!(
+            daylist_title_in(Locale::Ru, quiet_dark_steady, DayPart::Evening, 9),
+            daylist_title_in(Locale::Ru, quiet_dark_steady, DayPart::Evening, 9)
+        );
+        assert_eq!(
+            daylist_title_in(Locale::En, quiet_dark_steady, DayPart::Evening, 9),
+            daylist_title_in(Locale::En, quiet_dark_steady, DayPart::Evening, 9)
+        );
         let names: std::collections::HashSet<String> =
-            (0..21).map(|d| daylist_title(quiet_dark_steady, DayPart::Evening, d * 7)).collect();
+            (0..21).map(|d| daylist_title_in(Locale::Ru, quiet_dark_steady, DayPart::Evening, d * 7)).collect();
         assert!(names.len() >= 2, "{names:?}");
+        let names_en: std::collections::HashSet<String> =
+            (0..21).map(|d| daylist_title_in(Locale::En, quiet_dark_steady, DayPart::Evening, d * 7)).collect();
+        assert!(names_en.len() >= 2, "{names_en:?}");
     }
 
     /// 90 tracks by 45 artists, energy growing with the number; tracks 60..90

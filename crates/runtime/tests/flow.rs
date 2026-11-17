@@ -76,7 +76,7 @@ fn import_retag_trash_undo() {
             library: lib.clone(),
             streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
-            prefs: Prefs::default(),
+            prefs: Prefs { language: nikgob_view::LangPref::Ru, ..Prefs::default() },
             prefs_path: None,
             settings_path: None,
             import: Some(ImportSetup {
@@ -214,7 +214,7 @@ fn torrent_download_imports_and_cleans_up() {
             library: lib.clone(),
             streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
-            prefs: Prefs::default(),
+            prefs: Prefs { language: nikgob_view::LangPref::Ru, ..Prefs::default() },
             prefs_path: None,
             settings_path: None,
             import: Some(ImportSetup {
@@ -291,7 +291,7 @@ fn torrent_download_imports_and_cleans_up() {
             library: lib.clone(),
             streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
-            prefs: Prefs::default(),
+            prefs: Prefs { language: nikgob_view::LangPref::Ru, ..Prefs::default() },
             prefs_path: None,
             settings_path: None,
             import: Some(ImportSetup {
@@ -325,10 +325,10 @@ fn queue_without_playable_files_does_not_loop_forever() {
         .collect();
     let rt = Runtime::start(
         RuntimeConfig {
-            library: lib,
+            library: lib.clone(),
             streams: Vec::new(),
             library_dir: std::env::temp_dir(),
-            prefs: Prefs::default(),
+            prefs: Prefs { language: nikgob_view::LangPref::Ru, ..Prefs::default() },
             prefs_path: None,
             settings_path: None,
             import: None,
@@ -369,7 +369,7 @@ fn pausing_a_folder_import_never_reaches_the_torrent_client() {
             library: Library::open_in_memory().unwrap(),
             streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
-            prefs: Prefs::default(),
+            prefs: Prefs { language: nikgob_view::LangPref::Ru, ..Prefs::default() },
             prefs_path: None,
             settings_path: None,
             import: Some(ImportSetup {
@@ -426,7 +426,7 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
             library: lib.clone(),
             streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
-            prefs: Prefs::default(),
+            prefs: Prefs { language: nikgob_view::LangPref::Ru, ..Prefs::default() },
             prefs_path: Some(prefs_path.clone()),
             settings_path: None,
             import: Some(ImportSetup {
@@ -509,7 +509,7 @@ fn custom_playlist_cover_copy_goes_when_switching_to_auto() {
             library: lib.clone(),
             streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
-            prefs: Prefs::default(),
+            prefs: Prefs { language: nikgob_view::LangPref::Ru, ..Prefs::default() },
             prefs_path: None,
             settings_path: None,
             import: None,
@@ -592,7 +592,7 @@ fn volume_and_queue_come_back_after_a_restart_paused_in_place() {
     assert_eq!(s.player.repeat, nikgob_view::Repeat::All);
     assert_eq!(s.player.status, nikgob_view::Status::Paused);
     assert_eq!(s.player.position, Duration::from_millis(1500));
-    assert_eq!(s.player.context.as_deref(), Some("Тест"));
+    assert_eq!(s.player.origin, nikgob_view::QueueOrigin::Custom("Тест".into()));
     drop(s);
     rt.send(Command::TogglePlay);
     wait_for(&rt, "play from there", |s| {
@@ -647,15 +647,15 @@ fn the_queue_names_the_page_it_was_started_from() {
     let rt = start();
     rt.send(Command::PlayPlaylist { id: playlist.id, start: None, shuffle: false });
     wait_for(&rt, "the playlist's page", |s| {
-        page(s) == Some(Route::Playlist(playlist.id)) && s.player.context_line() == "Играет из плейлиста «P»"
+        page(s) == Some(Route::Playlist(playlist.id)) && s.player.context_header(nikgob_view::Locale::Ru).0 == "Играет из плейлиста «P»"
     });
     rt.send(Command::PlayArtist { id: artist.id, shuffle: false });
     wait_for(&rt, "the artist's page", |s| page(s) == Some(Route::Artist(artist.id)));
     rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "Тест".into() });
-    wait_for(&rt, "no page", |s| s.player.context.as_deref() == Some("Тест") && page(s).is_none());
+    wait_for(&rt, "no page", |s| s.player.origin == nikgob_view::QueueOrigin::Custom("Тест".into()) && page(s).is_none());
     rt.send(Command::PlayRelease { id: release.id, start: Some(ids[1]), shuffle: false });
     wait_for(&rt, "the album's page", |s| {
-        page(s) == Some(Route::Release(release.id)) && s.player.context_line() == "Играет из альбома «Album»"
+        page(s) == Some(Route::Release(release.id)) && s.player.context_header(nikgob_view::Locale::Ru).0 == "Играет из альбома «Album»"
     });
     rt.send(Command::Pause);
     wait_for(&rt, "paused", |s| s.player.status == nikgob_view::Status::Paused);
@@ -668,7 +668,7 @@ fn the_queue_names_the_page_it_was_started_from() {
     });
     // Another queue: the old page goes with the old queue.
     rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "Тест".into() });
-    wait_for(&rt, "no page again", |s| s.player.context.as_deref() == Some("Тест") && page(s).is_none());
+    wait_for(&rt, "no page again", |s| s.player.origin == nikgob_view::QueueOrigin::Custom("Тест".into()) && page(s).is_none());
 }
 
 /// A like of a song with a file and a playlist edit publish what changed in
@@ -859,7 +859,7 @@ fn only_downloaded_still_plays_an_album_whole() {
     let prefs = Prefs { mixes_downloaded_only: true, ..Prefs::default() };
     let rt = Runtime::start(
         RuntimeConfig {
-            library: lib,
+            library: lib.clone(),
             streams: Vec::new(),
             library_dir: dir.path().to_owned(),
             prefs,
@@ -943,10 +943,10 @@ fn an_album_of_one_song_of_the_users_plays_that_song() {
     assert!(lib.get_release_row(release.id).unwrap().unwrap().progress().partial());
     let rt = Runtime::start(
         RuntimeConfig {
-            library: lib,
+            library: lib.clone(),
             streams: Vec::new(),
             library_dir: dir.path().to_owned(),
-            prefs: Prefs { album_mode: AlbumMode::Auto, ..Prefs::default() },
+            prefs: Prefs { language: nikgob_view::LangPref::Ru, album_mode: AlbumMode::Auto, ..Prefs::default() },
             prefs_path: None,
             settings_path: None,
             import: None,
@@ -999,7 +999,7 @@ fn a_stream_song_goes_into_the_library_without_a_like() {
     lib.add_source(&Source::new(t.id, SourceKind::Spotify, "spotify:track:heard", Codec::Vorbis)).unwrap();
     let rt = Runtime::start(
         RuntimeConfig {
-            library: lib,
+            library: lib.clone(),
             streams: Vec::new(),
             library_dir: dir.path().to_owned(),
             prefs: Prefs::default(),
@@ -1055,7 +1055,7 @@ fn a_single_saved_with_its_song_or_left_out_never_turns_whole() {
     lib.add_source(&Source::new(inst.id, SourceKind::Spotify, "spotify:track:inst", Codec::Vorbis)).unwrap();
     let rt = Runtime::start(
         RuntimeConfig {
-            library: lib,
+            library: lib.clone(),
             streams: Vec::new(),
             library_dir: dir.path().to_owned(),
             prefs: Prefs { single_like_saves: true, album_mode: AlbumMode::Auto, ..Prefs::default() },
@@ -1086,14 +1086,14 @@ fn a_single_saved_with_its_song_or_left_out_never_turns_whole() {
     });
     // The song on its own (it has a file): a queue of another list.
     rt.send(Command::PlayTracks { tracks: vec![song.id], start: 0, context: "q".into() });
-    wait_for(&rt, "the song on its own", |s| queued(s) == [song.id] && s.player.context.as_deref() == Some("q"));
+    wait_for(&rt, "the song on its own", |s| queued(s) == [song.id] && s.player.origin == nikgob_view::QueueOrigin::Custom("q".into()));
     rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
     rt.send(Command::DownloadRelease(release.id));
     // Done in order: once the page loads again, both were handled.
     rt.send(Command::AddWholeAlbum { id: release.id, on: true });
     wait_for(&rt, "the single added whole", |s| s.release.as_ref().is_some_and(|r| r.card.id == release.id && !r.partial));
     assert_eq!(queued(&rt.state()), [song.id], "an album of none of the user's songs plays nothing");
-    assert_eq!(rt.state().player.context.as_deref(), Some("q"));
+    assert_eq!(rt.state().player.origin, nikgob_view::QueueOrigin::Custom("q".into()));
     assert!(rt.state().downloads.wishlist.items.is_empty(), "nor downloads anything");
     rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
     wait_for(&rt, "the whole single, the song left out before too", |s| queued(s).len() == 2);
@@ -1142,7 +1142,7 @@ fn an_album_played_next_goes_right_after_the_current_track() {
     lib.like(a2.id).unwrap();
     let rt = Runtime::start(
         RuntimeConfig {
-            library: lib,
+            library: lib.clone(),
             streams: Vec::new(),
             library_dir: dir.path().to_owned(),
             prefs: Prefs::default(),
@@ -1160,7 +1160,8 @@ fn an_album_played_next_goes_right_after_the_current_track() {
     rt.send(Command::PlayReleaseNext(album.id));
     let want = vec![ids[0], a1.id, a2.id, a3.id, ids[1], ids[2]];
     wait_for(&rt, "the album after the current track", |s| order(s) == want);
-    assert!(rt.state().toasts.iter().any(|t| t.text == "Следующим: «Album»"));
+    let loc = rt.state().prefs.resolved_locale();
+    assert!(rt.state().toasts.iter().any(|t| t.text == nikgob_core::i18n::PlayerStrings::next_up_quoted_in(loc, "Album")));
     // Only the downloaded: the album still goes in whole.
     rt.send(Command::SetPref(nikgob_view::PrefPatch::MixesDownloadedOnly(true)));
     rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "q".into() });
@@ -1303,7 +1304,8 @@ fn a_service_album_plays_next_queues_and_goes_to_a_playlist_by_its_id() {
     wait_for(&rt, "the album after the current track", |s| order(s).len() == 5);
     let (a1, a2) = (track(1).expect("the first track is known"), track(2).expect("the second track is known"));
     assert_eq!(order(&rt.state()), [ids[0], a1, a2, ids[1], ids[2]]);
-    assert!(rt.state().toasts.iter().any(|t| t.text == "Следующим: «Heavy Metal 3»"));
+    let loc = rt.state().prefs.resolved_locale();
+    assert!(rt.state().toasts.iter().any(|t| t.text == nikgob_core::i18n::PlayerStrings::next_up_quoted_in(loc, "Heavy Metal 3")));
 
     rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "q".into() });
     wait_for(&rt, "the queue again", |s| order(s) == ids);
@@ -1348,7 +1350,7 @@ fn a_new_album_shuffles_as_its_kind_says() {
     let prefs = Prefs { autoplay: false, ..Prefs::default() };
     let rt = Runtime::start(
         RuntimeConfig {
-            library: lib,
+            library: lib.clone(),
             streams: Vec::new(),
             library_dir: dir.path().to_owned(),
             prefs,
@@ -1435,7 +1437,7 @@ fn the_shuffle_button_is_kept_by_own_playlists_and_changes_no_rule() {
     let prefs_path = dir.path().join("prefs.json");
     let rt = Runtime::start(
         RuntimeConfig {
-            library: lib,
+            library: lib.clone(),
             streams: Vec::new(),
             library_dir: dir.path().to_owned(),
             prefs: Prefs { autoplay: false, ..Prefs::default() },
@@ -1497,7 +1499,7 @@ fn a_cover_refresh_says_it_looks_once_while_it_runs() {
     let release = lib.upsert_release(&Release::new("Album", ArtistCredit::single("A", Some(artist.id)))).unwrap();
     let rt = Runtime::start(
         RuntimeConfig {
-            library: lib,
+            library: lib.clone(),
             streams: Vec::new(),
             library_dir: std::env::temp_dir(),
             prefs: Prefs::default(),
@@ -1521,3 +1523,520 @@ fn a_cover_refresh_says_it_looks_once_while_it_runs() {
     let s = rt.state();
     assert_eq!(looking(&s), ended(&s), "one «Ищу обложку…» for each refresh that ran");
 }
+
+/// Switching `PrefPatch::Language` and `PrefPatch::Edit` updates `prefs.language`,
+/// persists it to `prefs.json`, and live-refreshes open views (`player`, `info`,
+/// `library.playlists`, `library.downloaded`, `release`) while keeping
+/// machine-neutral keys untouched.
+#[test]
+fn language_pref_patch_updates_and_persists_live() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, ReleaseType, Source, SourceKind, Track};
+    use nikgob_core::quality::{QualityCheck, SoundOrigin, Verdict, row_label_in};
+    use nikgob_view::{LangPref, LIKED_PLAYLIST, Locale, PrefPatch};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("Artist")).unwrap();
+    let credit = ArtistCredit::single("Artist", Some(artist.id));
+    let mut album = Release::new("Album", credit.clone());
+    album.release_type = ReleaseType::Album;
+    let release = lib.upsert_release(&album).unwrap();
+
+    let mut t = Track::new("Song", credit.clone());
+    t.release_id = Some(release.id);
+    t.track_no = 1;
+    let t = lib.upsert_track(&t).unwrap();
+    let wav = root.join("song.wav");
+    write_wav(&wav, 2.0);
+    lib.add_source(&Source::new(t.id, SourceKind::LocalFile, wav.display().to_string(), Codec::Wav)).unwrap();
+    lib.like(t.id).unwrap();
+
+    let mut flac_track = Track::new("HiRes Song", credit);
+    flac_track.release_id = Some(release.id);
+    flac_track.track_no = 2;
+    let flac_track = lib.upsert_track(&flac_track).unwrap();
+    let flac_src = lib
+        .add_source(&Source::new(flac_track.id, SourceKind::LocalFile, root.join("fake.flac").display().to_string(), Codec::Flac))
+        .unwrap();
+    let check = QualityCheck {
+        verdict: Verdict::Transcoded,
+        cutoff_hz: 18_000.0,
+        steepness_db: 24.0,
+        origin: SoundOrigin::Lossy { kbps: 192 },
+        sample_rate: 44_100,
+        spectrum_db: Vec::new(),
+        made_from: None,
+        file_size: 0,
+        file_mtime: 0,
+        checked_at: 0,
+    };
+    lib.put_quality_check(flac_src.id, &check).unwrap();
+    let summary = check.summary();
+
+    let prefs_path = root.join("prefs.json");
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            streams: Vec::new(),
+            library_dir: root.to_owned(),
+            prefs: Prefs { language: LangPref::Ru, ..Prefs::default() },
+            prefs_path: Some(prefs_path.clone()),
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt.send(Command::PlayPlaylist { id: LIKED_PLAYLIST, start: None, shuffle: false });
+    rt.send(Command::LoadDownloaded);
+    rt.send(Command::LoadRelease(release.id));
+    wait_for(&rt, "initial Ru views ready", |s| {
+        s.player.origin == nikgob_view::QueueOrigin::Liked
+            && s.info.sound.is_some()
+            && s.library.downloaded.first().is_some_and(|g| g.label == "Сегодня")
+            && s.release.as_ref().is_some_and(|r| r.card.id == release.id)
+    });
+    assert_eq!(
+        rt.state().release.as_ref().unwrap().tracks.iter().find(|tr| tr.id == flac_track.id).and_then(|tr| tr.quality.as_deref()),
+        Some(row_label_in(&Codec::Flac, Some(&summary), Locale::Ru).as_str()),
+    );
+
+    rt.send(Command::SetPref(PrefPatch::Language(LangPref::En)));
+    wait_for(&rt, "live switch to En", |s| {
+        s.prefs.language == LangPref::En
+            && s.library.downloaded.first().is_some_and(|g| g.label == "Today")
+            && s.release.as_ref().is_some_and(|r| {
+                r.tracks.iter().find(|tr| tr.id == flac_track.id).and_then(|tr| tr.quality.as_deref())
+                    == Some(row_label_in(&Codec::Flac, Some(&summary), Locale::En).as_str())
+            })
+    });
+
+    let s = rt.state();
+    assert_eq!(s.player.context_header(Locale::En).0, "Playing from playlist “Liked Songs”");
+    assert_eq!(s.player.cached_context().0, "Playing from playlist “Liked Songs”");
+    assert_eq!(s.player.context_header(Locale::Ru).0, "Играет из плейлиста «Любимые»");
+    assert_eq!(s.info.tags.first().map(|(k, _)| k.as_str()), Some("Title"));
+    let liked = s.library.playlists.iter().find(|p| p.id == LIKED_PLAYLIST).unwrap();
+    assert_eq!(liked.display_name_in(Locale::En), "Liked Songs");
+    assert_eq!(liked.display_name_in(Locale::Ru), "Любимые");
+    let entry_id = s.queue.current_entry.expect("liked track playing");
+    let before = s.prefs.clone();
+    drop(s);
+
+    // Search results resolve track quality under the worker's own locale (`En`).
+    rt.send(Command::Search("HiRes".into()));
+    wait_for(&rt, "search track quality localized in En", |s| {
+        s.search.tracks.iter().any(|tr| {
+            tr.id == flac_track.id
+                && tr.quality.as_deref() == Some(row_label_in(&Codec::Flac, Some(&summary), Locale::En).as_str())
+        })
+    });
+
+    // Direct playback error on an active track uses localized error wording in `En`.
+    rt.playback_sender()
+        .send(nikgob_runtime::PlaybackEvent::Error { id: entry_id, message: "audio error".into() })
+        .unwrap();
+    wait_for(&rt, "playback error toast in En", |s| {
+        s.toasts.iter().any(|toast| toast.text == "Song: could not play")
+    });
+
+    // Enqueue and empty-play toasts follow the active English locale.
+    rt.send(Command::Enqueue(vec![t.id]));
+    wait_for(&rt, "enqueued toast in En", |s| {
+        s.toasts.iter().any(|toast| toast.text == nikgob_core::i18n::player_in(Locale::En).added_to_queue)
+    });
+    let empty_pl = lib.create_playlist("Empty").unwrap();
+    rt.send(Command::PlayPlaylist { id: empty_pl.id, start: None, shuffle: false });
+    wait_for(&rt, "nothing to play toast in En", |s| {
+        s.toasts.iter().any(|toast| toast.text == nikgob_core::i18n::errors_in(Locale::En).nothing_to_play)
+    });
+
+    let no_file = lib.upsert_track(&Track::new("NoFile", ArtistCredit::single("Tester", None))).unwrap();
+    rt.send(Command::PlayTracks { tracks: vec![no_file.id], start: 0, context: nikgob_view::QueueOrigin::Library });
+    wait_for(&rt, "no file for track toast in En", |s| {
+        s.toasts.iter().any(|toast| toast.text == nikgob_core::i18n::errors_in(Locale::En).no_file_for_track)
+    });
+
+    let saved: Prefs = serde_json::from_slice(&std::fs::read(&prefs_path).unwrap()).unwrap();
+    assert_eq!(saved.language, LangPref::En);
+
+    // Editing `language` via `PrefPatch::Edit` routes through `set_prefs` too.
+    let mut after = before.clone();
+    after.language = LangPref::Ru;
+    rt.send(Command::SetPref(PrefPatch::Edit { before: Box::new(before), after: Box::new(after) }));
+    wait_for(&rt, "live switch back to Ru via PrefPatch::Edit", |s| {
+        s.prefs.language == LangPref::Ru
+            && s.library.downloaded.first().is_some_and(|g| g.label == "Сегодня")
+            && s.release.as_ref().is_some_and(|r| {
+                r.tracks.iter().find(|tr| tr.id == flac_track.id).and_then(|tr| tr.quality.as_deref())
+                    == Some(row_label_in(&Codec::Flac, Some(&summary), Locale::Ru).as_str())
+            })
+    });
+
+    let saved_ru: Prefs = serde_json::from_slice(&std::fs::read(&prefs_path).unwrap()).unwrap();
+    assert_eq!(saved_ru.language, LangPref::Ru);
+}
+
+#[test]
+fn stream_resolve_rate_limit_pause_and_missing_youtube_localize_in_en() {
+    use nikgob_core::model::{ArtistCredit, Codec, Source, SourceKind, Track};
+    use nikgob_core::streaming::{FakeService, Service};
+    use nikgob_view::{LangPref, Locale, QueueOrigin};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let lib = Library::open_in_memory().unwrap();
+    let yt = Arc::new(FakeService::youtube().logged_out());
+    let sp = FakeService::spotify();
+
+    let stream_track = sp.tracks().into_iter().find(|t| t.id.id == "sp-gruppa-1").unwrap();
+    let t_lim = lib.upsert_stream_track(&stream_track).unwrap();
+
+    let t_short = lib
+        .upsert_track(&Track::new("ShortPauseTrack", ArtistCredit::single("Tester", None)))
+        .unwrap();
+    lib.add_source(&Source::new(t_short.id, SourceKind::Deezer, "dz-short-pause", Codec::Opus)).unwrap();
+
+    let t_local = lib
+        .upsert_track(&Track::new("UnlistedLocalZxq987", ArtistCredit::single("Tester", None)))
+        .unwrap();
+    let wav = root.join("local.wav");
+    write_wav(&wav, 2.0);
+    lib.add_source(&Source::new(t_local.id, SourceKind::LocalFile, wav.display().to_string(), Codec::Wav)).unwrap();
+
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            streams: vec![yt.clone()],
+            library_dir: root.to_owned(),
+            prefs: Prefs { language: LangPref::En, ..Prefs::default() },
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    wait_for(&rt, "accounts initialized", |s| s.accounts.len() == Service::ALL.len());
+
+    // Long lookup rate limit stops playback with localized resolve-limited toast.
+    yt.rate_limit_next("search_kind", 1, Some(Duration::from_secs(600)));
+    rt.send(Command::PlayTracks { tracks: vec![t_lim], start: 0, context: QueueOrigin::Library });
+    let prefix = format!("{}: YouTube Music asks to wait until ", stream_track.title);
+    wait_for(&rt, "resolve rate-limited toast in En", |s| {
+        s.toasts.iter().any(|toast| toast.text.starts_with(&prefix) && toast.text.ends_with(" — try playing this track later"))
+    });
+
+    // Short lookup rate limit announces localized auto-resume pause toast.
+    yt.rate_limit_next("search_kind", 1, Some(Duration::from_secs(10)));
+    rt.send(Command::PlayTracks { tracks: vec![t_short.id], start: 0, context: QueueOrigin::Library });
+    wait_for(&rt, "pause toast in En", |s| {
+        s.toasts.iter().any(|toast| {
+            toast.text == nikgob_core::i18n::ErrorStrings::pause_will_resume_in(Locale::En, "YouTube Music", None)
+        })
+    });
+
+    // Missing YouTube Music lookup after miss emits localized `not_on_youtube` toast.
+    yt.rate_limit_next("search_kind", 0, None);
+    let before_calls = yt.calls("search_kind");
+    rt.send(Command::PlayTracks { tracks: vec![t_local.id], start: 0, context: QueueOrigin::Library });
+    wait_for(&rt, "local track active", |s| {
+        s.queue.current.as_ref().map(|t| t.id) == Some(t_local.id)
+    });
+    rt.send(Command::PlayFromYoutube);
+    wait_for(&rt, "YouTube lookup missed", |s| {
+        yt.calls("search_kind") > before_calls && s.player.status == nikgob_view::Status::Stopped
+    });
+    rt.send(Command::PlayTracks { tracks: vec![t_local.id], start: 0, context: QueueOrigin::Library });
+    wait_for(&rt, "local track active again", |s| {
+        s.queue.current.as_ref().map(|t| t.id) == Some(t_local.id)
+    });
+    rt.send(Command::PlayFromYoutube);
+    wait_for(&rt, "not on YouTube Music toast in En", |s| {
+        s.toasts.iter().any(|toast| toast.text == nikgob_core::i18n::errors_in(Locale::En).not_on_youtube)
+    });
+}
+
+#[test]
+fn remote_page_and_settings_errors_localize_in_en() {
+    use nikgob_core::streaming::{FakeService, RemoteId, Service};
+    use nikgob_view::{LangPref, Locale};
+
+    let err = nikgob_core::i18n::errors_in(Locale::En);
+    let yt = Arc::new(FakeService::youtube().logged_out());
+
+    // Missing `settings_path` + remote page fetch failure via `with_page`.
+    let rt_no_settings = Runtime::start(
+        RuntimeConfig {
+            library: Library::open_in_memory().unwrap(),
+            streams: vec![yt],
+            library_dir: std::env::temp_dir(),
+            prefs: Prefs { language: LangPref::En, ..Prefs::default() },
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt_no_settings.send(Command::PlayStreamAlbum {
+        id: RemoteId::new(Service::Youtube, "missing-album"),
+        start: None,
+        shuffle: false,
+    });
+    wait_for(&rt_no_settings, "remote page error toast in En", |s| {
+        s.toasts.iter().any(|t| t.text == "Failed: Unavailable")
+    });
+    rt_no_settings.send(Command::SetIndexer {
+        url: "http://127.0.0.1:9696".into(),
+        api_key: "key".into(),
+    });
+    wait_for(&rt_no_settings, "missing settings path toast in En (indexer)", |s| {
+        s.toasts.iter().any(|t| t.text == err.no_settings_path)
+    });
+    let id = rt_no_settings.state().toasts.iter().find(|t| t.text == err.no_settings_path).map(|t| t.id);
+    if let Some(id) = id {
+        rt_no_settings.send(Command::DismissToast(id));
+        wait_for(&rt_no_settings, "dismissed indexer toast", |s| s.toasts.iter().all(|t| t.id != id));
+    }
+    rt_no_settings.send(Command::SetStreamSecrets {
+        spotify_client_id: Some("cid".into()),
+        youtube_cookies: None,
+    });
+    wait_for(&rt_no_settings, "missing settings path toast in En (secrets)", |s| {
+        s.toasts.iter().any(|t| t.text == err.no_settings_path)
+    });
+    drop(rt_no_settings);
+
+    // Unreadable `settings.toml` and invalid Prowlarr config under `LangPref::En`.
+    let dir = tempfile::tempdir().unwrap();
+    let settings_path = dir.path().join("settings.toml");
+    std::fs::write(&settings_path, "not = [valid toml").unwrap();
+    let rt_settings = Runtime::start(
+        RuntimeConfig {
+            library: Library::open_in_memory().unwrap(),
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs { language: LangPref::En, ..Prefs::default() },
+            prefs_path: None,
+            settings_path: Some(settings_path.clone()),
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt_settings.send(Command::SetIndexer {
+        url: "http://127.0.0.1:9696".into(),
+        api_key: "key".into(),
+    });
+    wait_for(&rt_settings, "unreadable settings.toml toast in En (indexer)", |s| {
+        s.toasts.iter().any(|t| t.text == err.settings_unreadable)
+    });
+    let id = rt_settings.state().toasts.iter().find(|t| t.text == err.settings_unreadable).map(|t| t.id);
+    if let Some(id) = id {
+        rt_settings.send(Command::DismissToast(id));
+        wait_for(&rt_settings, "dismissed unreadable toast", |s| s.toasts.iter().all(|t| t.id != id));
+    }
+    rt_settings.send(Command::SetStreamSecrets {
+        spotify_client_id: Some("cid".into()),
+        youtube_cookies: None,
+    });
+    wait_for(&rt_settings, "unreadable settings.toml toast in En (secrets)", |s| {
+        s.toasts.iter().any(|t| t.text == err.settings_unreadable)
+    });
+
+    std::fs::write(&settings_path, "").unwrap();
+    rt_settings.send(Command::SetIndexer {
+        url: "ftp://not-http".into(),
+        api_key: String::new(),
+    });
+    wait_for(&rt_settings, "invalid prowlarr toast in En", |s| {
+        s.toasts.iter().any(|t| t.text == err.prowlarr_invalid)
+    });
+}
+
+#[test]
+fn mesh_and_sync_errors_localize_in_en() {
+    use nikgob_core::i18n::{ErrorStrings, errors_in};
+    use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
+    use nikgob_library::PlaylistRemote;
+    use nikgob_view::{LangPref, Locale};
+
+    let err = errors_in(Locale::En);
+
+    // Missing `settings_path` on mesh toggle + unlinked playlist sync without signed-in streams.
+    let lib_no_settings = Library::open_in_memory().unwrap();
+    let unlinked = lib_no_settings.create_playlist("Unlinked").unwrap();
+    let rt_no_settings = Runtime::start(
+        RuntimeConfig {
+            library: lib_no_settings,
+            streams: Vec::new(),
+            library_dir: std::env::temp_dir(),
+            prefs: Prefs { language: LangPref::En, ..Prefs::default() },
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt_no_settings.send(Command::MeshSetEnabled(true));
+    wait_for(&rt_no_settings, "missing settings path toast in En (mesh)", |s| {
+        s.toasts.iter().any(|t| t.text == err.no_settings_path)
+    });
+    rt_no_settings.send(Command::SetPlaylistSync {
+        playlist: unlinked.id,
+        mode: PlaylistSyncMode::TwoWay,
+    });
+    wait_for(&rt_no_settings, "link playlist sign-in toast in En", |s| {
+        s.toasts.iter().any(|t| t.text == err.link_playlist_sign_in)
+    });
+    drop(rt_no_settings);
+
+    // Unreadable `settings.toml` on mesh toggle + remote sync pull failure.
+    let dir = tempfile::tempdir().unwrap();
+    let settings_path = dir.path().join("settings.toml");
+    std::fs::write(&settings_path, "not = [valid toml").unwrap();
+    let lib_sync = Library::open_in_memory().unwrap();
+    let linked = lib_sync.create_playlist("Linked").unwrap();
+    lib_sync
+        .put_playlist_remote(&PlaylistRemote {
+            playlist_id: linked.id,
+            remote: RemoteId::new(Service::Spotify, "sp-pl"),
+            sync_mode: PlaylistSyncMode::Once,
+            remote_version: None,
+            synced_at: None,
+            base_json: None,
+        })
+        .unwrap();
+    let sp = Arc::new(FakeService::spotify());
+    sp.fail_next("playlist", 1);
+    let rt_sync = Runtime::start(
+        RuntimeConfig {
+            library: lib_sync,
+            streams: vec![sp],
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs { language: LangPref::En, ..Prefs::default() },
+            prefs_path: None,
+            settings_path: Some(settings_path),
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt_sync.send(Command::MeshSetEnabled(true));
+    wait_for(&rt_sync, "unreadable settings.toml toast in En (mesh)", |s| {
+        s.toasts.iter().any(|t| t.text == err.settings_unreadable)
+    });
+    rt_sync.send(Command::SetPlaylistSync {
+        playlist: linked.id,
+        mode: PlaylistSyncMode::TwoWay,
+    });
+    let expected_sync_err = ErrorStrings::sync_failed_in(Locale::En, err.stream_network);
+    wait_for(&rt_sync, "sync failed toast in En", |s| {
+        s.toasts.iter().any(|t| t.text == expected_sync_err)
+    });
+}
+
+#[test]
+fn masters_dir_errors_localize_in_en() {
+    use nikgob_core::i18n::{ErrorStrings, errors_in};
+    use nikgob_view::{LangPref, Locale};
+
+    let err = errors_in(Locale::En);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let cfg = ImportConfig::with_root(root);
+
+    // Unavailable when import service is disabled.
+    let rt_no_import = Runtime::start(
+        RuntimeConfig {
+            library: Library::open_in_memory().unwrap(),
+            streams: Vec::new(),
+            library_dir: cfg.library_dir.clone(),
+            prefs: Prefs { language: LangPref::En, ..Prefs::default() },
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt_no_import.send(Command::MoveMastersDir(root.join("archive")));
+    wait_for(&rt_no_import, "masters move unavailable toast in En", |s| {
+        s.toasts.iter().any(|t| t.text == err.masters_move_unavailable)
+    });
+    drop(rt_no_import);
+
+    // Moving into a prohibited working folder (Inbox / Downloads / music root).
+    std::fs::create_dir_all(&cfg.inbox_dir).unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let rt_import = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            streams: Vec::new(),
+            library_dir: cfg.library_dir.clone(),
+            prefs: Prefs { language: LangPref::En, ..Prefs::default() },
+            prefs_path: Some(root.join("prefs.json")),
+            settings_path: None,
+            import: Some(ImportSetup {
+                config: cfg.clone(),
+                metadata: None,
+                watch_inbox: false,
+                torrent_state_dir: root.join("torrent-state"),
+                torrent_offline: true,
+                models_dir: None,
+            }),
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt_import.send(Command::MoveMastersDir(cfg.inbox_dir.join("nested")));
+    wait_for(&rt_import, "masters inside work dir toast in En", |s| {
+        s.toasts.iter().any(|t| t.text == err.masters_inside_work_dir)
+    });
+
+    // Asynchronous `relocate_masters` refusal (`NamedMastersInAlbumFolders`) localizes in full in En.
+    let wav = root.join("named.wav");
+    write_wav(&wav, 2.5);
+    rt_import.send(Command::ImportFiles(vec![wav]));
+    wait_for(&rt_import, "imported named master", |s| s.library.track_count == 1 && s.library.tracks.len() == 1);
+    let track1 = rt_import.state().library.tracks[0].id;
+    let old_masters = cfg.masters_dir();
+    let expected_refusal = ErrorStrings::masters_move_failed_in(
+        Locale::En,
+        &ErrorStrings::masters_named_in_albums_in(Locale::En, &old_masters.display().to_string(), 1),
+    );
+    rt_import.send(Command::MoveMastersDir(root.join("hdd_flac_archive")));
+    wait_for(&rt_import, "complete English refused relocation toast", |s| {
+        s.toasts.iter().any(|t| t.text == expected_refusal)
+    });
+
+    // Asynchronous hash-verification failure (`HashVerificationFailed`) localizes in full in En.
+    lib.delete_master(track1).unwrap();
+    let bad_dest = root.join("hdd_flac_archive_bad");
+    let fake_hash = "0".repeat(64);
+    let bad_src = old_masters.join(format!("{fake_hash}.wav"));
+    write_wav(&bad_src, 0.5);
+    let actual_hash = nikgob_import::fsutil::hash_file(&bad_src).unwrap();
+    let file_size = nikgob_import::fsutil::file_size(&bad_src).unwrap();
+    let bad_dst = bad_dest.join(format!("{fake_hash}.wav"));
+    let expected_hash_err = ErrorStrings::masters_move_failed_in(
+        Locale::En,
+        &ErrorStrings::hash_verification_failed_in(
+            Locale::En,
+            &bad_dst.display().to_string(),
+            &fake_hash,
+            Some(file_size),
+            &actual_hash,
+            Some(file_size),
+        ),
+    );
+    rt_import.send(Command::MoveMastersDir(bad_dest));
+    wait_for(&rt_import, "complete English hash verification failure toast", |s| {
+        s.toasts.iter().any(|t| t.text == expected_hash_err)
+    });
+}
+
+

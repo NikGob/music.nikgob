@@ -325,8 +325,8 @@ fn a_speed_reset_from_the_marks_can_be_undone() {
     assert!(r.view(|s| s.speed_names.is_empty()));
     assert!(r.lib.track_fx().unwrap().is_empty());
     let undo = r.view(|s| s.toasts.iter().rev().find_map(|t| t.action.clone()));
-    let Some((label, command)) = undo else { panic!("no «Отменить»") };
-    assert_eq!(label, "Отменить");
+    let Some((label, command)) = undo else { panic!("no undo action") };
+    assert_eq!(label, r.view(|s| nikgob_core::i18n::common_in(s.prefs.resolved_locale()).undo));
     assert_eq!(command, Command::SetTrackSpeed { track, variant: SpeedVariant::Nightcore });
     r.rt.send(command);
     wait_for("the speed back", || r.version_of(track) == SpeedVariant::Nightcore);

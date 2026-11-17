@@ -17,7 +17,7 @@ use nikgob_core::streaming::{
 };
 use nikgob_view::{self as v, Command};
 
-use super::{Msg, error_text};
+use super::{Msg, error_text_in};
 use crate::Worker;
 
 /// What a service sent for a page.
@@ -270,7 +270,7 @@ impl Worker {
     /// the new cover showing is its answer.
     pub(crate) fn refresh_stream_album_cover(&mut self, id: RemoteId) {
         if !album_fetching(&self.streaming.pages.inflight, &id) {
-            self.toast(crate::cover_refresh::LOOKING, None);
+            self.toast_work(crate::cover_refresh::LOOKING, None);
         }
         let mut covers: Vec<String> = self.streaming.pages.album(&id).and_then(|a| a.cover_url.clone()).into_iter().collect();
         self.streaming.pages.stale_album(&id);
@@ -377,7 +377,7 @@ impl Worker {
                 log::warn!("{page:?}: {e}");
                 let mut view = v::StreamPageView::loading(page);
                 view.loading = false;
-                view.error = Some(error_text(&e));
+                view.error = Some(error_text_in(&e, self.locale()));
                 view
             }
         };
@@ -531,7 +531,7 @@ impl Worker {
 
     // ------------------------------------------------------------- play / like
 
-    pub(crate) fn play_stream_tracks(&mut self, remotes: &[RemoteId], start: usize, context: String) {
+    pub(crate) fn play_stream_tracks(&mut self, remotes: &[RemoteId], start: usize, origin: v::QueueOrigin) {
         let start_remote = remotes.get(start).cloned();
         let known: Vec<RemoteId> = remotes
             .iter()
@@ -540,7 +540,7 @@ impl Worker {
             .collect();
         let ids = self.seen_tracks(&known);
         if ids.is_empty() {
-            self.toast("Нечего играть", None);
+            self.toast_nothing_to_play();
             return;
         }
         let start = start_remote
@@ -548,7 +548,7 @@ impl Worker {
             .unwrap_or(0);
         self.user_switch(nikgob_core::model::EventOrigin::Manual);
         self.new_list(None);
-        self.queue.set(&ids, start, Some(context));
+        self.queue.set(&ids, start, origin);
         self.play_context = EventContext::Search;
         self.play_context_id = None;
         if let Some(e) = self.queue.current() {
@@ -565,7 +565,7 @@ impl Worker {
     /// queue from it. Stream rows become "seen" tracks, library rows are
     /// what they are; a row the runtime does not know (any more) is left
     /// out.
-    pub(crate) fn play_search(&mut self, picks: &[v::SearchPick], start: usize, context: String) {
+    pub(crate) fn play_search(&mut self, picks: &[v::SearchPick], start: usize, origin: v::QueueOrigin) {
         let (mode, autoplay) = {
             let p = &self.state.read().prefs;
             (p.search_play, p.autoplay)
@@ -582,7 +582,7 @@ impl Worker {
                 let before = self.queue.generation();
                 self.start_radio_cmd(seed);
                 if self.queue.generation() != before {
-                    self.queue.context = Some(context);
+                    self.queue.origin = origin;
                     self.publish_player();
                 }
                 self.after_stream_play();
@@ -613,12 +613,12 @@ impl Worker {
             }
         }
         if ids.is_empty() {
-            self.toast("Нечего играть", None);
+            self.toast_nothing_to_play();
             return;
         }
         self.user_switch(nikgob_core::model::EventOrigin::Manual);
         self.new_list(None);
-        self.queue.set(&ids, start_at, Some(context));
+        self.queue.set(&ids, start_at, origin);
         self.play_context = EventContext::Search;
         self.play_context_id = None;
         if let Some(e) = self.queue.current() {
@@ -664,7 +664,7 @@ impl Worker {
             return;
         }
         let Some(svc) = self.service(key.1.service) else {
-            self.toast(self.off_text(key.1.service), None);
+            self.toast_err(self.off_text(key.1.service), None);
             return;
         };
         self.fetch_page(key, Waiter::Then(then), svc);
@@ -675,7 +675,9 @@ impl Worker {
             Ok(d) => d,
             Err(e) => {
                 log::warn!("fetching for play/like: {e}");
-                self.toast(format!("Не получилось: {}", error_text(&e)), None);
+                let loc = self.locale();
+                let msg = nikgob_core::i18n::ErrorStrings::failed_with_in(loc, &error_text_in(&e, loc));
+                self.toast_err(msg, None);
                 return;
             }
         };
@@ -689,15 +691,15 @@ impl Worker {
             match newest_release(a) {
                 Some(album) if matches!(then, Then::Play { .. } | Then::Next | Then::Enqueue) => self.with_album(album, then),
                 Some(_) => {}
-                None => self.toast("Нечего играть", None),
+                None => self.toast_nothing_to_play(),
             }
             return;
         }
-        let (tracks, name, title, ctx, album, playlist) = match &data {
+        let (tracks, name, origin, ctx, album, playlist) = match &data {
             PageData::Album(a) => (
                 a.tracks.clone(),
                 a.title.clone(),
-                format!("альбома «{}»", a.title),
+                v::QueueOrigin::Album(a.title.clone()),
                 EventContext::Album,
                 Some(a.id.clone()),
                 None,
@@ -705,7 +707,7 @@ impl Worker {
             PageData::Playlist(p) => (
                 p.tracks.clone(),
                 p.name.clone(),
-                format!("плейлиста «{}»", p.name),
+                v::QueueOrigin::Playlist(p.name.clone()),
                 EventContext::Playlist,
                 None,
                 Some(p.id.clone()),
@@ -723,7 +725,8 @@ impl Worker {
                 self.queue.play_next(&ids);
                 self.preload_next();
                 self.publish_player();
-                self.toast(format!("Следующим: «{name}»"), None);
+                let msg = nikgob_core::i18n::PlayerStrings::next_up_quoted_in(self.locale(), &name);
+                self.toast_ok(msg, None);
                 self.after_stream_play();
             }
             Then::Enqueue => {
@@ -755,7 +758,7 @@ impl Worker {
                 };
                 // A service's album, or a service's playlist (a ready one).
                 let kind = if album.is_some() { v::ListKind::Album } else { v::ListKind::ReadyPlaylist };
-                self.play_list(ids, start, shuffle, kind, Some(title), ctx, context_id);
+                self.play_list(ids, start, shuffle, kind, origin, ctx, context_id);
                 self.after_stream_play();
             }
             Then::Download => {
@@ -769,7 +772,7 @@ impl Worker {
                     });
                 match release {
                     Some(r) => self.download_whole_release(r),
-                    None => self.toast("Не получилось скачать альбом", None),
+                    None => self.toast_err(nikgob_core::i18n::errors_in(self.locale()).album_download_failed, None),
                 }
             }
             Then::Follow => {}
@@ -784,7 +787,7 @@ impl Worker {
                     });
                 match release {
                     Some(r) => self.command(Command::Like(LikeTarget::Release(r), on)),
-                    None => self.toast("Не получилось лайкнуть альбом", None),
+                    None => self.toast_err(nikgob_core::i18n::errors_in(self.locale()).album_like_failed, None),
                 }
                 self.refresh_stream_page();
             }
@@ -800,7 +803,7 @@ impl Worker {
         if let Some(link) = self.lib.playlist_by_remote(&p.id).ok().flatten()
             && self.lib.get_playlist(link.playlist_id).ok().flatten().is_some()
         {
-            self.toast_open(format!("«{}» уже в библиотеке", p.name), "Открыть", open(link.playlist_id));
+            self.toast_open(v::ToastKind::Info, format!("«{}» уже в библиотеке", p.name), "Открыть", open(link.playlist_id));
             return;
         }
         let Some(created) = self.log_err("плейлист", self.lib.create_playlist(&p.name)) else { return };
@@ -834,7 +837,7 @@ impl Worker {
         self.load_library();
         self.publish_wishlist();
         self.refresh_stream_page();
-        self.toast_open(format!("«{}» в библиотеке", p.name), "Открыть", open(pid));
+        self.toast_open(v::ToastKind::Success, format!("«{}» в библиотеке", p.name), "Открыть", open(pid));
     }
 
     /// «В библиотеку» of a song of a service: its track is made, then put
@@ -843,7 +846,7 @@ impl Worker {
     pub(crate) fn stream_in_library(&mut self, remote: &RemoteId, on: bool) {
         let Some(t) = self.streaming.known.get(remote).cloned() else {
             self.api_skip(format!("{remote} is not known: find it again"));
-            self.toast("Трек устарел — найди его заново", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).stream_track_stale, None);
             return;
         };
         let Some(id) = self.upsert_streams(std::slice::from_ref(&t)).first().copied() else {
@@ -859,7 +862,7 @@ impl Worker {
     pub(crate) fn like_stream(&mut self, remote: &RemoteId, on: bool) {
         let Some(t) = self.streaming.known.get(remote).cloned() else {
             self.api_skip(format!("{remote} is not known: find it again"));
-            self.toast("Трек устарел — найди его заново", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).stream_track_stale, None);
             return;
         };
         let Some(id) = self.upsert_streams(std::slice::from_ref(&t)).first().copied() else {

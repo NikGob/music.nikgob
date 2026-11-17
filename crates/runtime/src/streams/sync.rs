@@ -45,7 +45,7 @@ use nikgob_library::PlaylistRemote;
 use nikgob_view::{self as v, LIKED_PLAYLIST};
 
 use super::pages::PageData;
-use super::{Msg, StreamSchedule, error_text};
+use super::{Msg, StreamSchedule, error_text_in};
 use crate::Worker;
 
 /// An opened playlist synced this recently is not synced again.
@@ -470,7 +470,7 @@ impl Worker {
                         if let Some(service) = service {
                             self.sync_rate_limited(service, retry_after);
                             if self.streaming.sync.announce.remove(&playlist) {
-                                self.toast(
+                                self.toast_info(
                                     format!("{} просит подождать — синхронизирую сам", service.display_name()),
                                     None,
                                 );
@@ -480,9 +480,11 @@ impl Worker {
                     }
                     Err(e) => {
                         log::warn!("sync {playlist}: {e}");
-                        self.streaming.sync.errors.insert(playlist, error_text(&e));
+                        let loc = self.locale();
+                        let msg = error_text_in(&e, loc);
+                        self.streaming.sync.errors.insert(playlist, msg.clone());
                         if self.streaming.sync.announce.remove(&playlist) {
-                            self.toast(format!("Синхронизация не удалась: {}", error_text(&e)), None);
+                            self.toast_err(nikgob_core::i18n::ErrorStrings::sync_failed_in(loc, &msg), None);
                         }
                         self.publish_playlist_sync(playlist);
                     }
@@ -508,8 +510,10 @@ impl Worker {
                         // differ from it, so they are pushed next time.
                         let json = serde_json::to_string(&remote).ok();
                         let _ = self.lib.mark_playlist_synced(playlist, version.as_deref(), now, json.as_deref());
-                        self.streaming.sync.errors.insert(playlist, error_text(&e));
-                        self.toast(format!("Не получилось обновить плейлист в сервисе: {}", error_text(&e)), None);
+                        let loc = self.locale();
+                        let msg = error_text_in(&e, loc);
+                        self.streaming.sync.errors.insert(playlist, msg.clone());
+                        self.toast_err(nikgob_core::i18n::ErrorStrings::sync_update_failed_in(loc, &msg), None);
                     }
                 }
                 self.publish_playlist_sync(playlist);
@@ -528,8 +532,10 @@ impl Worker {
                 }
                 Err(e) => {
                     self.streaming.sync.announce.remove(&playlist);
-                    self.toast(
-                        format!("Не получилось создать плейлист в {}: {}", service.display_name(), error_text(&e)),
+                    let loc = self.locale();
+                    let msg = error_text_in(&e, loc);
+                    self.toast_err(
+                        nikgob_core::i18n::ErrorStrings::sync_create_failed_in(loc, service.display_name(), &msg),
                         None,
                     );
                 }
@@ -590,7 +596,7 @@ impl Worker {
         if link.sync_mode == PlaylistSyncMode::TwoWay && !remote.editable {
             link.sync_mode = PlaylistSyncMode::Follow;
             let _ = self.lib.put_playlist_remote(&link);
-            self.toast(
+            self.toast_info(
                 format!("«{}» в {} менять нельзя — только получать изменения", remote.name, remote.id.service.display_name()),
                 None,
             );
@@ -661,18 +667,20 @@ impl Worker {
         );
         if self.streaming.sync.announce.remove(&playlist) {
             let there = out.pushed_add.len() + out.pushed_remove.len();
-            let text = if out.added + out.removed + there == 0 {
-                "Плейлист синхронизирован: изменений нет".to_owned()
+            if out.added + out.removed + there == 0 {
+                self.toast_info("Плейлист синхронизирован: изменений нет", None);
             } else {
-                format!(
-                    "Плейлист синхронизирован: +{} −{} здесь, {} в {}",
-                    out.added,
-                    out.removed,
-                    there,
-                    service.display_name()
-                )
-            };
-            self.toast(text, None);
+                self.toast_ok(
+                    format!(
+                        "Плейлист синхронизирован: +{} −{} здесь, {} в {}",
+                        out.added,
+                        out.removed,
+                        there,
+                        service.display_name()
+                    ),
+                    None,
+                );
+            }
         }
         if out.added + out.removed > 0 {
             self.load_library();
@@ -684,7 +692,7 @@ impl Worker {
     /// `Command::SetPlaylistSync`.
     pub(crate) fn set_playlist_sync(&mut self, playlist: PlaylistId, mode: PlaylistSyncMode) {
         if playlist == LIKED_PLAYLIST {
-            self.toast("«Любимые» синхронизируются лайками", None);
+            self.toast_info("«Любимые» синхронизируются лайками", None);
             return;
         }
         let Some(local) = self.lib.get_playlist(playlist).ok().flatten() else { return };
@@ -697,7 +705,7 @@ impl Worker {
             Some(mut link) => {
                 link.sync_mode = mode;
                 let _ = self.log_err("плейлист", self.lib.put_playlist_remote(&link));
-                self.toast(format!("Синхронизация: {label}"), None);
+                self.toast_info(format!("Синхронизация: {label}"), None);
                 if mode != PlaylistSyncMode::Once {
                     self.streaming.sync.announce.insert(playlist);
                     self.sync_playlist(playlist);
@@ -705,11 +713,11 @@ impl Worker {
             }
             None if mode == PlaylistSyncMode::TwoWay => {
                 let Some(service) = self.service_for_new_remote(playlist) else {
-                    self.toast("Войди в Spotify или YouTube Music, чтобы связать плейлист", None);
+                    self.toast_err(nikgob_core::i18n::errors_in(self.locale()).link_playlist_sign_in, None);
                     return;
                 };
                 let Some(svc) = self.service(service) else { return };
-                self.toast(format!("Создаю «{}» в {}…", local.name, service.display_name()), None);
+                self.toast_work(format!("Создаю «{}» в {}…", local.name, service.display_name()), None);
                 self.streaming.sync.announce.insert(playlist);
                 let name = local.name.clone();
                 self.streaming.spawn(async move {
@@ -717,7 +725,7 @@ impl Worker {
                     Msg::Sync(SyncMsg::Created { playlist, service, result })
                 });
             }
-            None => self.toast("Плейлист не связан с сервисом", None),
+            None => self.toast_info("Плейлист не связан с сервисом", None),
         }
         self.publish_playlist_sync(playlist);
     }

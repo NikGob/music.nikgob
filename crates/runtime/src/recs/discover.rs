@@ -493,7 +493,12 @@ impl Worker {
     /// Why discovery `t` is offered: the seed of the pass that found it
     /// (the most loved of them) and its service, «Новое: нашлось по Ghost
     /// Avenue в YouTube Music».
-    pub(crate) fn discovery_why(&self, t: &StreamTrack) -> Option<String> {
+    pub(crate) fn discovery_why(&self, t: &StreamTrack) -> Option<nikgob_core::i18n::PerLocale<String>> {
+        enum DiscoveryWhy {
+            Found { seed: String, service: &'static str },
+            Suggested { service: &'static str },
+        }
+
         let found = self.recs.discover.found.as_ref()?;
         let key = stream_song_key(t);
         let weight = |s: &Seed| match s {
@@ -507,11 +512,21 @@ impl Worker {
             .filter(|(_, tracks)| tracks.iter().any(|x| x.id == t.id || stream_song_key(x) == key))
             .max_by(|a, b| weight(&a.0).total_cmp(&weight(&b.0)))?;
         let service = t.id.service.display_name();
-        Some(match seed {
-            Seed::Track(id) => nikgob_recs::explain::new_found(&self.lib.get_track(*id).ok().flatten()?.title, service),
-            Seed::Artist(a) => nikgob_recs::explain::new_found(&self.lib.get_artist(*a).ok().flatten()?.name, service),
-            Seed::Service(s) => nikgob_recs::explain::suggested(s.display_name()),
-        })
+        let why = match seed {
+            Seed::Track(id) => DiscoveryWhy::Found {
+                seed: self.lib.get_track(*id).ok().flatten()?.title,
+                service,
+            },
+            Seed::Artist(a) => DiscoveryWhy::Found {
+                seed: self.lib.get_artist(*a).ok().flatten()?.name,
+                service,
+            },
+            Seed::Service(s) => DiscoveryWhy::Suggested { service: s.display_name() },
+        };
+        Some(nikgob_core::i18n::PerLocale::init(|loc| match &why {
+            DiscoveryWhy::Found { seed, service } => nikgob_recs::explain::new_found(seed, service, loc),
+            DiscoveryWhy::Suggested { service } => nikgob_recs::explain::suggested(service, loc),
+        }))
     }
 
     /// The library's songs and artists whose radios, related lists or

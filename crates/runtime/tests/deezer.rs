@@ -230,7 +230,7 @@ fn a_service_song_from_the_search_keeps_its_source_with_autoplay_off() {
     let start = picks.iter().position(|p| matches!(p, SearchPick::Stream(_))).expect("a service song");
     r.rt.send(Command::PlaySearch { tracks: picks, start, context: "поиска Deezer".into() });
     wait_until("a play request", || !r.asked.lock().unwrap().is_empty());
-    wait_for(&r.rt, "the header", |s| s.player.current.is_some() && s.player.context_line() == "Играет из поиска Deezer");
+    wait_for(&r.rt, "the header", |s| s.player.current.is_some() && s.player.context_header(nikgob_view::Locale::Ru).0 == "Играет из поиска Deezer");
 }
 
 #[test]

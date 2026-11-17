@@ -32,7 +32,7 @@ pub fn release_matches(words: &[String], r: &ReleaseCard) -> bool {
 }
 
 pub fn playlist_matches(words: &[String], p: &PlaylistCard) -> bool {
-    matches(words, &[&p.name])
+    matches(words, &[&p.name, p.display_name()])
 }
 
 pub fn artist_matches(words: &[String], a: &ArtistCard) -> bool {

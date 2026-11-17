@@ -28,8 +28,6 @@ use nikgob_view as v;
 use super::Snapshot;
 use crate::Worker;
 
-/// The wave's name in the queue.
-pub(crate) const TITLE: &str = "Моя волна";
 /// The scenes the header offers at most.
 const SCENES_MAX: usize = 8;
 
@@ -235,7 +233,7 @@ pub(crate) fn with_context<R>(snap: &Snapshot, local_only: bool, f: impl FnOnce(
 /// named as «Смешать с…» names them (`profiles`), with at least a cluster's
 /// worth of library tracks, then the families of genres, each name once,
 /// the largest first, [`SCENES_MAX`] at most.
-pub(crate) fn scenes(snap: &Snapshot, profiles: &[v::BlendProfile]) -> Vec<v::WaveSceneCard> {
+pub(crate) fn scenes(snap: &Snapshot, profiles: &[v::BlendProfile], loc: v::Locale) -> Vec<v::WaveSceneCard> {
     let m = &snap.model;
     let mut by_profile: HashMap<u32, usize> = HashMap::new();
     let mut by_genre: HashMap<u8, usize> = HashMap::new();
@@ -258,7 +256,7 @@ pub(crate) fn scenes(snap: &Snapshot, profiles: &[v::BlendProfile]) -> Vec<v::Wa
     let mut genres: Vec<(usize, v::WaveSceneCard)> = by_genre
         .into_iter()
         .filter(|(_, n)| *n >= MIN_ARM_TRACKS)
-        .filter_map(|(f, n)| Some((n, v::WaveSceneCard { scene: v::WaveScene::Genre(f), title: nikgob_recs::mix_names::family_title(f)?.to_owned() })))
+        .filter_map(|(f, n)| Some((n, v::WaveSceneCard { scene: v::WaveScene::Genre(f), title: nikgob_recs::mix_names::family_title_in(f, loc)?.to_owned() })))
         .collect();
     genres.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.title.cmp(&b.1.title)));
     found.extend(genres);
@@ -267,15 +265,15 @@ pub(crate) fn scenes(snap: &Snapshot, profiles: &[v::BlendProfile]) -> Vec<v::Wa
 }
 
 /// The name of a scene the list of [`scenes`] may lack.
-fn scene_title(snap: &Snapshot, scene: Scene) -> Option<String> {
+fn scene_title(snap: &Snapshot, scene: Scene, loc: v::Locale) -> Option<String> {
     use nikgob_recs::profiles::{Kind, LaneKey};
     match scene {
         Scene::All => None,
-        Scene::Profile(k) => snap.model.profiles.list.iter().find(|p| p.key == k).map(|p| p.kind.title()),
-        Scene::Kind(LaneKey::Instrumental) => Some(Kind::Instrumental.title()),
-        Scene::Kind(LaneKey::Sung(l)) => Some(Kind::Sung(l).title()),
-        Scene::Kind(LaneKey::Unknown) => Some(Kind::Songs.title()),
-        Scene::Genre(f) => nikgob_recs::mix_names::family_title(f).map(str::to_owned),
+        Scene::Profile(k) => snap.model.profiles.list.iter().find(|p| p.key == k).map(|p| p.kind.title_in(loc)),
+        Scene::Kind(LaneKey::Instrumental) => Some(Kind::Instrumental.title_in(loc)),
+        Scene::Kind(LaneKey::Sung(l)) => Some(Kind::Sung(l).title_in(loc)),
+        Scene::Kind(LaneKey::Unknown) => Some(Kind::Songs.title_in(loc)),
+        Scene::Genre(f) => nikgob_recs::mix_names::family_title_in(f, loc).map(str::to_owned),
     }
 }
 
@@ -290,9 +288,19 @@ fn profile_of(snap: &Snapshot, tracks: &[TrackId]) -> Option<u32> {
     n.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|x| x.0)
 }
 
-/// The name a wave plays under: its card's mix (`card`), else «Моя волна».
-fn wave_title(card: Option<String>) -> String {
-    card.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| TITLE.to_owned())
+/// The typed name a wave plays under: its card's mix, else [`v::RadioTitle::Wave`].
+fn wave_title(preset: Option<v::MixKey>, home: Option<&super::RecHome>) -> v::RadioTitle {
+    preset
+        .and_then(|k| home?.lanes.iter().find(|l| l.key == k))
+        .map_or(v::RadioTitle::Wave, |l| {
+            v::RadioTitle::Mix(super::play_lane_mix_title(
+                l.key,
+                l.ru_title(),
+                &l.title,
+                l.side_flavor,
+                Some(&l.labels),
+            ))
+        })
 }
 
 impl Worker {
@@ -324,7 +332,7 @@ impl Worker {
         // A card's wave is named after its mix: «Играет из микса
         // «Хип-хоп микс»», the queue's header, the card that plays. What
         // the history keeps of it is the seed's (a wave) and the section.
-        let title = wave_title(preset.and_then(|k| self.recs.home.as_ref()?.lanes.iter().find(|l| l.key == k).map(|l| l.title.clone())));
+        let title = wave_title(preset, self.recs.home.as_ref());
         self.start_radio(RadioSeed::Wave(seed), title, EventContext::HomeSection, None);
         let id = self.recs.radio.run_id();
         self.recs.radio.wave_preset = id.map(|id| (id, preset));
@@ -413,15 +421,26 @@ impl Worker {
     pub(crate) fn wave_view(&mut self) -> Option<v::WaveView> {
         let seed = self.wave_seed()?;
         let snap = self.snapshot();
+        let loc = self.state.read().prefs.resolved_locale();
         // Found on the wave's thread with its picks (of this snapshot or,
-        // until its next picks, of the one before).
-        let mut scenes = self.recs.radio.scenes.as_ref().map(|(_, list)| list.clone()).unwrap_or_default();
+        // until its next picks, of the one before), rebuilt synchronously if
+        // the locale changed since it was built.
+        if let Some(s) = &snap
+            && self.recs.radio.scenes.as_ref().is_none_or(|(w, cached_loc, _)| {
+                *cached_loc != loc || !std::sync::Weak::ptr_eq(w, &Arc::downgrade(s))
+            })
+        {
+            let profiles = self.recs.home.as_ref().map(|h| h.blend_profiles.clone()).unwrap_or_default();
+            let list = scenes(s, &profiles, loc);
+            self.recs.radio.scenes = Some((Arc::downgrade(s), loc, list));
+        }
+        let mut scenes = self.recs.radio.scenes.as_ref().map(|(_, _, list)| list.clone()).unwrap_or_default();
         // A card's scene the list lacks (a kind of song, a small family)
         // is offered too, first.
         let current = view_scene(seed.filter.scene);
         if current != v::WaveScene::All
             && !scenes.iter().any(|c| c.scene == current)
-            && let Some(title) = snap.as_ref().and_then(|s| scene_title(s, seed.filter.scene))
+            && let Some(title) = snap.as_ref().and_then(|s| scene_title(s, seed.filter.scene, loc))
         {
             scenes.insert(0, v::WaveSceneCard { scene: current, title });
         }
@@ -513,10 +532,18 @@ mod tests {
     /// wave (or a card without a name) is «Моя волна».
     #[test]
     fn a_cards_wave_is_named_after_its_mix() {
-        assert_eq!(wave_title(Some("Хип-хоп микс".into())), "Хип-хоп микс");
-        assert_eq!(super::super::radio::context_of(&wave_title(Some("Хип-хоп микс".into()))), "микса «Хип-хоп микс»");
-        assert_eq!(wave_title(None), TITLE);
-        assert_eq!(wave_title(Some(" ".into())), TITLE);
+        let mix_wave = v::RadioTitle::Mix(super::super::play_lane_mix_title(
+            v::MixKey::Genre(7),
+            "Хип-хоп микс",
+            "Хип-хоп микс",
+            None,
+            None,
+        ));
+        assert_eq!(mix_wave.title_in(v::Locale::Ru), "Хип-хоп микс");
+        assert_eq!(mix_wave.title_in(v::Locale::En), "Hip-Hop Mix");
+        assert_eq!(mix_wave.to_queue_origin().header_in(v::Locale::Ru, false).0, "Играет из микса «Хип-хоп микс»");
+        assert_eq!(wave_title(None, None), v::RadioTitle::Wave);
+        assert_eq!(wave_title(Some(v::MixKey::Calm), None), v::RadioTitle::Wave);
     }
 
     /// The view's filters and the engine's go both ways.

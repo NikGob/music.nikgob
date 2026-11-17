@@ -299,7 +299,7 @@ pub fn toggle_pin(pins: &MeshPins, id: PlaylistId) -> MeshPins {
 pub fn playlist(ui: &mut Ui, frame: PageFrame, id: PlaylistId, state: &ViewState, out: &mut Vec<Command>) -> PageOut {
     let d = state.playlist.as_ref().filter(|d| d.card.id == id);
     let mut inner = PageOut::default();
-    let title = d.map_or("", |d| d.card.name.as_str());
+    let title = d.map_or("", |d| d.card.display_name());
     let mut bar = page(ui, frame, ("phone-playlist", id), title, COVER, false, |ui| {
         let Some(d) = d else {
             ui.add_space(frame.top + parts::BAR_H);
@@ -321,7 +321,7 @@ pub fn playlist(ui: &mut Ui, frame: PageFrame, id: PlaylistId, state: &ViewState
             Id::new(("pl-head", id)),
             &Collection {
                 uri: uri.as_deref(),
-                title: &d.card.name,
+                title: d.card.display_name(),
                 large_title: true,
                 artist: None,
                 year: None,
@@ -391,7 +391,7 @@ pub fn artist(ui: &mut Ui, frame: PageFrame, id: ArtistId, state: &ViewState, ou
             parts::section_head(ui, "Популярные треки");
             let top = &d.top_tracks[..d.top_tracks.len().min(5)];
             let ids: Vec<nikgob_view::TrackId> = top.iter().map(|t| t.id).collect();
-            let context = format!("исполнителя «{}»", c.name);
+            let context = nikgob_view::QueueOrigin::Artist(c.name.clone());
             track_list(ui, "ar-top", top, false, &here, state, |i| Command::PlayTracks { tracks: ids.clone(), start: i, context: context.clone() }, out, &mut inner);
         }
         for (name, releases) in [("Альбомы", &d.albums), ("Синглы и EP", &d.singles_eps)] {

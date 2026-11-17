@@ -31,6 +31,7 @@
 //! machinery then weighs affinity and the day part
 //! ([`crate::radio::RadioSeed::Mood`]).
 
+use nikgob_core::i18n::Locale;
 use nikgob_core::model::TrackId;
 use serde::{Deserialize, Serialize};
 
@@ -107,15 +108,21 @@ impl Axes {
 impl Mood {
     pub const ALL: [Self; 6] = [Self::Calm, Self::Energetic, Self::Dark, Self::Bright, Self::Focus, Self::Drive];
 
-    /// The card's title.
-    pub const fn title(self) -> &'static str {
-        match self {
-            Self::Calm => "Спокойное",
-            Self::Energetic => "Энергичное",
-            Self::Dark => "Мрачное",
-            Self::Bright => "Светлое",
-            Self::Focus => "Для фокуса",
-            Self::Drive => "Драйв",
+    /// The card's title in `loc`.
+    pub const fn title_in(self, loc: Locale) -> &'static str {
+        match (loc, self) {
+            (Locale::Ru, Self::Calm) => "Спокойное",
+            (Locale::Ru, Self::Energetic) => "Энергичное",
+            (Locale::Ru, Self::Dark) => "Мрачное",
+            (Locale::Ru, Self::Bright) => "Светлое",
+            (Locale::Ru, Self::Focus) => "Для фокуса",
+            (Locale::Ru, Self::Drive) => "Драйв",
+            (Locale::En, Self::Calm) => "Calm",
+            (Locale::En, Self::Energetic) => "Energetic",
+            (Locale::En, Self::Dark) => "Dark",
+            (Locale::En, Self::Bright) => "Bright",
+            (Locale::En, Self::Focus) => "Focus",
+            (Locale::En, Self::Drive) => "Drive",
         }
     }
 
@@ -256,5 +263,13 @@ mod tests {
         assert_eq!(A::StdDeviationLoudness as usize, LOUDNESS_STD);
         assert_eq!(A::Chroma7 as usize, MAJOR);
         assert_eq!(A::Chroma8 as usize, MINOR);
+    }
+
+    #[test]
+    fn mood_titles_localize_in_ru_and_en() {
+        let ru: Vec<&str> = Mood::ALL.iter().map(|m| m.title_in(Locale::Ru)).collect();
+        let en: Vec<&str> = Mood::ALL.iter().map(|m| m.title_in(Locale::En)).collect();
+        assert_eq!(ru, ["Спокойное", "Энергичное", "Мрачное", "Светлое", "Для фокуса", "Драйв"]);
+        assert_eq!(en, ["Calm", "Energetic", "Dark", "Bright", "Focus", "Drive"]);
     }
 }

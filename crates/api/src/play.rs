@@ -360,7 +360,7 @@ pub fn commands(t: &Target, shuffle: bool, mode: Mode) -> Result<Vec<Command>, A
         (Kind::Track, m) => {
             let id: TrackId = id.parse().map_err(|_| bad())?;
             match m {
-                Mode::Replace => Command::PlayTracks { tracks: vec![id], start: 0, context: "поиска".to_owned() },
+                Mode::Replace => Command::PlayTracks { tracks: vec![id], start: 0, context: nikgob_view::QueueOrigin::Search { service: None } },
                 Mode::Next => Command::PlayNext(vec![id]),
                 Mode::Enqueue => Command::Enqueue(vec![id]),
             }

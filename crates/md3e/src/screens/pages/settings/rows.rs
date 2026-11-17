@@ -57,6 +57,22 @@ pub(super) fn set_mode(ctx: &egui::Context, mode: Mode) {
     });
 }
 
+fn locale_key() -> egui::Id {
+    egui::Id::new("settings-locale")
+}
+
+pub(super) fn set_locale(ctx: &egui::Context, loc: nikgob_view::Locale) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(locale_key(), (pass, loc)));
+}
+
+pub(crate) fn current_locale(ctx: &egui::Context) -> nikgob_view::Locale {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data(|d| d.get_temp::<(u64, nikgob_view::Locale)>(locale_key()))
+        .filter(|(p, _)| *p == pass)
+        .map_or_else(nikgob_core::i18n::locale, |(_, loc)| loc)
+}
+
 fn expanded_key() -> egui::Id {
     egui::Id::new("settings-group-expanded")
 }
@@ -198,7 +214,8 @@ pub(crate) fn item<R>(ui: &mut Ui, id: Id, add: impl FnOnce(&mut Ui) -> R) -> Op
         return None;
     }
     flush(ui, None);
-    Some(settings_help::item(ui, id, id.label(), add))
+    let label = id.label_in(current_locale(ui.ctx()));
+    Some(settings_help::item(ui, id, label, add))
 }
 
 /// A block of fields (text fields with their buttons) as one item: the
@@ -211,7 +228,8 @@ pub(crate) fn block<R>(ui: &mut Ui, id: Id, add: impl FnOnce(&mut Ui) -> R) -> O
     }
     flush(ui, None);
     ui.add_space(4.0);
-    Some(settings_help::item(ui, id, id.label(), add))
+    let label = id.label_in(current_locale(ui.ctx()));
+    Some(settings_help::item(ui, id, label, add))
 }
 
 /// A list (or a block) under its own title, which carries its ⓘ; a group
@@ -220,8 +238,9 @@ pub(crate) fn titled<R>(ui: &mut Ui, id: Id, add: impl FnOnce(&mut Ui) -> R) -> 
     if !shown(ui.ctx(), id) {
         return None;
     }
-    flush(ui, Some(id.label()));
-    Some(settings_help::item(ui, id, id.label(), |ui| {
+    let label = id.label_in(current_locale(ui.ctx()));
+    flush(ui, Some(label));
+    Some(settings_help::item(ui, id, label, |ui| {
         list_title(ui, id);
         add(ui)
     }))
@@ -259,9 +278,10 @@ fn row_full(
 /// The row's name with its ⓘ right after the last word.
 fn row_label(ui: &mut Ui, id: Id) {
     let s = Theme::get(ui.ctx()).scheme;
+    let label = id.label_in(current_locale(ui.ctx()));
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        ui.label(TypeRole::BodyLarge.style().rich(id.label(), s.on_surface));
+        ui.label(TypeRole::BodyLarge.style().rich(label, s.on_surface));
         if id.beta() {
             beta_mark(ui);
         }
@@ -410,7 +430,7 @@ pub(crate) fn menu(ui: &mut Ui, id: Id, p: &mut Prefs) {
 /// the ⓘ card and the stage. The option under the pointer is painted
 /// selected the same frame it is entered, and restored the frame it is left.
 pub(crate) fn choice(ui: &mut Ui, id: Id, p: &mut Prefs) {
-    let labels: Vec<&str> = id.choices().iter().map(|c| c.label).collect();
+    let labels: Vec<&str> = id.choices_in(p.resolved_locale()).iter().map(|c| c.label).collect();
     let saved = id.chosen(p);
     let shown = hovered_choice(ui, id).filter(|i| *i < labels.len()).unwrap_or(saved);
     let (pick, rects) = connected_shown(ui, egui::Id::new(("set-choice", id)), &labels, saved, &[], shown);
@@ -424,13 +444,14 @@ pub(crate) fn choice(ui: &mut Ui, id: Id, p: &mut Prefs) {
 /// A menu chip for a choice row with long labels. An open menu paints the
 /// item under the pointer as the current one.
 pub(crate) fn choice_menu(ui: &mut Ui, id: Id, p: &mut Prefs) {
+    let choices = id.choices_in(p.resolved_locale());
     let cur = id.chosen(p);
     // The rects are last frame's: a row whose options changed since keeps
     // its saved one rather than reading past them.
-    let shown = hovered_choice(ui, id).filter(|i| *i < id.choices().len()).unwrap_or(cur);
-    let options: Vec<(String, bool)> = id.choices().iter().enumerate().map(|(i, c)| (c.label.to_owned(), i == shown)).collect();
+    let shown = hovered_choice(ui, id).filter(|i| *i < choices.len()).unwrap_or(cur);
+    let options: Vec<(String, bool)> = choices.iter().enumerate().map(|(i, c)| (c.label.to_owned(), i == shown)).collect();
     let salt = format!("set-menu-{id:?}");
-    let pick = dropdown(ui, &salt, id.choices()[shown].label, &options);
+    let pick = dropdown(ui, &salt, choices[shown].label, &options);
     if let Some(rects) = Menu::item_rects(ui.ctx(), (salt.as_str(), "menu")) {
         settings_help::report_menu(ui.ctx(), rects.clone());
         ui.ctx().data_mut(|d| d.insert_temp(choice_rects_key(id), rects));
@@ -685,10 +706,11 @@ pub(crate) fn speed(ui: &mut Ui, id: Id, kbps: u32, enabled: bool) -> (Option<u3
 /// A list's title as a group's, with its ⓘ.
 pub(crate) fn list_title(ui: &mut Ui, id: Id) {
     let s = Theme::get(ui.ctx()).scheme;
+    let label = id.label_in(current_locale(ui.ctx()));
     ui.add_space(24.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        ui.label(TypeRole::TitleSmall.style().rich(id.label(), s.primary));
+        ui.label(TypeRole::TitleSmall.style().rich(label, s.primary));
         settings_help::help_button(ui, id);
     });
     ui.add_space(4.0);

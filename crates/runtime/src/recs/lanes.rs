@@ -31,6 +31,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use nikgob_core::i18n::{Locale, TileStatic, nav_in};
 use nikgob_core::model::{ArtistId, EventType, TrackId};
 use nikgob_core::streaming::StreamTrack;
 use nikgob_recs::mixes::{Builder, Kept, MIN_SONGS, Mix, MixKey, Settings};
@@ -63,12 +64,33 @@ const REPEAT_DAYS_LONG: i64 = 30;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
+pub(crate) use nikgob_core::i18n::PerLocale;
+
+/// Localized display text for a [`LaneHome`] card.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LaneText {
+    pub title: String,
+    pub short: Vec<String>,
+}
+
+/// All output of [`build`]: today's lanes plus blend-profile metadata for live relocalization.
+pub(crate) struct BuiltLanes {
+    pub lanes: Vec<LaneHome>,
+    pub blend_profiles: Vec<v::BlendProfile>,
+    pub blend_titles: Vec<(u32, PerLocale<String>)>,
+}
+
 /// One mix of «Миксы для тебя».
 pub(crate) struct LaneHome {
     pub key: v::MixKey,
     pub title: String,
     /// Shorter forms of the title for a narrow card.
     pub short: Vec<String>,
+    /// Precomputed localized titles and short forms for all supported locales.
+    pub labels: PerLocale<LaneText>,
+    /// Composition flavor for `Calm` / `Lively` side mixes so titles and wave/shuffle
+    /// origins remain typed and dynamically localizable across restarts.
+    pub side_flavor: Option<nikgob_recs::mixes::SideFlavor>,
     pub tracks: Vec<TrackId>,
     /// Familiar and loved: a new song of «С новым» stands between two.
     pub anchors: Vec<bool>,
@@ -89,6 +111,18 @@ pub(crate) struct LaneHome {
 }
 
 impl LaneHome {
+    /// Invariant Russian title used as canonical analytics key (`mix:{title}`).
+    pub fn ru_title(&self) -> &str {
+        &self.labels.ru.title
+    }
+
+    /// Updates visible `title` and `short` synchronously for `loc`.
+    pub fn relocalize(&mut self, loc: Locale) {
+        let text = self.labels.get(loc);
+        self.title.clone_from(&text.title);
+        self.short.clone_from(&text.short);
+    }
+
     /// What it plays: its songs, with «С новым» its new ones each between
     /// two loved familiar songs, never in the first two
     /// places nor two running, spread as evenly as such places allow; in
@@ -202,7 +236,7 @@ fn view_key(k: MixKey) -> v::MixKey {
 }
 
 /// The moments the prefs ask for.
-pub(crate) fn settings(prefs: &MixPrefs) -> Settings {
+pub(crate) fn settings(prefs: &MixPrefs, loc: Locale) -> Settings {
     Settings {
         profiles: prefs.profiles,
         everything: prefs.everything,
@@ -214,6 +248,7 @@ pub(crate) fn settings(prefs: &MixPrefs) -> Settings {
         },
         hidden: prefs.hidden.clone(),
         unheard: unheard_share(prefs.unheard),
+        locale: loc,
     }
 }
 
@@ -316,13 +351,14 @@ fn with_builder<T>(
     now: nikgob_core::model::UnixMs,
     utc_offset_min: i32,
     seed: u64,
+    loc: Locale,
     f: impl FnOnce(&Builder<'_>) -> T,
 ) -> T {
     let recs = snap.recs();
     let live: Live = snap.model.live(session);
     let suits = |i: usize| fit.get(i).copied().unwrap_or(false);
     let (part, _, _) = super::daylist_key(now, utc_offset_min);
-    let mut b = Builder::new(&recs, &snap.model, ok, &suits, seed, part, live, settings(prefs));
+    let mut b = Builder::new(&recs, &snap.model, ok, &suits, seed, part, live, settings(prefs, loc)).with_locale(loc);
     if let Some(tags) = tags {
         b = b.with_genres(&|a| tags.get(&a).cloned().unwrap_or_default());
     }
@@ -340,10 +376,24 @@ fn cache_for(lib: &nikgob_library::Library, prefs: &MixPrefs, day: &str, epoch: 
     cache
 }
 
+fn mixes_labels(b: &Builder<'_>, mixes: &[Mix], names: &dyn Fn(ArtistId) -> Option<String>, loc: Locale) -> HashMap<MixKey, LaneText> {
+    let mut copy = mixes.to_vec();
+    for m in &mut copy {
+        if !matches!(m.key, MixKey::Profile(_) | MixKey::Blend(_)) {
+            m.title = b.title_in(m.key, &m.tracks, loc);
+        }
+    }
+    b.named_in(&mut copy, loc, names);
+    copy.into_iter()
+        .map(|m| (m.key, LaneText { short: b.short_titles_in(m.key, loc), title: m.title }))
+        .collect()
+}
+
 /// Today's «Миксы для тебя» and the profiles «Смешать с…» offers.
-pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> (Vec<LaneHome>, Vec<v::BlendProfile>) {
+pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> BuiltLanes {
     let lib = &input.lib;
     let prefs = &input.mix_prefs;
+    let loc = input.locale;
     let mut cache = cache_for(lib, prefs, &input.day, &input.epoch.key);
     if cache.settings != prefs.fingerprint() || cache.hidden.iter().any(|k| !prefs.hidden.contains(k)) {
         // Songs chosen under another «Преимущественно новые песни» are
@@ -377,38 +427,73 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     // genre's songs again is told by them.
     let tags = artist_tags(lib);
     let wants_niches = prefs.with_new && !snap.local_only && input.new_share > 0.0;
-    let (mixes, lineup, blendable, pinned, niches) = with_builder(snap, prefs, &snap.background, &ok, Some(&tags), &input.session, input.now, input.utc_offset_min, input.epoch.seed, |b| {
-        let pinned = b.pinned(&cache.kept);
-        let (mut mixes, lineup) = b.lineup(&cache.kept);
-        b.named(&mut mixes, &names);
-        // The niches the row may hold a card of, with their titles.
-        let niches: Vec<(nikgob_recs::open_world::NicheCard, String, Vec<String>)> = if wants_niches {
-            let genre = |i: usize| b.genre_at(i);
-            let background = |i: usize| snap.background.get(i).copied().unwrap_or(false);
-            let none = |_: &StreamTrack| Vec::new();
-            let ctx = nikgob_recs::open_world::WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none, index: Some(&snap.index), learned: None };
-            nikgob_recs::open_world::niches(&ctx)
-                .into_iter()
-                .filter(|c| !prefs.hidden.contains(&c.key))
-                .map(|c| {
-                    let title = b.title(c.key, &c.seeds);
-                    let short = b.short_titles(c.key);
-                    (c, title, short)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        (mixes, lineup, blend_profiles(snap, b, &names), pinned, niches)
-    });
+    let (mixes, lineup, (blendable, blend_titles), pinned, niches, mut labels_for) = with_builder(
+        snap,
+        prefs,
+        &snap.background,
+        &ok,
+        Some(&tags),
+        &input.session,
+        input.now,
+        input.utc_offset_min,
+        input.epoch.seed,
+        loc,
+        |b| {
+            let pinned = b.pinned(&cache.kept);
+            let (mut mixes, lineup) = b.lineup(&cache.kept);
+            b.named_in(&mut mixes, loc, &names);
+            let mut labels_for = PerLocale::init(|l| {
+                let mut map = mixes_labels(b, &mixes, &names, l);
+                for m in &pinned {
+                    map.insert(m.key, LaneText { title: b.title_in(m.key, &m.tracks, l), short: b.short_titles_in(m.key, l) });
+                }
+                map
+            });
+            // The niches the row may hold a card of, with their titles.
+            let niches: Vec<(nikgob_recs::open_world::NicheCard, String, Vec<String>)> = if wants_niches {
+                let genre = |i: usize| b.genre_at(i);
+                let background = |i: usize| snap.background.get(i).copied().unwrap_or(false);
+                let none = |_: &StreamTrack| Vec::new();
+                let ctx = nikgob_recs::open_world::WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none, index: Some(&snap.index), learned: None };
+                nikgob_recs::open_world::niches(&ctx)
+                    .into_iter()
+                    .filter(|c| !prefs.hidden.contains(&c.key))
+                    .map(|c| {
+                        for l in Locale::ALL {
+                            labels_for.get_mut(l).insert(
+                                c.key,
+                                LaneText { title: b.title_in(c.key, &c.seeds, l), short: b.short_titles_in(c.key, l) },
+                            );
+                        }
+                        let title = b.title_in(c.key, &c.seeds, loc);
+                        let short = b.short_titles_in(c.key, loc);
+                        (c, title, short)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (mixes, lineup, blend_profiles(snap, b, &names, loc), pinned, niches, labels_for)
+        },
+    );
     cache.kept.lineup = lineup;
     cache.kept.keep(&mixes, &snap.model);
     cache.kept.keep(&pinned, &snap.model);
     cache_write(lib, MIXES_KEY, input.now, &cache);
     // The named mixes take no name another card of the row has.
-    let mut taken: Vec<String> = pinned.iter().chain(&mixes).map(|m| m.title.clone()).collect();
-    taken.extend(["Любимые".to_owned(), "На повторе".to_owned()]);
-    let daily = day_mixes(snap, input, tiles, &tags, &taken, &ok);
+    let taken_for = PerLocale::init(|l| {
+        let mut taken: Vec<String> = pinned
+            .iter()
+            .chain(&mixes)
+            .map(|m| labels_for.get(l).get(&m.key).map_or_else(|| m.title.clone(), |t| t.title.clone()))
+            .collect();
+        taken.extend([nav_in(l).liked.to_owned(), TileStatic::OnRepeat.title_in(l).to_owned()]);
+        taken
+    });
+    let (daily, daily_labels) = day_mixes(snap, input, tiles, &tags, &taken_for, &ok);
+    for l in Locale::ALL {
+        labels_for.get_mut(l).extend(daily_labels.get(l).iter().map(|(k, v)| (*k, v.clone())));
+    }
     // The row: «Микс дня», the genre mixes, the part of the day's, a
     // named mix or two, the moments, no two alike. A new song of «С
     // новым» goes to the first that fits it.
@@ -426,7 +511,14 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         .drain(..)
         .enumerate()
         .map(|(k, m)| {
-            let mut lane = lane_of(snap, tiles, &m);
+            let labels = PerLocale::init(|l| {
+                labels_for
+                    .get(l)
+                    .get(&m.key)
+                    .cloned()
+                    .unwrap_or_else(|| LaneText { title: m.title.clone(), short: m.short.clone() })
+            });
+            let mut lane = lane_of(snap, tiles, &m, labels);
             // «Фон» and «Любимые» are what they are: no new songs.
             if !snap.local_only && !matches!(m.key, MixKey::Background { .. } | MixKey::Liked) {
                 // A niche's top-up joins the candidates of its mix (the
@@ -451,10 +543,13 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         && let Some(tracks) = on_repeat(snap, tiles)
     {
         let anchors = vec![true; tracks.len()];
+        let labels = PerLocale::init(|l| LaneText { title: TileStatic::OnRepeat.title_in(l).to_owned(), short: Vec::new() });
         out.push(LaneHome {
             key: v::MixKey::OnRepeat,
-            title: "На повторе".into(),
+            title: labels.get(loc).title.clone(),
             short: Vec::new(),
+            labels,
+            side_flavor: None,
             artists: artists_of(snap, tiles, &tracks),
             covers: covers(snap, &tracks),
             anchors,
@@ -467,13 +562,21 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
             why: None,
         });
     }
-    (out, blendable)
+    BuiltLanes { lanes: out, blend_profiles: blendable, blend_titles }
 }
 
 /// «Миксы дня»: the day's as they were drawn, else drawn now and kept for
 /// the day (see the module docs). «Другой состав» of one draws it again.
-fn day_mixes(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, tags: &ArtistTags, taken: &[String], ok: &dyn Fn(usize) -> bool) -> Vec<Mix> {
+fn day_mixes(
+    snap: &Snapshot,
+    input: &BuildInput,
+    tiles: &TilesInput,
+    tags: &ArtistTags,
+    taken: &PerLocale<Vec<String>>,
+    ok: &dyn Fn(usize) -> bool,
+) -> (Vec<Mix>, PerLocale<HashMap<MixKey, LaneText>>) {
     let lib = &input.lib;
+    let loc = input.locale;
     let history = snap.model.taste.has_history();
     let mut cache: DayMixesCache = cache_read(lib, DAY_MIXES_KEY).unwrap_or_default();
     let unheard = input.mix_prefs.unheard_code();
@@ -495,26 +598,39 @@ fn day_mixes(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, tags: &Art
     // genre mix is built by them), the artists' names, the years.
     let fact = |i: usize| tiles.facts.get(&snap.model.id(i));
     let decade = common_decade(tiles.facts.values().filter_map(|f| f.year));
-    let (mixes, lineup) = with_builder(snap, &input.mix_prefs, &snap.background, ok, Some(tags), &Session::default(), input.now, input.utc_offset_min, seed, |b| {
-        let (mut mixes, lineup) = b.daily(&cache.kept);
+    let (mixes, lineup) = with_builder(snap, &input.mix_prefs, &snap.background, ok, Some(tags), &Session::default(), input.now, input.utc_offset_min, seed, loc, |b| {
+        let (drawn_base, lineup) = b.daily(&cache.kept);
         let made = b.makeups(
-            &mixes,
+            &drawn_base,
             &|a| tags.get(&a).cloned().unwrap_or_default(),
             &|a| tiles.artist_names.get(&a).cloned(),
             &|i| fact(i).and_then(|f| f.year),
             &|i| fact(i).map(|f| f.title.clone()).filter(|t| !t.trim().is_empty()),
         );
+        let daily_labels = PerLocale::init(|l| {
+            let mut localized = drawn_base.clone();
+            for m in &mut localized {
+                if !m.key.is_cluster() {
+                    m.title = b.title_in(m.key, &m.tracks, l);
+                }
+            }
+            b.name_daily_in(&mut localized, &made, taken.get(l), decade, l);
+            localized
+                .into_iter()
+                .map(|m| (m.key, LaneText { short: b.short_titles_in(m.key, l), title: m.title }))
+                .collect::<HashMap<_, _>>()
+        });
+        let mut mixes = drawn_base.clone();
         // The lineup and the songs are kept as drawn; a mix nothing can
         // name, or one that is a genre's mix again, is only not shown.
-        let drawn = mixes.clone();
-        b.name_daily(&mut mixes, &made, taken, decade);
-        (mixes, (drawn, lineup))
+        b.name_daily_in(&mut mixes, &made, taken.get(loc), decade, loc);
+        (mixes, (drawn_base, lineup, daily_labels))
     });
-    let (drawn, lineup) = lineup;
+    let (drawn, lineup, daily_labels) = lineup;
     cache.kept.lineup = lineup;
     cache.kept.keep(&drawn, &snap.model);
     cache_write(lib, DAY_MIXES_KEY, input.now, &cache);
-    mixes
+    (mixes, daily_labels)
 }
 
 /// The decade over half of the dated songs of `years` are of: it tells no
@@ -531,14 +647,30 @@ fn common_decade(years: impl Iterator<Item = i32>) -> Option<i32> {
 
 /// A blend of `profiles` (the card's first), now, from the snapshot: it
 /// plays at once and stands first until the day's end.
-pub(crate) fn blend_now(snap: &Snapshot, prefs: &MixPrefs, profiles: &[u32], names: &dyn Fn(ArtistId) -> Option<String>, session: &Session, seed: u64) -> Option<LaneHome> {
+pub(crate) fn blend_now(
+    snap: &Snapshot,
+    prefs: &MixPrefs,
+    profiles: &[u32],
+    names: &dyn Fn(ArtistId) -> Option<String>,
+    session: &Session,
+    seed: u64,
+    loc: Locale,
+) -> Option<LaneHome> {
     let key = MixKey::blend(profiles)?;
     let (now, utc_offset_min) = (super::recs_now(), super::local_day().1);
     let ok = |i: usize| snap.catalog.tracks()[i].local || !snap.local_only;
-    let mix = with_builder(snap, prefs, &[], &ok, None, session, now, utc_offset_min, seed, |b| {
+    let (mix, labels) = with_builder(snap, prefs, &[], &ok, None, session, now, utc_offset_min, seed, loc, |b| {
         let mut m = vec![b.mix(key, &Kept::default())?];
-        b.named(&mut m, names);
-        m.pop()
+        let labels = PerLocale::init(|l| {
+            let mut one = m.clone();
+            b.named_in(&mut one, l, names);
+            LaneText {
+                title: one.pop().map_or_else(String::new, |x| x.title),
+                short: b.short_titles_in(key, l),
+            }
+        });
+        b.named_in(&mut m, loc, names);
+        m.pop().map(|m| (m, labels))
     })?;
     let artists: Vec<String> = mix.artists.iter().filter_map(|a| names(*a)).collect();
     let tracks: Vec<TrackId> = mix.tracks.iter().map(|&i| snap.model.id(i)).collect();
@@ -546,6 +678,8 @@ pub(crate) fn blend_now(snap: &Snapshot, prefs: &MixPrefs, profiles: &[u32], nam
         key: view_key(mix.key),
         title: mix.title,
         short: mix.short,
+        labels,
+        side_flavor: None,
         covers: covers(snap, &tracks),
         anchors: mix.anchors,
         tracks,
@@ -570,21 +704,27 @@ pub(crate) fn remember_blend(lib: &nikgob_library::Library, prefs: &MixPrefs, da
 
 /// The visible profiles with songs enough, by their names (the largest
 /// share first).
-fn blend_profiles(snap: &Snapshot, b: &Builder<'_>, names: &dyn Fn(ArtistId) -> Option<String>) -> Vec<v::BlendProfile> {
+fn blend_profiles(snap: &Snapshot, b: &Builder<'_>, names: &dyn Fn(ArtistId) -> Option<String>, loc: Locale) -> (Vec<v::BlendProfile>, Vec<(u32, PerLocale<String>)>) {
     let model = &snap.model;
     let mut order: Vec<usize> = (0..model.profiles.len()).filter(|&j| model.profiles.list[j].visible).collect();
     order.sort_by(|a, b| model.profile_share[*b].total_cmp(&model.profile_share[*a]).then(a.cmp(b)));
     let mut out = Vec::new();
+    let mut titles_out = Vec::new();
     for j in order {
         let key = model.profiles.list[j].key;
-        let Some(mut m) = b.mix(MixKey::Profile(key), &Kept::default()) else { continue };
+        let Some(m) = b.mix(MixKey::Profile(key), &Kept::default()) else { continue };
         if m.tracks.len() < MIN_SONGS {
             continue;
         }
-        b.named(std::slice::from_mut(&mut m), names);
-        out.push(v::BlendProfile { key, title: m.title });
+        let titles = PerLocale::init(|l| {
+            let mut one = vec![m.clone()];
+            b.named_in(&mut one, l, names);
+            one.pop().map_or_else(String::new, |x| x.title)
+        });
+        out.push(v::BlendProfile { key, title: titles.get(loc).clone() });
+        titles_out.push((key, titles));
     }
-    out
+    (out, titles_out)
 }
 
 fn dedupe(names: Vec<String>) -> Vec<String> {
@@ -593,13 +733,18 @@ fn dedupe(names: Vec<String>) -> Vec<String> {
 }
 
 /// The home's card of a mix.
-fn lane_of(snap: &Snapshot, tiles: &TilesInput, m: &Mix) -> LaneHome {
+fn lane_of(snap: &Snapshot, tiles: &TilesInput, m: &Mix, labels: PerLocale<LaneText>) -> LaneHome {
     let tracks: Vec<TrackId> = m.tracks.iter().map(|&i| snap.model.id(i)).collect();
     let artists = dedupe(m.artists.iter().filter_map(|a| tiles.artist_names.get(a).cloned()).collect());
+    let side_flavor = matches!(m.key, MixKey::Calm | MixKey::Lively).then(|| {
+        nikgob_recs::mixes::side_flavor_of_types(m.tracks.iter().map(|&i| *snap.model.song_type_at(i)))
+    });
     LaneHome {
         key: view_key(m.key),
         title: m.title.clone(),
         short: m.short.clone(),
+        labels,
+        side_flavor,
         covers: covers(snap, &tracks),
         anchors: m.anchors.clone(),
         tracks,
@@ -1083,7 +1228,7 @@ mod tests {
         }
         let prefs = MixPrefs::of(&v::Prefs::default());
         let ok = |i: usize| tiles.facts.contains_key(&snap.catalog.tracks()[i].id);
-        let mixes = with_builder(&snap, &prefs, &[], &ok, None, &Session::default(), 1_000 * DAY_MS, 0, 1, |b| b.lineup(&Kept::default()).0);
+        let mixes = with_builder(&snap, &prefs, &[], &ok, None, &Session::default(), 1_000 * DAY_MS, 0, 1, Locale::Ru, |b| b.lineup(&Kept::default()).0);
         assert!(!mixes.is_empty());
         for m in &mixes {
             let picked: Vec<TrackId> = m.tracks.iter().map(|&i| snap.model.id(i)).collect();
@@ -1229,6 +1374,8 @@ mod tests {
             key: v::MixKey::Calm,
             title: "Спокойное".into(),
             short: Vec::new(),
+            labels: PerLocale::default(),
+            side_flavor: None,
             tracks: (0..28).map(|_| TrackId::new()).collect(),
             anchors: anchors.clone(),
             artists: Vec::new(),

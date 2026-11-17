@@ -264,6 +264,7 @@ pub(super) fn page(
     }
     // The page's own changes the runtime has not shown yet stay on it.
     let shown = with_pending(&mut pages.settings_memory, &state.prefs, anim::now(&ctx));
+    rows::set_locale(&ctx, shown.resolved_locale());
     let beside = at.stage.is_some_and(|s| s.left() >= at.rows.right());
     rows::set_column_right(&ctx, if beside { at.rows.left() + at.content_w } else { f32::INFINITY });
     let mut p: Prefs = shown.clone();
@@ -1162,5 +1163,23 @@ mod tests {
         assert!(mini.stage.is_none());
         let plain = arrange(Rect::from_min_size(pos2(0.0, 0.0), vec2(1400.0, 600.0)), window, false);
         assert!(plain.stage.is_none() && plain.content_w == 840.0);
+    }
+
+    #[test]
+    fn language_row_renders_at_top_of_look_using_prefs_locale() {
+        let ctx = context();
+        let mut state = crate::screens::sweep::survey_state();
+        state.prefs.language = nikgob_view::LangPref::En;
+        let simple = drawn(&ctx, &state, settings_help::TAB_LOOK, false, 1280.0);
+        let first = simple.first().expect("first row of TAB_LOOK");
+        assert_eq!(first.id, Id::Language);
+        assert_eq!(first.group, "Тема");
+        assert_eq!(first.label, "Language");
+
+        state.prefs.language = nikgob_view::LangPref::Ru;
+        let deep = drawn(&ctx, &state, settings_help::TAB_LOOK, true, 1280.0);
+        let first_deep = deep.first().expect("first row of TAB_LOOK in deep mode");
+        assert_eq!(first_deep.id, Id::Language);
+        assert_eq!(first_deep.label, "Язык");
     }
 }

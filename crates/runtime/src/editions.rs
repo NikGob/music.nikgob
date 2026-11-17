@@ -43,7 +43,7 @@ impl Worker {
             .collect();
         self.publish(|s| s.editions = offers);
         if fresh {
-            self.toast("Похоже, некоторые альбомы повторяются — посмотри в Библиотеке", None);
+            self.toast_info("Похоже, некоторые альбомы повторяются — посмотри в Библиотеке", None);
         }
     }
 
@@ -53,12 +53,12 @@ impl Worker {
         };
         match nikgob_import::fold_editions(&self.lib, &g) {
             Ok(()) => {
-                self.toast(format!("Объединено в «{}»", g.keep.release.title), None);
+                self.toast_ok(format!("Объединено в «{}»", g.keep.release.title), None);
                 self.load_library();
             }
             Err(e) => {
                 log::error!("merging editions: {e}");
-                self.toast("Не получилось объединить альбомы", None);
+                self.toast_err("Не получилось объединить альбомы", None);
             }
         }
         self.offer_editions();

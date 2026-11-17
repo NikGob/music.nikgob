@@ -27,7 +27,7 @@ Made by **[NikGob](https://github.com/NikGob)**
 > - **Spotify & SoundCloud** work, but have seen **very limited real-world testing** across different account tiers, regional restrictions, rate limits, and multi-device handoffs.
 > - **Linux builds** (`x86_64` Wayland/X11, NixOS flake, and headless `nikgobd` on `aarch64`) compile and run, but have been **tested far less** than Windows (especially PipeWire/PulseAudio device switching, WebKitGTK sign-in windows, and keyring edge cases).
 > - **Phone / Mobile UI (`crates/mobile`)** is in a **VERY early prototype stage** — currently a portrait touch layout running inside a desktop harness (`nikgob-phone`), not a packaged Android app yet.
-> - **UI language** in `0.1.0` is **Russian-only** across all screens, menus, and generated mix titles; a full English translation is planned next.
+> - **UI language** in `0.1.0` provides runtime language switching and English localization for recommendations, generated mixes, queue contexts, track audio details, and playback/stream-login/settings error toasts; full English translation of the remaining static desktop and mobile UI screens is planned next.
 
 ---
 

@@ -1,0 +1,411 @@
+//! Error messages and common toast notifications.
+
+use super::Locale;
+
+/// Static error and toast strings.
+pub struct ErrorStrings {
+    pub nothing_to_play: &'static str,
+    pub failed_save_prefs: &'static str,
+    pub failed_prefix: &'static str,
+    pub spotify_need_premium: &'static str,
+    pub spotify_enable_playback: &'static str,
+    pub spotify_unavailable: &'static str,
+    pub spotify_audio_enabled: &'static str,
+    pub spotify_connected_enable_audio: &'static str,
+    pub enable_audio: &'static str,
+    pub find_song: &'static str,
+    pub sign_in: &'static str,
+    pub playback_failed: &'static str,
+    pub no_file_for_track: &'static str,
+    pub audio_output_failed: &'static str,
+    pub not_on_youtube: &'static str,
+    pub no_settings_path: &'static str,
+    pub settings_unreadable: &'static str,
+    pub masters_move_unavailable: &'static str,
+    pub masters_inside_work_dir: &'static str,
+    pub sources_file_failed: &'static str,
+    pub prowlarr_invalid: &'static str,
+    pub prowlarr_saved: &'static str,
+    pub cover_load_failed: &'static str,
+    pub saved: &'static str,
+    pub key_removed: &'static str,
+    pub token_removed: &'static str,
+    pub album_download_failed: &'static str,
+    pub album_like_failed: &'static str,
+    pub soulseek_connected: &'static str,
+    pub soulseek_enable_in_sources: &'static str,
+    pub soulseek_daemon_unresponsive: &'static str,
+    pub soulseek_not_connected: &'static str,
+    pub stream_not_configured: &'static str,
+    pub stream_not_logged_in: &'static str,
+    pub stream_need_premium: &'static str,
+    pub stream_unavailable: &'static str,
+    pub stream_unsupported: &'static str,
+    pub stream_age_restricted: &'static str,
+    pub stream_region_blocked: &'static str,
+    pub stream_drm: &'static str,
+    pub stream_network: &'static str,
+    pub stream_parse: &'static str,
+    pub save_setting_failed: &'static str,
+    pub link_playlist_sign_in: &'static str,
+    pub stream_track_stale: &'static str,
+    pub song_stale: &'static str,
+    pub nothing_to_share: &'static str,
+    pub youtube_save_tracks_only: &'static str,
+    pub youtube_disabled: &'static str,
+    pub not_found_on_youtube: &'static str,
+    pub mix_gone_home: &'static str,
+    pub mix_gone_world: &'static str,
+    pub tile_gone_home: &'static str,
+    pub downloaded_only_no_new: &'static str,
+    pub discover_still_loading: &'static str,
+    pub nothing_to_download: &'static str,
+    pub recs_still_building: &'static str,
+    pub blend_impossible: &'static str,
+}
+
+impl ErrorStrings {
+    /// Formats `"Could not forget “{name}”: {why}"` / `"Не удалось забыть «{name}»: {why}"`.
+    pub fn mesh_forget_failed_in(loc: Locale, name: Option<&str>, why: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Не удалось забыть «{}»: {why}", name.unwrap_or("устройство")),
+            Locale::En => format!("Could not forget “{}”: {why}", name.unwrap_or("device")),
+        }
+    }
+
+    /// Formats `"Could not move FLAC: {detail}"` / `"Не удалось перенести FLAC: {detail}"`.
+    pub fn masters_move_failed_in(loc: Locale, detail: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Не удалось перенести FLAC: {detail}"),
+            Locale::En => format!("Could not move FLAC: {detail}"),
+        }
+    }
+
+    /// Formats the named-masters-in-album-folders refusal detail.
+    pub fn masters_named_in_albums_in(loc: Locale, dir: &str, count: usize) -> String {
+        match loc {
+            Locale::Ru => format!("в {dir} лежат FLAC-оригиналы в папках альбомов ({count})"),
+            Locale::En => format!("{dir} has FLAC masters stored inside album folders ({count})"),
+        }
+    }
+
+    /// Formats a BLAKE3 / size verification failure detail for `path`.
+    pub fn hash_verification_failed_in(
+        loc: Locale,
+        path: &str,
+        expected: &str,
+        expected_size: Option<u64>,
+        actual: &str,
+        actual_size: Option<u64>,
+    ) -> String {
+        match (loc, expected_size, actual_size) {
+            (Locale::Ru, Some(es), Some(asize)) => format!(
+                "проверка хеша не прошла для {path}: ожидалось {expected} ({es} B), получено {actual} ({asize} B)"
+            ),
+            (Locale::En, Some(es), Some(asize)) => format!(
+                "hash verification failed for {path}: expected {expected} ({es} B), got {actual} ({asize} B)"
+            ),
+            (Locale::Ru, _, _) => {
+                format!("проверка хеша не прошла для {path}: ожидалось {expected}, получено {actual}")
+            }
+            (Locale::En, _, _) => {
+                format!("hash verification failed for {path}: expected {expected}, got {actual}")
+            }
+        }
+    }
+
+    /// Formats a sidecar verification failure detail for `path`.
+    pub fn sidecar_verification_failed_in(loc: Locale, path: &str) -> String {
+        match loc {
+            Locale::Ru => format!("проверка метаданных не прошла для {path}"),
+            Locale::En => format!("sidecar verification failed for {path}"),
+        }
+    }
+
+    /// Formats `"Sync failed: {detail}"` / `"Синхронизация не удалась: {detail}"`.
+    pub fn sync_failed_in(loc: Locale, detail: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Синхронизация не удалась: {detail}"),
+            Locale::En => format!("Sync failed: {detail}"),
+        }
+    }
+
+    /// Formats `"Could not update playlist on service: {detail}"` / `"Не получилось обновить плейлист в сервисе: {detail}"`.
+    pub fn sync_update_failed_in(loc: Locale, detail: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Не получилось обновить плейлист в сервисе: {detail}"),
+            Locale::En => format!("Could not update playlist on service: {detail}"),
+        }
+    }
+
+    /// Formats `"Could not create playlist on {service}: {detail}"` / `"Не получилось создать плейлист в {service}: {detail}"`.
+    pub fn sync_create_failed_in(loc: Locale, service_name: &str, detail: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Не получилось создать плейлист в {service_name}: {detail}"),
+            Locale::En => format!("Could not create playlist on {service_name}: {detail}"),
+        }
+    }
+
+    /// Formats `"Could not save from YouTube: {detail}"` / `"Не получилось сохранить с YouTube: {detail}"`.
+    pub fn youtube_save_failed_in(loc: Locale, detail: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Не получилось сохранить с YouTube: {detail}"),
+            Locale::En => format!("Could not save from YouTube: {detail}"),
+        }
+    }
+
+    /// Formats `"Sign in to {service} first"` / `"Сначала войди в {service}"`.
+    pub fn sign_in_service_first_in(loc: Locale, service_name: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Сначала войди в {service_name}"),
+            Locale::En => format!("Sign in to {service_name} first"),
+        }
+    }
+
+    /// Formats `"likes: {detail}"` / `"лайки: {detail}"`.
+    pub fn cold_problem_likes_in(loc: Locale, detail: &str) -> String {
+        match loc {
+            Locale::Ru => format!("лайки: {detail}"),
+            Locale::En => format!("likes: {detail}"),
+        }
+    }
+
+    /// Formats `"history: {detail}"` / `"история: {detail}"`.
+    pub fn cold_problem_history_in(loc: Locale, detail: &str) -> String {
+        match loc {
+            Locale::Ru => format!("история: {detail}"),
+            Locale::En => format!("history: {detail}"),
+        }
+    }
+    /// Formats `"Service asks to wait[ until {hm}]"` / `"Сервис просит подождать[ до {hm}]"`.
+    pub fn stream_rate_limited_in(loc: Locale, until_hm: Option<&str>) -> String {
+        match loc {
+            Locale::Ru => match until_hm {
+                Some(hm) => format!("Сервис просит подождать до {hm}"),
+                None => "Сервис просит подождать".into(),
+            },
+            Locale::En => match until_hm {
+                Some(hm) => format!("Service asks to wait until {hm}"),
+                None => "Service asks to wait".into(),
+            },
+        }
+    }
+
+    /// Formats `"Service returned an error (HTTP {status})"` / `"Сервис ответил ошибкой (HTTP {status})"`.
+    pub fn stream_http_in(loc: Locale, status: u16) -> String {
+        match loc {
+            Locale::Ru => format!("Сервис ответил ошибкой (HTTP {status})"),
+            Locale::En => format!("Service returned an error (HTTP {status})"),
+        }
+    }
+
+    /// Formats `"Instances file: {path}"` / `"Файл инстансов: {path}"`.
+    pub fn instances_file_in(loc: Locale, path: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Файл инстансов: {path}"),
+            Locale::En => format!("Instances file: {path}"),
+        }
+    }
+
+    /// Formats `"Failed: {detail}"` / `"Не получилось: {detail}"`.
+    pub fn failed_with_in(loc: Locale, detail: &str) -> String {
+        format!("{}: {detail}", errors_in(loc).failed_prefix)
+    }
+
+    /// Formats `"Error: {detail}"` / `"Ошибка: {detail}"`.
+    pub fn error_with_in(loc: Locale, detail: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Ошибка: {detail}"),
+            Locale::En => format!("Error: {detail}"),
+        }
+    }
+    /// Formats `"{title}: {who} asks to wait[ until {hm}] — try playing this track later"`.
+    pub fn resolve_rate_limited_in(loc: Locale, title: &str, who: &str, until_hm: Option<&str>) -> String {
+        match loc {
+            Locale::Ru => match until_hm {
+                Some(hm) => format!("{title}: {who} просит подождать до {hm} — включи трек позже"),
+                None => format!("{title}: {who} просит подождать — включи трек позже"),
+            },
+            Locale::En => match until_hm {
+                Some(hm) => format!("{title}: {who} asks to wait until {hm} — try playing this track later"),
+                None => format!("{title}: {who} asks to wait — try playing this track later"),
+            },
+        }
+    }
+
+    /// Formats `"{who} asks to wait[ until {hm}] — will resume automatically"`.
+    pub fn pause_will_resume_in(loc: Locale, who: &str, until_hm: Option<&str>) -> String {
+        match loc {
+            Locale::Ru => match until_hm {
+                Some(hm) => format!("{who} просит подождать до {hm} — продолжу сам"),
+                None => format!("{who} просит подождать — продолжу сам"),
+            },
+            Locale::En => match until_hm {
+                Some(hm) => format!("{who} asks to wait until {hm} — will resume automatically"),
+                None => format!("{who} asks to wait — will resume automatically"),
+            },
+        }
+    }
+
+    /// Formats `"{service} connected"` / `"{service} подключён"`.
+    pub fn service_connected_in(loc: Locale, service_name: &str) -> String {
+        match loc {
+            Locale::Ru => format!("{service_name} подключён"),
+            Locale::En => format!("{service_name} connected"),
+        }
+    }
+
+    /// Formats `"{service} not connected"` / `"{service} не подключён"`.
+    pub fn service_not_connected_in(loc: Locale, service_name: &str) -> String {
+        match loc {
+            Locale::Ru => format!("{service_name} не подключён"),
+            Locale::En => format!("{service_name} not connected"),
+        }
+    }
+
+    /// Formats `"{service} disabled"` / `"{service} выключен"`.
+    pub fn service_disabled_in(loc: Locale, service_name: &str) -> String {
+        match loc {
+            Locale::Ru => format!("{service_name} выключен"),
+            Locale::En => format!("{service_name} disabled"),
+        }
+    }
+
+    /// Formats `"{title}: not found on {service}"` / `"{title}: не нашёл эту песню на {service}"`.
+    pub fn song_not_found_on_in(loc: Locale, title: &str, service_name: &str) -> String {
+        match loc {
+            Locale::Ru => format!("{title}: не нашёл эту песню на {service_name}"),
+            Locale::En => format!("{title}: not found on {service_name}"),
+        }
+    }
+}
+
+pub static RU: ErrorStrings = ErrorStrings {
+    nothing_to_play: "Нечего играть",
+    failed_save_prefs: "Не удалось сохранить настройки",
+    failed_prefix: "Не получилось",
+    spotify_need_premium: "для звука из Spotify нужен Premium",
+    spotify_enable_playback: "для звука из Spotify включи воспроизведение в настройках",
+    spotify_unavailable: "трек недоступен",
+    spotify_audio_enabled: "Звук из Spotify включён",
+    spotify_connected_enable_audio: "Spotify подключён · осталось включить звук",
+    enable_audio: "Включить звук",
+    find_song: "Найти песню…",
+    sign_in: "Войти",
+    playback_failed: "Не получилось воспроизвести трек",
+    no_file_for_track: "Нет файла для этого трека",
+    audio_output_failed: "Не удалось открыть устройство вывода звука",
+    not_on_youtube: "Нет на YouTube Music",
+    no_settings_path: "Некуда сохранить настройки",
+    settings_unreadable: "settings.toml не читается — поправь файл вручную",
+    masters_move_unavailable: "Перенос папки FLAC недоступен",
+    masters_inside_work_dir: "Нельзя хранить FLAC-архив внутри папки музыки, Inbox или загрузок",
+    sources_file_failed: "Не получилось создать файл инстансов",
+    prowlarr_invalid: "Адрес или ключ Prowlarr не подходят",
+    prowlarr_saved: "Prowlarr сохранён",
+    cover_load_failed: "Не получилось взять картинку",
+    saved: "Сохранено",
+    key_removed: "Ключ убран",
+    token_removed: "Токен убран",
+    album_download_failed: "Не получилось скачать альбом",
+    album_like_failed: "Не получилось лайкнуть альбом",
+    soulseek_connected: "Soulseek подключён",
+    soulseek_enable_in_sources: "Soulseek сохранён — включи его в «Источниках скачивания»",
+    soulseek_daemon_unresponsive: "Soulseek сохранён, но утилита не отвечает",
+    soulseek_not_connected: "Soulseek сохранён, но не подключился",
+    stream_not_configured: "Сервис не настроен",
+    stream_not_logged_in: "Нужно войти",
+    stream_need_premium: "Нужен Premium",
+    stream_unavailable: "Недоступно",
+    stream_unsupported: "Сервис так не умеет",
+    stream_age_restricted: "Только для 18+ — нужно войти",
+    stream_region_blocked: "Недоступно в твоём регионе",
+    stream_drm: "Только в защищённом виде — сыграет с YouTube Music",
+    stream_network: "Нет связи — проверь интернет",
+    stream_parse: "Сервис ответил непонятно",
+    save_setting_failed: "Не удалось сохранить настройку",
+    link_playlist_sign_in: "Войди в Spotify или YouTube Music, чтобы связать плейлист",
+    stream_track_stale: "Трек устарел — найди его заново",
+    song_stale: "Песня устарела — найди её заново",
+    nothing_to_share: "Нечем поделиться",
+    youtube_save_tracks_only: "С YouTube сохраняется только трек, не альбом",
+    youtube_disabled: "YouTube Music выключен",
+    not_found_on_youtube: "Не нашёл этот трек на YouTube Music",
+    mix_gone_home: "Этого микса уже нет — главная обновилась",
+    mix_gone_world: "Этого микса уже нет — страница мира обновилась",
+    tile_gone_home: "Этой подборки уже нет — главная обновилась",
+    downloaded_only_no_new: "Включено «Только скачанное» — нового сейчас нет",
+    discover_still_loading: "Новое ещё ищется — загляни чуть позже",
+    nothing_to_download: "Нечего скачивать",
+    recs_still_building: "Рекомендации ещё собираются — попробуй чуть позже",
+    blend_impossible: "Из этих профилей микса не собрать",
+};
+
+pub static EN: ErrorStrings = ErrorStrings {
+    nothing_to_play: "Nothing to play",
+    failed_save_prefs: "Could not save settings",
+    failed_prefix: "Failed",
+    spotify_need_premium: "Spotify Premium is required for audio",
+    spotify_enable_playback: "enable Spotify playback in settings",
+    spotify_unavailable: "track unavailable",
+    spotify_audio_enabled: "Spotify audio enabled",
+    spotify_connected_enable_audio: "Spotify connected · enable audio next",
+    enable_audio: "Enable audio",
+    find_song: "Find song…",
+    sign_in: "Sign in",
+    playback_failed: "Failed to play track",
+    no_file_for_track: "No file for this track",
+    audio_output_failed: "Could not open audio output device",
+    not_on_youtube: "Not on YouTube Music",
+    no_settings_path: "Nowhere to save settings",
+    settings_unreadable: "Could not read settings.toml — fix the file manually",
+    masters_move_unavailable: "Moving the FLAC archive folder is unavailable",
+    masters_inside_work_dir: "Cannot store the FLAC archive inside the music, Inbox, or downloads folder",
+    sources_file_failed: "Could not create instances file",
+    prowlarr_invalid: "Invalid Prowlarr URL or API key",
+    prowlarr_saved: "Prowlarr saved",
+    cover_load_failed: "Could not load image",
+    saved: "Saved",
+    key_removed: "Key removed",
+    token_removed: "Token removed",
+    album_download_failed: "Could not download album",
+    album_like_failed: "Could not like album",
+    soulseek_connected: "Soulseek connected",
+    soulseek_enable_in_sources: "Soulseek saved — enable it in Download Sources",
+    soulseek_daemon_unresponsive: "Soulseek saved, but the daemon is not responding",
+    soulseek_not_connected: "Soulseek saved, but could not connect",
+    stream_not_configured: "Service is not configured",
+    stream_not_logged_in: "Sign in required",
+    stream_need_premium: "Premium required",
+    stream_unavailable: "Unavailable",
+    stream_unsupported: "Not supported by this service",
+    stream_age_restricted: "Age-restricted — sign in required",
+    stream_region_blocked: "Unavailable in your region",
+    stream_drm: "DRM-protected — will play from YouTube Music",
+    stream_network: "No connection — check your internet",
+    stream_parse: "Unexpected response from service",
+    save_setting_failed: "Could not save setting",
+    link_playlist_sign_in: "Sign in to Spotify or YouTube Music to link playlist",
+    stream_track_stale: "Track is out of date — search for it again",
+    song_stale: "Song is out of date — search for it again",
+    nothing_to_share: "Nothing to share",
+    youtube_save_tracks_only: "Only single tracks can be saved from YouTube, not albums",
+    youtube_disabled: "YouTube Music is disabled",
+    not_found_on_youtube: "Track not found on YouTube Music",
+    mix_gone_home: "That mix is no longer available — Home refreshed",
+    mix_gone_world: "That mix is no longer available — World page refreshed",
+    tile_gone_home: "That collection is no longer available — Home refreshed",
+    downloaded_only_no_new: "Downloaded Only is enabled — no new releases right now",
+    discover_still_loading: "Still looking for new discoveries — check back soon",
+    nothing_to_download: "Nothing to download",
+    recs_still_building: "Recommendations are still building — try again shortly",
+    blend_impossible: "Could not build a mix from these profiles",
+};
+
+locale_table! {
+    /// Returns error/toast strings for `loc`.
+    errors_in -> ErrorStrings,
+    /// Returns error/toast strings for the active process locale.
+    errors,
+    { Ru => RU, En => EN }
+}

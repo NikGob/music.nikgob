@@ -282,12 +282,15 @@ impl Worker {
             return;
         }
         h.said_until = Some(now + left);
-        let until = Some(left)
+        let hm = Some(left)
             .filter(|p| *p > super::search::SHORT_WAIT)
-            .and_then(super::accounts::hm_after)
-            .map(|hm| format!(" до {hm}"))
-            .unwrap_or_default();
-        self.toast(format!("{} просит подождать{until} — продолжу сам", service.display_name()), None);
+            .and_then(super::accounts::hm_after);
+        let msg = nikgob_core::i18n::ErrorStrings::pause_will_resume_in(
+            self.locale(),
+            service.display_name(),
+            hm.as_deref(),
+        );
+        self.toast_info(msg, None);
     }
 
     /// YouTube Music plays, or comes next, while the player runs: the

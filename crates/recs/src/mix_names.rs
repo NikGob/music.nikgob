@@ -25,6 +25,10 @@
 //!
 //! Pure: the runtime brings the tags, the names and the years.
 
+use nikgob_core::i18n::{Locale, genre_family_title_in};
+
+use crate::profiles::{Kind, Loudness};
+
 /// A song's main artist's tags with their votes.
 pub type Tags = [(String, f32)];
 
@@ -52,46 +56,50 @@ pub const LIVELY_ABOVE: f32 = 0.75;
 /// of genres: below it they are of several and of no one's mix.
 pub const LEAD_SHARE: f32 = 0.5;
 
-/// The families of genres with their numbers and their mixes' names, the
-/// more special first: a tag is of the first family one of whose keys it
-/// has. A key is a run of whole words («hip hop» in «southern hip hop»);
-/// one starting with `*` is found anywhere in a word («*rock» in
-/// «krautrock»). A number is the family's for good (the caches and the
-/// mixes left out keep it): a new family takes a new one wherever it
-/// stands, none is used again.
-const FAMILIES: &[(u8, &str, &[&str])] = &[
-    (1, "J-pop микс", &["j pop", "jpop", "japanese pop", "city pop", "kayokyoku", "anison", "vocaloid", "utaite"]),
-    (2, "K-pop микс", &["k pop", "kpop", "korean pop"]),
-    (3, "J-rock микс", &["j rock", "jrock", "japanese rock", "visual kei"]),
-    (4, "Пост-панк микс", &["post punk", "new wave", "coldwave", "darkwave", "gothic rock"]),
-    (5, "Латинский микс", &["latin", "latino", "latina", "*reggaeton", "salsa", "bachata", "cumbia", "bossa nova"]),
-    (6, "Регги-микс", &["*reggae", "dancehall", "ska", "dub"]),
-    (7, "Хип-хоп микс", &["hip hop", "hiphop", "*rap", "drill", "grime", "boom bap", "phonk"]),
-    (8, "Метал-микс", &["*metal", "deathcore", "djent", "grindcore"]),
-    (9, "Панк-микс", &["punk", "emo"]),
-    (10, "Инди-микс", &["*indie"]),
-    (11, "Рок-микс", &["*rock", "grunge", "shoegaze"]),
-    (12, "Поп-микс", &["*pop"]),
-    (13, "Микс саундтреков", &["soundtrack", "soundtracks", "score", "film score", "video game", "video game music", "vgm", "game music", "anime", "ost"]),
-    (14, "Лоу-фай микс", &["lo fi", "lofi", "chillhop"]),
-    (15, "Эмбиент-микс", &["ambient", "drone", "new age"]),
+/// The families of genres with their numbers (titles live in
+/// [`nikgob_core::i18n::genre_family_title_in`]), the more special first:
+/// a tag is of the first family one of whose keys it has. A key is a run
+/// of whole words («hip hop» in «southern hip hop»); one starting with `*`
+/// is found anywhere in a word («*rock» in «krautrock»). A number is the
+/// family's for good (the caches and the mixes left out keep it): a new
+/// family takes a new one wherever it stands, none is used again.
+const FAMILIES: &[(u8, &[&str])] = &[
+    (1, &["j pop", "jpop", "japanese pop", "city pop", "kayokyoku", "anison", "vocaloid", "utaite"]),
+    (2, &["k pop", "kpop", "korean pop"]),
+    (3, &["j rock", "jrock", "japanese rock", "visual kei"]),
+    (4, &["post punk", "new wave", "coldwave", "darkwave", "gothic rock"]),
+    (5, &["latin", "latino", "latina", "*reggaeton", "salsa", "bachata", "cumbia", "bossa nova"]),
+    (6, &["*reggae", "dancehall", "ska", "dub"]),
+    (7, &["hip hop", "hiphop", "*rap", "drill", "grime", "boom bap", "phonk"]),
+    (8, &["*metal", "deathcore", "djent", "grindcore"]),
+    (9, &["punk", "emo"]),
+    (10, &["*indie"]),
+    (11, &["*rock", "grunge", "shoegaze"]),
+    (12, &["*pop"]),
+    (13, &["soundtrack", "soundtracks", "score", "film score", "video game", "video game music", "vgm", "game music", "anime", "ost"]),
+    (14, &["lo fi", "lofi", "chillhop"]),
+    (15, &["ambient", "drone", "new age"]),
     (
         16,
-        "Электронный микс",
         &["*electro", "house", "*techno", "trance", "edm", "dance", "drum and bass", "dnb", "dubstep", "garage", "breakbeat", "idm", "*synth", "future bass", "footwork", "hardstyle"],
     ),
-    (17, "R&B микс", &["r&b", "rnb", "*soul", "*funk", "motown"]),
-    (18, "Джазовый микс", &["*jazz", "swing", "bebop"]),
-    (19, "Блюзовый микс", &["*blues"]),
-    (20, "Классический микс", &["classical", "baroque", "opera", "orchestral", "symphony", "chamber music"]),
-    (21, "Кантри-микс", &["country", "bluegrass", "americana"]),
-    (22, "Фолк-микс", &["*folk", "celtic"]),
-    (23, "Диско-микс", &["*disco"]),
+    (17, &["r&b", "rnb", "*soul", "*funk", "motown"]),
+    (18, &["*jazz", "swing", "bebop"]),
+    (19, &["*blues"]),
+    (20, &["classical", "baroque", "opera", "orchestral", "symphony", "chamber music"]),
+    (21, &["country", "bluegrass", "americana"]),
+    (22, &["*folk", "celtic"]),
+    (23, &["*disco"]),
 ];
 
-/// The family of the tag `tag` (its mix's name), if it is of one: «russian
-/// rap» is hip hop, «2010s» and «vtuber» are no genre.
-pub fn family(tag: &str) -> Option<&'static str> {
+/// Whether `id` is a known genre family.
+pub fn has_family(id: u8) -> bool {
+    FAMILIES.iter().any(|f| f.0 == id)
+}
+
+/// The family ID of the tag `tag`, if it is of one: «russian rap» is hip hop
+/// (`7`), «2010s» and «vtuber» are no genre.
+pub fn family(tag: &str) -> Option<u8> {
     let words: Vec<String> = tag
         .to_lowercase()
         .split(|c: char| !(c.is_alphanumeric() || c == '&'))
@@ -106,17 +114,17 @@ pub fn family(tag: &str) -> Option<&'static str> {
         Some(part) => words.iter().any(|w| w.contains(part)),
         None => padded.contains(&format!(" {key} ")),
     };
-    FAMILIES.iter().find(|(_, _, keys)| keys.iter().any(|k| has(k))).map(|(_, title, _)| *title)
+    FAMILIES.iter().find(|(_, keys)| keys.iter().any(|k| has(k))).map(|(id, _)| *id)
 }
 
-/// The name of the mix of the family of the number `id`.
-pub fn family_title(id: u8) -> Option<&'static str> {
-    FAMILIES.iter().find(|f| f.0 == id).map(|f| f.1)
+/// The localized name of the mix of the family of the number `id`.
+pub fn family_title_in(id: u8, loc: Locale) -> Option<&'static str> {
+    has_family(id).then(|| genre_family_title_in(loc, id)).flatten()
 }
 
-/// The number of the family whose mix is called `title`.
-pub fn family_id(title: &str) -> Option<u8> {
-    FAMILIES.iter().find(|f| f.1 == title).map(|f| f.0)
+/// The number of the family whose mix is called `title` in `loc`.
+pub fn family_id_in(title: &str, loc: Locale) -> Option<u8> {
+    FAMILIES.iter().find(|f| family_title_in(f.0, loc) == Some(title)).map(|f| f.0)
 }
 
 /// The family an artist of `tags` is of (its number): the one that leads
@@ -124,19 +132,16 @@ pub fn family_id(title: &str) -> Option<u8> {
 /// genre, or of several genres alike.
 pub fn leading(tags: &Tags) -> Option<u8> {
     let of = families(tags);
-    let (title, share) = of.first()?;
-    if *share < LEAD_SHARE {
-        return None;
-    }
-    family_id(title)
+    let (id, share) = of.first()?;
+    (*share >= LEAD_SHARE).then_some(*id)
 }
 
-/// The families of an artist's `tags` with their shares of the artist
-/// (they sum to 1), the largest first; empty when no tag is of a family.
-/// A tag counts by its votes and one more (a tag nobody voted for still
-/// says something).
-pub fn families(tags: &Tags) -> Vec<(&'static str, f32)> {
-    let mut out: Vec<(&'static str, f32)> = Vec::new();
+/// The families of an artist's `tags` (by family ID) with their shares of the
+/// artist (they sum to 1), the largest first; empty when no tag is of a
+/// family. A tag counts by its votes and one more (a tag nobody voted for
+/// still says something).
+pub fn families(tags: &Tags) -> Vec<(u8, f32)> {
+    let mut out: Vec<(u8, f32)> = Vec::new();
     for (tag, votes) in tags {
         let Some(f) = family(tag) else { continue };
         let w = votes.max(0.0) + 1.0;
@@ -151,7 +156,7 @@ pub fn families(tags: &Tags) -> Vec<(&'static str, f32)> {
             o.1 /= sum;
         }
     }
-    out.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(b.0)));
+    out.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     out
 }
 
@@ -167,8 +172,8 @@ pub struct Makeup {
     /// Where its energy stands among the library's songs, 0 (the calmest)
     /// to 1; `None` without a sound.
     pub energy: Option<f32>,
-    /// The name of its taste profile's kind («Русские песни»).
-    pub kind: Option<String>,
+    /// Its taste profile's kind and optional loudness disambiguator.
+    pub kind: Option<(Kind, Option<Loudness>)>,
     /// Its first songs' titles (the last resort).
     pub songs: Vec<String>,
 }
@@ -179,15 +184,15 @@ impl Makeup {
     }
 }
 
-/// The genres that name `m`, the first its own and the second one that
-/// may stand in ([`GENRE_SHARE`], [`GENRE_SECOND`]).
-pub fn genre(m: &Makeup) -> Vec<&'static str> {
+/// The genre family IDs that name `m`, the first its own and the second one
+/// that may stand in ([`GENRE_SHARE`], [`GENRE_SECOND`]).
+pub fn genre(m: &Makeup) -> Vec<u8> {
     let n = m.tags.len();
     if n == 0 {
         return Vec::new();
     }
     let mut tagged = 0usize;
-    let mut sum: Vec<(&'static str, f32)> = Vec::new();
+    let mut sum: Vec<(u8, f32)> = Vec::new();
     for tags in &m.tags {
         let of = families(tags);
         if of.is_empty() {
@@ -204,7 +209,7 @@ pub fn genre(m: &Makeup) -> Vec<&'static str> {
     if (tagged as f32) < TAGGED_SHARE * n as f32 {
         return Vec::new();
     }
-    sum.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(b.0)));
+    sum.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     let mut out = Vec::new();
     if let Some((first, weight)) = sum.first()
         && *weight >= GENRE_SHARE * n as f32
@@ -219,9 +224,42 @@ pub fn genre(m: &Makeup) -> Vec<&'static str> {
     out
 }
 
-/// «Микс 90-х», «Микс 2010-х».
-pub fn era_title(decade: i32) -> String {
-    if (1900..2000).contains(&decade) { format!("Микс {}-х", decade % 100) } else { format!("Микс {decade}-х") }
+/// «Микс 90-х», «Микс 2010-х» / «90s Mix», «2010s Mix».
+pub fn era_title_in(decade: i32, loc: Locale) -> String {
+    match loc {
+        Locale::Ru => {
+            if (1900..2000).contains(&decade) {
+                format!("Микс {}-х", decade % 100)
+            } else {
+                format!("Микс {decade}-х")
+            }
+        }
+        Locale::En => {
+            if (1900..2000).contains(&decade) {
+                format!("{}s Mix", decade % 100)
+            } else {
+                format!("{decade}s Mix")
+            }
+        }
+    }
+}
+
+/// «Микс: ZUTOMAYO» / «ZUTOMAYO Mix».
+pub fn artist_title_in(name: &str, loc: Locale) -> String {
+    match loc {
+        Locale::Ru => format!("Микс: {name}"),
+        Locale::En => format!("{name} Mix"),
+    }
+}
+
+/// «Спокойный микс» / «Бодрый микс» / «Calm Mix» / «Upbeat Mix».
+pub const fn energy_title_in(calm: bool, loc: Locale) -> &'static str {
+    match (loc, calm) {
+        (Locale::Ru, true) => "Спокойный микс",
+        (Locale::Ru, false) => "Бодрый микс",
+        (Locale::En, true) => "Calm Mix",
+        (Locale::En, false) => "Upbeat Mix",
+    }
 }
 
 /// The decade that names `m` ([`ERA_SHARE`]); `common` is the decade most
@@ -243,44 +281,91 @@ pub fn era(m: &Makeup, common: Option<i32>) -> Option<i32> {
     (n as f32 >= ERA_SHARE * dated.len() as f32 && Some(decade) != common).then_some(decade)
 }
 
-fn artist_title(name: &str) -> String {
-    format!("Микс: {name}")
+/// Typed candidate name for a named daily mix, before rendering to a [`Locale`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MixName {
+    Genre(u8),
+    Artist(String),
+    Era(i32),
+    Energy { calm: bool },
+    Kind { kind: Kind, loudness: Option<Loudness> },
+    Song(String),
 }
 
-/// The names `m` may have, the best first (see the module docs).
-pub fn candidates(m: &Makeup, common_decade: Option<i32>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+impl MixName {
+    /// Renders `self` in `loc`.
+    pub fn title_in(&self, loc: Locale) -> String {
+        match self {
+            Self::Genre(id) => family_title_in(*id, loc).unwrap_or_default().to_owned(),
+            Self::Artist(name) | Self::Song(name) => artist_title_in(name, loc),
+            Self::Era(decade) => era_title_in(*decade, loc),
+            Self::Energy { calm } => energy_title_in(*calm, loc).to_owned(),
+            Self::Kind { kind, loudness } => match loudness {
+                Some(loud) => format!("{}, {}", kind.title_in(loc), loud.word_in(loc)),
+                None => kind.title_in(loc),
+            },
+        }
+    }
+
+    fn dedup_key(&self) -> DedupKey {
+        match self {
+            Self::Genre(id) => DedupKey::Genre(*id),
+            Self::Era(d) => DedupKey::Era(*d),
+            Self::Energy { calm } => DedupKey::Energy(*calm),
+            Self::Kind { kind, loudness } => DedupKey::Kind(*kind, *loudness),
+            Self::Artist(s) | Self::Song(s) => DedupKey::Subject(s.trim().to_lowercase()),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum DedupKey {
+    Genre(u8),
+    Era(i32),
+    Energy(bool),
+    Kind(Kind, Option<Loudness>),
+    Subject(String),
+}
+
+/// The typed candidate names `m` may have, the best first (see the module docs).
+pub fn candidates(m: &Makeup, common_decade: Option<i32>) -> Vec<MixName> {
+    let mut out: Vec<MixName> = Vec::new();
     let genres = genre(m);
-    if let Some(g) = genres.first() {
-        out.push((*g).to_owned());
+    if let Some(&g) = genres.first()
+        && has_family(g)
+    {
+        out.push(MixName::Genre(g));
     }
     let n = m.len();
     if let Some((name, songs)) = m.artists.first()
+        && !name.trim().is_empty()
         && *songs >= ARTIST_SONGS
         && *songs as f32 >= ARTIST_SHARE * n as f32
     {
-        out.push(artist_title(name));
+        out.push(MixName::Artist(name.trim().to_owned()));
     }
     if let Some(d) = era(m, common_decade) {
-        out.push(era_title(d));
+        out.push(MixName::Era(d));
     }
     match m.energy {
-        Some(e) if e <= CALM_BELOW => out.push("Спокойный микс".to_owned()),
-        Some(e) if e >= LIVELY_ABOVE => out.push("Бодрый микс".to_owned()),
+        Some(e) if e <= CALM_BELOW => out.push(MixName::Energy { calm: true }),
+        Some(e) if e >= LIVELY_ABOVE => out.push(MixName::Energy { calm: false }),
         _ => {}
     }
-    if let Some(k) = m.kind.as_deref().filter(|k| !k.trim().is_empty()) {
-        out.push(k.to_owned());
+    if let Some((kind, loudness)) = m.kind {
+        out.push(MixName::Kind { kind, loudness });
     }
-    if let Some(g) = genres.get(1) {
-        out.push((*g).to_owned());
+    if let Some(&g) = genres.get(1)
+        && has_family(g)
+    {
+        out.push(MixName::Genre(g));
     }
-    out.extend(m.artists.iter().map(|a| artist_title(&a.0)));
-    out.extend(m.songs.iter().map(|s| format!("Микс: {s}")));
-    let mut seen: Vec<String> = Vec::new();
-    out.retain(|t| {
-        let key = t.trim().to_lowercase();
-        let fresh = !key.is_empty() && key != "микс:" && !seen.contains(&key);
+    out.extend(m.artists.iter().map(|a| a.0.trim()).filter(|n| !n.is_empty()).map(|n| MixName::Artist(n.to_owned())));
+    out.extend(m.songs.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| MixName::Song(s.to_owned())));
+    let mut seen: Vec<DedupKey> = Vec::new();
+    out.retain(|c| {
+        let key = c.dedup_key();
+        let fresh = !seen.contains(&key);
         if fresh {
             seen.push(key);
         }
@@ -289,18 +374,27 @@ pub fn candidates(m: &Makeup, common_decade: Option<i32>) -> Vec<String> {
     out
 }
 
-/// A name for each of `mixes` in their order: the first of its candidates
-/// no card before it and none of `taken` (the other cards of the row) has.
-/// `None`: nothing of the mix can name it (it has no artist and no song
-/// with a name), so it is not shown.
-pub fn assign(mixes: &[Makeup], taken: &[String], common_decade: Option<i32>) -> Vec<Option<String>> {
+/// A name for each of `mixes` in their order in `loc`: the first of its
+/// candidates no card before it and none of `taken` (the other cards of the
+/// row) has. `None`: nothing of the mix can name it (it has no artist and
+/// no song with a name), so it is not shown.
+pub fn assign_in(mixes: &[Makeup], taken: &[String], common_decade: Option<i32>, loc: Locale) -> Vec<Option<(MixName, String)>> {
     let mut used: Vec<String> = taken.iter().map(|t| t.trim().to_lowercase()).collect();
     mixes
         .iter()
         .map(|m| {
-            let name = candidates(m, common_decade).into_iter().find(|c| !used.contains(&c.trim().to_lowercase()))?;
-            used.push(name.trim().to_lowercase());
-            Some(name)
+            let (cand, rendered) = candidates(m, common_decade)
+                .into_iter()
+                .map(|c| {
+                    let t = c.title_in(loc);
+                    (c, t)
+                })
+                .find(|(_, t)| {
+                    let key = t.trim().to_lowercase();
+                    !key.is_empty() && !used.contains(&key)
+                })?;
+            used.push(rendered.trim().to_lowercase());
+            Some((cand, rendered))
         })
         .collect()
 }
@@ -369,40 +463,51 @@ mod tests {
             ("hardcore", None),
             ("", None),
         ] {
-            assert_eq!(family(tag), want, "{tag}");
+            assert_eq!(family(tag).and_then(|id| family_title_in(id, Locale::Ru)), want, "{tag}");
         }
+        assert_eq!(family("hip hop").and_then(|id| family_title_in(id, Locale::En)), Some("Hip-Hop Mix"));
+        assert_eq!(family("soundtrack").and_then(|id| family_title_in(id, Locale::En)), Some("Soundtrack Mix"));
         let mut ids: Vec<u8> = Vec::new();
-        for (id, title, keys) in FAMILIES {
-            assert!(title.contains("икс") && !keys.is_empty(), "{title}");
-            assert!(!ids.contains(id), "{title}: the number {id} is another family's");
+        for (id, keys) in FAMILIES {
+            assert!(!keys.is_empty(), "{id}");
+            assert!(!ids.contains(id), "the number {id} is another family's");
             ids.push(*id);
-            assert_eq!(family_title(*id), Some(*title));
-            assert_eq!(family_id(title), Some(*id));
+            let ru = family_title_in(*id, Locale::Ru).expect("ru title in nikgob-core");
+            let en = family_title_in(*id, Locale::En).expect("en title in nikgob-core");
+            assert!(ru.contains("икс"), "{ru}");
+            assert!(en.ends_with("Mix"), "{en}");
+            assert_eq!(genre_family_title_in(Locale::Ru, *id), Some(ru));
+            assert_eq!(genre_family_title_in(Locale::En, *id), Some(en));
+            assert_eq!(family_id_in(ru, Locale::Ru), Some(*id));
+            assert_eq!(family_id_in(en, Locale::En), Some(*id));
         }
-        assert_eq!(family_title(0), None);
+        assert_eq!(family_title_in(0, Locale::Ru), None);
+        assert_eq!(family_title_in(0, Locale::En), None);
     }
 
     #[test]
     fn an_artists_families_share_them() {
         let f = families(&tags(&[("hip hop", 9.0), ("pop rap", 3.0), ("pop", 3.0), ("2010s", 5.0), ("relic inn", 0.0)]));
-        assert_eq!(f[0].0, "Хип-хоп микс");
+        assert_eq!(f[0].0, 7);
         assert!((f[0].1 - 14.0 / 18.0).abs() < 1e-4, "{f:?}");
-        assert_eq!(f[1].0, "Поп-микс");
+        assert_eq!(f[1].0, 12);
         assert!((f.iter().map(|x| x.1).sum::<f32>() - 1.0).abs() < 1e-4);
         assert!(families(&tags(&[("2010s", 5.0)])).is_empty());
         // The artist is a rapper; one of two genres alike is of neither,
         // one nobody tagged with a genre of none.
-        assert_eq!(leading(&tags(&[("hip hop", 9.0), ("pop rap", 3.0), ("pop", 3.0)])).and_then(family_title), Some("Хип-хоп микс"));
+        assert_eq!(leading(&tags(&[("hip hop", 9.0), ("pop rap", 3.0), ("pop", 3.0)])).and_then(|id| family_title_in(id, Locale::Ru)), Some("Хип-хоп микс"));
+        assert_eq!(leading(&tags(&[("hip hop", 9.0), ("pop rap", 3.0), ("pop", 3.0)])).and_then(|id| family_title_in(id, Locale::En)), Some("Hip-Hop Mix"));
         assert_eq!(leading(&tags(&[("rock", 2.0), ("jazz", 2.0), ("folk", 2.0)])), None);
         assert_eq!(leading(&tags(&[("2010s", 5.0)])), None);
         assert_eq!(leading(&[]), None);
     }
 
-    /// A mix of mostly rappers is «Хип-хоп микс»; one whose artists nobody
-    /// tagged is named by its leading artist; one without a leader by its
-    /// decade, its mood or its kind.
+    /// A mix of mostly rappers is «Хип-хоп микс» / «Hip-Hop Mix»; one whose
+    /// artists nobody tagged is named by its leading artist; one without a
+    /// leader by its decade, its mood or its kind.
     #[test]
     fn a_mix_is_named_by_what_it_is_made_of() {
+        use crate::songtype::Lang;
         let rap = tags(&[("hip hop", 5.0), ("trap", 1.0)]);
         let pop = tags(&[("pop", 4.0)]);
         let hip_hop = Makeup {
@@ -410,15 +515,18 @@ mod tests {
             artists: artists(&[("MORGENSHTERN", 5), ("SLAVA MARLOW", 4)]),
             years: vec![Some(2021); 20],
             energy: Some(0.8),
-            kind: Some("Русские песни".into()),
+            kind: Some((Kind::Sung(Lang::Russian), None)),
             songs: vec!["Cadillac".into()],
         };
-        assert_eq!(genre(&hip_hop), ["Хип-хоп микс"]);
-        let c = candidates(&hip_hop, Some(2020));
+        assert_eq!(genre(&hip_hop), [7]);
+        let c: Vec<String> = candidates(&hip_hop, Some(2020)).iter().map(|x| x.title_in(Locale::Ru)).collect();
         assert_eq!(c[..5], ["Хип-хоп микс", "Микс: MORGENSHTERN", "Бодрый микс", "Русские песни", "Микс: SLAVA MARLOW"], "{c:?}");
         assert!(c.contains(&"Микс: Cadillac".to_owned()));
+        let c_en: Vec<String> = candidates(&hip_hop, Some(2020)).iter().map(|x| x.title_in(Locale::En)).collect();
+        assert_eq!(c_en[..5], ["Hip-Hop Mix", "MORGENSHTERN Mix", "Upbeat Mix", "Russian Songs", "SLAVA MARLOW Mix"], "{c_en:?}");
         // The library is not all of the 2020s: the decade is a name too.
-        assert!(candidates(&hip_hop, Some(2010)).contains(&"Микс 2020-х".to_owned()));
+        assert!(candidates(&hip_hop, Some(2010)).iter().map(|x| x.title_in(Locale::Ru)).any(|t| t == "Микс 2020-х"));
+        assert!(candidates(&hip_hop, Some(2010)).iter().map(|x| x.title_in(Locale::En)).any(|t| t == "2020s Mix"));
 
         // Too few songs with a genre: no genre, the leading artist.
         let untagged = Makeup {
@@ -427,7 +535,8 @@ mod tests {
             ..Makeup::default()
         };
         assert!(genre(&untagged).is_empty());
-        assert_eq!(candidates(&untagged, None)[0], "Микс: ZUTOMAYO");
+        assert_eq!(candidates(&untagged, None)[0].title_in(Locale::Ru), "Микс: ZUTOMAYO");
+        assert_eq!(candidates(&untagged, None)[0].title_in(Locale::En), "ZUTOMAYO Mix");
 
         // Tagged, but of every genre a little: no genre either.
         let spread = Makeup {
@@ -439,9 +548,14 @@ mod tests {
             songs: Vec::new(),
         };
         assert!(genre(&spread).is_empty());
-        assert_eq!(candidates(&spread, Some(2010)), ["Микс 90-х", "Спокойный микс", "Микс: A", "Микс: B"]);
-        assert_eq!(era_title(2000), "Микс 2000-х");
-        assert_eq!(era_title(1980), "Микс 80-х");
+        let spread_ru: Vec<String> = candidates(&spread, Some(2010)).iter().map(|x| x.title_in(Locale::Ru)).collect();
+        let spread_en: Vec<String> = candidates(&spread, Some(2010)).iter().map(|x| x.title_in(Locale::En)).collect();
+        assert_eq!(spread_ru, ["Микс 90-х", "Спокойный микс", "Микс: A", "Микс: B"]);
+        assert_eq!(spread_en, ["90s Mix", "Calm Mix", "A Mix", "B Mix"]);
+        assert_eq!(era_title_in(2000, Locale::Ru), "Микс 2000-х");
+        assert_eq!(era_title_in(1980, Locale::Ru), "Микс 80-х");
+        assert_eq!(era_title_in(2000, Locale::En), "2000s Mix");
+        assert_eq!(era_title_in(1980, Locale::En), "80s Mix");
         // Too few songs dated: no decade.
         let undated = Makeup { years: (0..18).map(|k| (k < 4).then_some(1994)).collect(), ..Makeup::default() };
         assert_eq!(era(&undated, None), None);
@@ -451,16 +565,20 @@ mod tests {
     /// empty or numbered; a mix nothing can name is left out.
     #[test]
     fn names_are_never_shared_empty_or_numbered() {
+        use crate::songtype::Lang;
         let rap = tags(&[("hip hop", 5.0)]);
         let mix = |lead: &str, other: &str| Makeup {
             tags: vec![rap.clone(); 16],
             artists: artists(&[(lead, 5), (other, 2)]),
-            kind: Some("Русские песни".into()),
+            kind: Some((Kind::Sung(Lang::Russian), None)),
             songs: vec![format!("{lead} song")],
             ..Makeup::default()
         };
         let mixes = [mix("A", "B"), mix("A", "B"), mix("A", "B"), mix("A", "B"), mix("A", "B"), Makeup::default()];
-        let names = assign(&mixes, &["Русские песни".to_owned(), "Любимые".to_owned()], None);
+        let names: Vec<Option<String>> = assign_in(&mixes, &["Русские песни".to_owned(), "Любимые".to_owned()], None, Locale::Ru)
+            .into_iter()
+            .map(|o| o.map(|(_, t)| t))
+            .collect();
         assert_eq!(
             names,
             [
@@ -469,6 +587,21 @@ mod tests {
                 // «Русские песни» is another card's already.
                 Some("Микс: B".to_owned()),
                 Some("Микс: A song".to_owned()),
+                None,
+                None,
+            ]
+        );
+        let names_en: Vec<Option<String>> = assign_in(&mixes, &["Russian Songs".to_owned(), "Liked Songs".to_owned()], None, Locale::En)
+            .into_iter()
+            .map(|o| o.map(|(_, t)| t))
+            .collect();
+        assert_eq!(
+            names_en,
+            [
+                Some("Hip-Hop Mix".to_owned()),
+                Some("A Mix".to_owned()),
+                Some("B Mix".to_owned()),
+                Some("A song Mix".to_owned()),
                 None,
                 None,
             ]
@@ -482,6 +615,18 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), given.len());
         // A name differs by more than its letters' case.
-        assert_eq!(assign(&[mix("a", "b")], &["хип-хоп микс".to_owned(), "микс: A".to_owned()], None), [Some("Русские песни".to_owned())]);
+        let picked = assign_in(&[mix("a", "b")], &["хип-хоп микс".to_owned(), "микс: A".to_owned()], None, Locale::Ru);
+        assert_eq!(
+            picked,
+            [Some((MixName::Kind { kind: Kind::Sung(Lang::Russian), loudness: None }, "Русские песни".to_owned()))]
+        );
+        let picked_en = assign_in(&[mix("a", "b")], &["hip-hop mix".to_owned(), "a mix".to_owned()], None, Locale::En);
+        assert_eq!(
+            picked_en,
+            [Some((MixName::Kind { kind: Kind::Sung(Lang::Russian), loudness: None }, "Russian Songs".to_owned()))]
+        );
+        // Empty artist/song names never leak "Микс:" or " Mix".
+        let blank = Makeup { artists: artists(&[("   ", 4)]), songs: vec!["".into()], ..Makeup::default() };
+        assert!(candidates(&blank, None).is_empty());
     }
 }

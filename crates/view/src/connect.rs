@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ArtistId, ArtistLinks, Command, DuckView, ListKind, MeshKind, MixId, MixKey, PlaylistId, RadioSeed, ReleaseId, Repeat, Route,
+    ArtistId, ArtistLinks, Command, DuckView, ListKind, Locale, MeshKind, MixId, MixKey, PlaylistId, QueueOrigin, RadioSeed, RadioTitle, ReleaseId, Repeat, Route,
     SleepChoice, Status, TrackId, TrackRow, ViewState,
 };
 
@@ -120,6 +120,9 @@ pub struct ZoneSnapshot {
     pub repeat: ZoneRepeat,
     /// What the queue was started from («альбома «…»»).
     pub context: Option<String>,
+    /// Typed origin of the queue (optional for wire compatibility with older peers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<QueueOrigin>,
     /// The id of what it was started from (`release:<id>`, `playlist:<id>`,
     /// `artist:<id>`, a mix, a radio's seed).
     pub page: Option<String>,
@@ -339,6 +342,8 @@ pub struct ZoneEntry {
 #[serde(default)]
 pub struct ZoneRadio {
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<RadioTitle>,
     pub extending: bool,
     pub autoplay: bool,
 }
@@ -361,6 +366,8 @@ pub struct ZoneState {
     pub shuffle: bool,
     pub repeat: ZoneRepeat,
     pub context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<QueueOrigin>,
     /// The page of what the queue was started from (see [`page_key`]).
     pub page: Option<String>,
     pub current: Option<ZoneTrack>,
@@ -390,13 +397,19 @@ impl ZoneState {
             muted: p.muted,
             shuffle: p.shuffle,
             repeat: p.repeat.into(),
-            context: p.context.clone(),
+            context: p.origin.legacy_text(),
+            origin: Some(p.origin.clone()),
             page: p.context_page.as_ref().and_then(page_key),
             current: p.current.as_ref().map(ZoneTrack::of),
             current_entry: q.current_entry,
             prev: q.prev.iter().map(entry).collect(),
             next: q.next.iter().map(entry).collect(),
-            radio: q.radio.as_ref().map(|r| ZoneRadio { title: r.title.clone(), extending: r.extending, autoplay: r.autoplay }),
+            radio: q.radio.as_ref().map(|r| ZoneRadio {
+                title: r.title.title_in(Locale::Ru).into_owned(),
+                kind: Some(r.title.clone()),
+                extending: r.extending,
+                autoplay: r.autoplay,
+            }),
             duck: p.duck,
         }
     }
@@ -415,8 +428,8 @@ impl ZoneState {
     /// to keep.
     pub fn queue_key(&self) -> String {
         let entries: Vec<u64> = self.prev.iter().chain(&self.next).map(|e| e.entry).collect();
-        let radio = self.radio.as_ref().map(|r| r.title.as_str());
-        serde_json::to_string(&(self.track_ids(), entries, self.current_entry, self.shuffle, self.repeat, &self.context, &self.page, radio)).unwrap_or_default()
+        let radio = self.radio.as_ref().map(|r| (r.title.as_str(), r.kind.as_ref()));
+        serde_json::to_string(&(self.track_ids(), entries, self.current_entry, self.shuffle, self.repeat, &self.context, &self.origin, &self.page, radio)).unwrap_or_default()
     }
 
     /// Every track id of the state: the current one, what played, what comes.
@@ -443,6 +456,7 @@ impl ZoneState {
             shuffle: self.shuffle,
             repeat: self.repeat,
             context: self.context.clone(),
+            origin: self.origin.clone(),
             page: self.page.clone(),
             ..ZoneSnapshot::default()
         }
@@ -518,8 +532,19 @@ pub enum RemoteCommand {
     PlayReleaseMine { id: ReleaseId, start: Option<TrackId>, shuffle: bool },
     PlayPlaylist { id: PlaylistId, start: Option<TrackId>, shuffle: bool },
     PlayArtist { id: ArtistId, shuffle: bool },
-    PlayTracks { tracks: Vec<TrackId>, start: usize, context: String },
-    PlayAll { tracks: Vec<TrackId>, context: String },
+    PlayTracks {
+        tracks: Vec<TrackId>,
+        start: usize,
+        context: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<QueueOrigin>,
+    },
+    PlayAll {
+        tracks: Vec<TrackId>,
+        context: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<QueueOrigin>,
+    },
     PlayNext { tracks: Vec<TrackId> },
     Enqueue { tracks: Vec<TrackId> },
     PlayReleaseNext { id: ReleaseId },
@@ -573,8 +598,17 @@ impl RemoteCommand {
             Command::PlayReleaseMine { id, start, shuffle } => Self::PlayReleaseMine { id: *id, start: *start, shuffle: *shuffle },
             Command::PlayPlaylist { id, start, shuffle } => Self::PlayPlaylist { id: *id, start: *start, shuffle: *shuffle },
             Command::PlayArtist { id, shuffle } => Self::PlayArtist { id: *id, shuffle: *shuffle },
-            Command::PlayTracks { tracks, start, context } => Self::PlayTracks { tracks: tracks.clone(), start: *start, context: context.clone() },
-            Command::PlayAll { tracks, context } => Self::PlayAll { tracks: tracks.clone(), context: context.clone() },
+            Command::PlayTracks { tracks, start, context } => Self::PlayTracks {
+                tracks: tracks.clone(),
+                start: *start,
+                context: context.legacy_text().unwrap_or_default(),
+                origin: Some(context.clone()),
+            },
+            Command::PlayAll { tracks, context } => Self::PlayAll {
+                tracks: tracks.clone(),
+                context: context.legacy_text().unwrap_or_default(),
+                origin: Some(context.clone()),
+            },
             Command::PlayNext(tracks) => Self::PlayNext { tracks: tracks.clone() },
             Command::Enqueue(tracks) => Self::Enqueue { tracks: tracks.clone() },
             Command::PlayReleaseNext(id) => Self::PlayReleaseNext { id: *id },
@@ -633,8 +667,15 @@ impl RemoteCommand {
             Self::PlayReleaseMine { id, start, shuffle } => Command::PlayReleaseMine { id, start, shuffle },
             Self::PlayPlaylist { id, start, shuffle } => Command::PlayPlaylist { id, start, shuffle },
             Self::PlayArtist { id, shuffle } => Command::PlayArtist { id, shuffle },
-            Self::PlayTracks { tracks, start, context } => Command::PlayTracks { tracks, start, context },
-            Self::PlayAll { tracks, context } => Command::PlayAll { tracks, context },
+            Self::PlayTracks { tracks, start, context, origin } => Command::PlayTracks {
+                tracks,
+                start,
+                context: origin.unwrap_or_else(|| QueueOrigin::from(context)),
+            },
+            Self::PlayAll { tracks, context, origin } => Command::PlayAll {
+                tracks,
+                context: origin.unwrap_or_else(|| QueueOrigin::from(context)),
+            },
             Self::PlayNext { tracks } => Command::PlayNext(tracks),
             Self::Enqueue { tracks } => Command::Enqueue(tracks),
             Self::PlayReleaseNext { id } => Command::PlayReleaseNext(id),
@@ -849,7 +890,22 @@ mod tests {
             Command::SleepTimer(SleepChoice::TrackEnd),
             Command::ApiShuffle(true),
             Command::PlayRelease { id: ReleaseId::new(), start: Some(t[0]), shuffle: false },
-            Command::PlayTracks { tracks: t.clone(), start: 1, context: "библиотеки".into() },
+            Command::PlayTracks { tracks: t.clone(), start: 1, context: QueueOrigin::Library },
+            Command::PlayTracks {
+                tracks: t.clone(),
+                start: 0,
+                context: QueueOrigin::Mix(crate::MixTitle::Localized(crate::PerLocale {
+                    ru: "Профиль 1".into(),
+                    en: "Profile 1".into(),
+                })),
+            },
+            Command::PlayAll {
+                tracks: t.clone(),
+                context: QueueOrigin::Mix(crate::MixTitle::Localized(crate::PerLocale {
+                    ru: "Лето 2025".into(),
+                    en: "Summer 2025".into(),
+                })),
+            },
             Command::Enqueue(t.clone()),
             Command::MoveInQueue { entry: 4, anchor: 9, after: false },
             Command::PlayMix { id: MixId::Daily },
@@ -866,9 +922,36 @@ mod tests {
         let stream = crate::RemoteId::new(crate::Service::Youtube, "x");
         assert_eq!(RemoteCommand::of(&Command::StartRadio { seed: RadioSeed::Stream(stream.clone()) }), None);
         assert!(starts_service_music(&Command::PlayStreamNext(vec![stream])));
-        assert!(!starts_service_music(&Command::PlayNext(t)));
+        assert!(!starts_service_music(&Command::PlayNext(t.clone())));
         let v: serde_json::Value = serde_json::to_value(RemoteCommand::Seek { ms: 5 }).unwrap();
         assert_eq!(v, serde_json::json!({"do": "seek", "ms": 5}));
+
+        let legacy_tracks: RemoteCommand = serde_json::from_value(serde_json::json!({
+            "do": "play_tracks",
+            "tracks": &t,
+            "start": 0,
+            "context": "библиотеки"
+        })).unwrap();
+        assert_eq!(
+            legacy_tracks.command(),
+            Command::PlayTracks {
+                tracks: t.clone(),
+                start: 0,
+                context: QueueOrigin::from("библиотеки".to_owned()),
+            },
+        );
+        let legacy_all: RemoteCommand = serde_json::from_value(serde_json::json!({
+            "do": "play_all",
+            "tracks": &t,
+            "context": "загруженного"
+        })).unwrap();
+        assert_eq!(
+            legacy_all.command(),
+            Command::PlayAll {
+                tracks: t,
+                context: QueueOrigin::from("загруженного".to_owned()),
+            },
+        );
     }
 
     #[test]
@@ -899,5 +982,40 @@ mod tests {
         assert_eq!(back, a);
         let s = a.snapshot(500);
         assert_eq!((s.index, s.tracks.len(), s.position_ms, s.paused), (Some(0), 2, 500, false));
+    }
+
+    #[test]
+    fn zone_radio_deserializes_legacy_json_without_kind_and_round_trips() {
+        let old: ZoneRadio = serde_json::from_str(r#"{"title":"Радио · Кино","extending":true,"autoplay":false}"#).unwrap();
+        assert_eq!(old, ZoneRadio { title: "Радио · Кино".into(), kind: None, extending: true, autoplay: false });
+        let old_json = serde_json::to_value(&old).unwrap();
+        assert!(old_json.get("kind").is_none());
+
+        let old_zone: ZoneState = serde_json::from_str(r#"{"radio":{"title":"Моя волна","extending":false,"autoplay":true}}"#).unwrap();
+        assert_eq!(old_zone.radio, Some(ZoneRadio { title: "Моя волна".into(), kind: None, extending: false, autoplay: true }));
+
+        let mut st = ViewState::default();
+        st.queue.radio = Some(crate::RadioView {
+            title: RadioTitle::Seed("Кино".into()),
+            extending: true,
+            autoplay: false,
+            ..Default::default()
+        });
+        let a = ZoneState::of(&st, 1_000);
+        assert_eq!(
+            a.radio,
+            Some(ZoneRadio {
+                title: "Радио · Кино".into(),
+                kind: Some(RadioTitle::Seed("Кино".into())),
+                extending: true,
+                autoplay: false,
+            })
+        );
+        let back: ZoneState = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(back, a);
+
+        st.queue.radio.as_mut().unwrap().title = RadioTitle::Discover;
+        let b = ZoneState::of(&st, 1_000);
+        assert_ne!(a.queue_key(), b.queue_key());
     }
 }

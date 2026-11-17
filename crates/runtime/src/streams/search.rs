@@ -614,7 +614,7 @@ impl Worker {
                     let w = Wait::Long { until: None, retry: false };
                     section.note = Some(wait_note(service, &w, other));
                 }
-                Some(Err(e)) => section.error = Some(search_error(service, &e)),
+                Some(Err(e)) => section.error = Some(search_error(service, &e, self.locale())),
                 Some(Ok(r)) => {
                     for t in &r.tracks {
                         let key = SongKey::of_stream(t);
@@ -687,7 +687,8 @@ impl Worker {
             log::debug!("search: merging the sections took {} ms", merged.as_millis());
         }
         let answer = self.rebuild_answer(&sections);
-        let extra: Vec<v::TrackRow> = extra_lib.iter().map(|r| self.res.track(r)).collect();
+        let loc = self.locale();
+        let extra: Vec<v::TrackRow> = extra_lib.iter().map(|r| self.res.track_in(r, loc)).collect();
         self.publish(|s| {
             if s.search.query.trim() != query {
                 return;
@@ -914,6 +915,7 @@ impl Worker {
         playlists.sort_by_key(|x| (std::cmp::Reverse(bucket(x.1)), x.2, x.3));
 
         // The top result: settled once, then found again by its key.
+        let loc = self.locale();
         let st = &mut self.streaming.search;
         let settled = st.settled;
         // A settled top that is gone (a clip that an official song came to
@@ -1000,7 +1002,7 @@ impl Worker {
         if all_done && answer.is_empty() {
             answer.error = st.raw.iter().find_map(|s| match &s.result {
                 Some(Err(StreamError::RateLimited { .. })) | None | Some(Ok(_)) => None,
-                Some(Err(e)) => Some(search_error(s.service, e)),
+                Some(Err(e)) => Some(search_error(s.service, e, loc)),
             });
         }
         Some(answer)
@@ -1105,11 +1107,19 @@ fn interleave(first: Vec<StreamTrack>, more: Vec<Vec<StreamTrack>>) -> Vec<Strea
 }
 
 /// Why a service's section is empty, as the user reads it.
-fn search_error(service: Service, e: &StreamError) -> String {
+fn search_error(service: Service, e: &StreamError, loc: nikgob_core::i18n::Locale) -> String {
+    use nikgob_core::i18n::Locale;
+    let who = service.display_name();
     match e {
-        StreamError::RateLimited { .. } => format!("{} сейчас перегружен", service.display_name()),
-        StreamError::Network(_) => format!("Нет связи с {}", service.display_name()),
-        other => super::error_text(other),
+        StreamError::RateLimited { .. } => match loc {
+            Locale::Ru => format!("{who} сейчас перегружен"),
+            Locale::En => format!("{who} is overloaded right now"),
+        },
+        StreamError::Network(_) => match loc {
+            Locale::Ru => format!("Нет связи с {who}"),
+            Locale::En => format!("Cannot reach {who}"),
+        },
+        other => super::error_text_in(other, loc),
     }
 }
 

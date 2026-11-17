@@ -944,9 +944,9 @@ impl Worker {
         let wishlist = v::Link::Route(v::Route::Downloads(v::DownloadsTab::Wishlist));
         if started == 0 {
             if already > 0 {
-                self.toast_open("Уже в «Хочу скачать»", "Открыть", wishlist);
+                self.toast_open(v::ToastKind::Info, "Уже в «Хочу скачать»", "Открыть", wishlist);
             } else {
-                self.toast("Всё уже скачано", None);
+                self.toast_info("Всё уже скачано", None);
             }
             return;
         }
@@ -964,9 +964,10 @@ impl Worker {
             ),
         };
         if self.can_download() {
-            self.toast_open(text, "Открыть", wishlist);
+            self.toast_open(v::ToastKind::Success, text, "Открыть", wishlist);
         } else {
             self.toast_open(
+                v::ToastKind::Success,
                 format!("{text} · скачается, когда включишь источник скачивания"),
                 "Настроить",
                 v::Link::Setting(v::SettingLink::Torrents),
@@ -984,7 +985,7 @@ impl Worker {
             self.api_skip(format!("{r} is not known: find it again"));
         }
         if known.is_empty() {
-            self.toast("Трек устарел — найди его заново", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).stream_track_stale, None);
             return;
         }
         let ids = self.upsert_streams(&known);
@@ -2019,7 +2020,7 @@ impl Worker {
             let _ = std::fs::remove_dir_all(&dest);
             if let Err(e) = std::fs::create_dir_all(&dest) {
                 log::warn!("{}: {e}", dest.display());
-                self.toast("Не получилось создать папку для загрузки", None);
+                self.toast_err("Не получилось создать папку для загрузки", None);
                 return;
             }
             self.streaming.wish.direct.insert(id, dest.clone());
@@ -2510,7 +2511,7 @@ impl Worker {
             };
             let action = (item.track_id.is_some() && self.service(Service::Youtube).is_some())
                 .then(|| ("Сохранить с YouTube".to_owned(), Command::WishlistSaveFromYoutube(id)));
-            self.toast(format!("Не нашёл, где скачать: {what}"), action);
+            self.toast_err(format!("Не нашёл, где скачать: {what}"), action);
         }
         self.publish_wishlist();
     }
@@ -2559,7 +2560,7 @@ impl Worker {
             }
         }
         if n > 0 {
-            self.toast(format!("В очереди на скачивание: {n}"), None);
+            self.toast_info(format!("В очереди на скачивание: {n}"), None);
         }
         self.wish_tick();
         self.publish_wishlist();
@@ -2642,7 +2643,8 @@ impl Worker {
                 // Of several kinds: all of it at once.
                 _ => Command::WishlistUndoDismiss { restore: dismissed, tracks, albums },
             };
-            self.toast(text, Some(("Отменить".to_owned(), undo)));
+            let act = self.undo_action(undo);
+            self.toast_info(text, Some(act));
         }
         self.publish_wishlist();
     }
@@ -2739,7 +2741,7 @@ impl Worker {
         }
         if n > 0 {
             self.save_backoff();
-            self.toast(format!("Ищу заново: {n}"), None);
+            self.toast_work(format!("Ищу заново: {n}"), None);
         }
         self.wish_tick();
         self.publish_wishlist();
@@ -2784,12 +2786,13 @@ impl Worker {
 
     pub(crate) fn wish_save_from_youtube(&mut self, id: WishlistId) {
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
+        let err = nikgob_core::i18n::errors_in(self.locale());
         let Some(track) = item.track_id else {
-            self.toast("С YouTube сохраняется только трек, не альбом", None);
+            self.toast_err(err.youtube_save_tracks_only, None);
             return;
         };
         let Some(yt) = self.service(Service::Youtube) else {
-            self.toast("YouTube Music выключен", None);
+            self.toast_err(err.youtube_disabled, None);
             return;
         };
         let source = self
@@ -2803,9 +2806,9 @@ impl Worker {
             if self.can_resolve(track) {
                 self.streaming.save_after_resolve.insert(track, id);
                 self.begin_resolve(track);
-                self.toast("Ищу трек на YouTube Music…", None);
+                self.toast_work("Ищу трек на YouTube Music…", None);
             } else {
-                self.toast("Не нашёл этот трек на YouTube Music", None);
+                self.toast_err(err.not_found_on_youtube, None);
             }
             return;
         };
@@ -2851,7 +2854,9 @@ impl Worker {
             }
             Err(e) => {
                 log::warn!("saving from YouTube: {e}");
-                self.toast(format!("Не получилось сохранить с YouTube: {}", super::error_text(&e)), None);
+                let loc = self.locale();
+                let msg = nikgob_core::i18n::ErrorStrings::youtube_save_failed_in(loc, &super::error_text_in(&e, loc));
+                self.toast_err(msg, None);
                 self.set_item(id, |i| {
                     i.status = WishlistStatus::NoTorrent;
                     i.note = Some("Не получилось сохранить с YouTube".into());
@@ -2885,7 +2890,7 @@ impl Worker {
                 }
                 Err(e) => {
                     log::warn!("{}: {e}", path.display());
-                    self.toast("Не получилось прочитать .torrent", None);
+                    self.toast_err("Не получилось прочитать .torrent", None);
                     false
                 }
             },
@@ -2895,7 +2900,7 @@ impl Worker {
                     self.add_payload_for(TorrentPayload::Magnet(m.clone()), None, Some(m), Some(id));
                     true
                 } else {
-                    self.toast("Это не magnet-ссылка", None);
+                    self.toast_err("Это не magnet-ссылка", None);
                     false
                 }
             }
@@ -3108,10 +3113,11 @@ impl Worker {
                     self.relabel(track, names);
                 }
                 // What came, honestly: «Скачано · FLAC из MP3 ~320».
+                let loc = self.locale();
                 let got = item
                     .track_id
                     .and_then(|t| self.lib.get_track_row(t).ok().flatten())
-                    .and_then(|r| r.codec.as_ref().map(|c| nikgob_core::quality::row_label(c, r.check.as_ref())));
+                    .and_then(|r| r.codec.as_ref().map(|c| nikgob_core::quality::row_label_in(c, r.check.as_ref(), loc)));
                 (WishlistStatus::Done, got.map_or_else(|| "Скачано".to_owned(), |q| format!("Скачано · {q}")))
             }
         };

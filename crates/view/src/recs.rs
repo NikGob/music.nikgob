@@ -5,7 +5,11 @@
 //! The engine itself (`nikgob-recs`) stays behind the runtime: the view only
 //! names things ([`Mood`], [`MixId`]) and shows what the runtime filled in.
 
-use crate::{ArtistId, Cover, RemoteId, TrackId};
+use std::borrow::Cow;
+
+use nikgob_core::i18n::{Locale, MixTitle, MoodKind, WorldMixKind, locale};
+
+use crate::{ArtistId, Cover, QueueOrigin, RadioOrigin, RadioTitle, RemoteId, TrackId};
 
 /// The six moods of «Под настроение» (the engine's own enum stays in the
 /// runtime; this is its name in the view).
@@ -28,16 +32,26 @@ pub enum Mood {
 impl Mood {
     pub const ALL: [Self; 6] = [Self::Calm, Self::Energetic, Self::Dark, Self::Bright, Self::Focus, Self::Drive];
 
+    /// Shared core mood identifier.
+    pub const fn kind(self) -> MoodKind {
+        match self {
+            Self::Calm => MoodKind::Calm,
+            Self::Energetic => MoodKind::Energetic,
+            Self::Dark => MoodKind::Dark,
+            Self::Bright => MoodKind::Bright,
+            Self::Focus => MoodKind::Focus,
+            Self::Drive => MoodKind::Drive,
+        }
+    }
+
+    /// The card's title in `loc`.
+    pub const fn title_in(self, loc: Locale) -> &'static str {
+        self.kind().title_in(loc)
+    }
+
     /// The card's title.
     pub const fn title(self) -> &'static str {
-        match self {
-            Self::Calm => "Спокойное",
-            Self::Energetic => "Энергичное",
-            Self::Dark => "Мрачное",
-            Self::Bright => "Светлое",
-            Self::Focus => "Для фокуса",
-            Self::Drive => "Драйв",
-        }
+        self.kind().title_in(Locale::Ru)
     }
 }
 
@@ -123,15 +137,25 @@ pub enum WorldMix {
 }
 
 impl WorldMix {
+    /// Shared core world-mix identifier.
+    pub const fn kind(self) -> WorldMixKind {
+        match self {
+            Self::Best => WorldMixKind::Best,
+            Self::Unheard => WorldMixKind::Unheard,
+            Self::Road => WorldMixKind::Road,
+            Self::Calm => WorldMixKind::Calm,
+            Self::Moving => WorldMixKind::Moving,
+        }
+    }
+
+    /// Its name on the world's page in `loc`.
+    pub const fn title_in(self, loc: Locale) -> &'static str {
+        self.kind().title_in(loc)
+    }
+
     /// Its name on the world's page (the world's own is the page's title).
     pub const fn title(self) -> &'static str {
-        match self {
-            Self::Best => "Лучшее",
-            Self::Unheard => "Ещё не слышал",
-            Self::Road => "В дорогу",
-            Self::Calm => "Тихое",
-            Self::Moving => "В движении",
-        }
+        self.kind().title_in(Locale::Ru)
     }
 }
 
@@ -141,6 +165,9 @@ pub struct LaneCard {
     pub key: MixKey,
     /// «Русские песни», «Всё вперемешку», «Спокойное», «Фон».
     pub title: String,
+    /// Typed auto-mix title used for live localization when available.
+    #[serde(default)]
+    pub mix_title: Option<MixTitle>,
     /// Shorter forms of the title, the longest first: a card too narrow
     /// for a blend's whole name says one of these («Русские и японские +
     /// без слов»), the whole in its tooltip.
@@ -175,7 +202,42 @@ impl LaneCard {
         MixId::Lane(self.key)
     }
 
-    /// The name of what the queue plays from it.
+    /// Typed title of this mix (falling back to parsing `title` / `queue`).
+    pub fn mix_title(&self) -> MixTitle {
+        if let Some(mt) = &self.mix_title {
+            return mt.clone();
+        }
+        MixTitle::from_legacy(self.queue.as_deref().unwrap_or(&self.title))
+    }
+
+    /// Display title in `loc`.
+    pub fn display_title_in(&self, loc: Locale) -> Cow<'_, str> {
+        match &self.mix_title {
+            Some(mt) => mt.card_title_in(loc),
+            None => Cow::Borrowed(&self.title),
+        }
+    }
+
+    /// Display title in the active process locale.
+    pub fn display_title(&self) -> Cow<'_, str> {
+        self.display_title_in(locale())
+    }
+
+    /// Typed queue origin when playing this mix.
+    pub fn origin(&self) -> QueueOrigin {
+        QueueOrigin::Mix(self.mix_title())
+    }
+
+    /// Whether `origin` refers to this mix card without allocating.
+    pub fn matches_origin(&self, origin: &QueueOrigin) -> bool {
+        let QueueOrigin::Mix(mt) = origin else { return false };
+        match &self.mix_title {
+            Some(own) => own == mt,
+            None => mt.title_in(Locale::Ru) == self.queue.as_deref().unwrap_or(&self.title),
+        }
+    }
+
+    /// Legacy context string for string-based callers.
     pub fn context(&self) -> String {
         format!("микса «{}»", self.queue.as_deref().unwrap_or(&self.title))
     }
@@ -301,6 +363,9 @@ pub struct MixCard {
     pub id: MixId,
     /// «Твой микс», «Спокойное», «mzlff, MORGENSHTERN и другие».
     pub title: String,
+    /// Typed auto-mix title used for live localization when available.
+    #[serde(default)]
+    pub mix_title: Option<MixTitle>,
     /// The quiet label over a bento tile's title («ДЕЙЛИСТ», «ИСПОЛНИТЕЛЬ
     /// ДНЯ»); empty for the cards without one (moods, style mixes).
     pub kicker: String,
@@ -310,6 +375,33 @@ pub struct MixCard {
     /// Up to four covers for a collage (the first alone for a single
     /// cover); files of the library or a service's `https://` urls.
     pub covers: Vec<Cover>,
+}
+
+impl MixCard {
+    /// Display title in `loc`.
+    pub fn display_title_in(&self, loc: Locale) -> Cow<'_, str> {
+        match &self.mix_title {
+            Some(mt) => mt.card_title_in(loc),
+            None => Cow::Borrowed(&self.title),
+        }
+    }
+
+    /// Display title in the active process locale.
+    pub fn display_title(&self) -> Cow<'_, str> {
+        self.display_title_in(locale())
+    }
+
+    /// Whether `origin` refers to this mix card.
+    pub fn matches_origin(&self, origin: &QueueOrigin) -> bool {
+        match origin {
+            QueueOrigin::Mix(mt) => match &self.mix_title {
+                Some(own) => own == mt,
+                None => !self.title.is_empty() && mt.title_in(locale()) == self.title,
+            },
+            QueueOrigin::Radio(RadioOrigin::Named(name)) => !self.title.is_empty() && name == &self.title,
+            _ => false,
+        }
+    }
 }
 
 /// What a radio grows from ([`crate::Command::StartRadio`]): «Радио по
@@ -346,7 +438,11 @@ pub enum RecTarget {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RadioView {
     /// «Радио · Группа крови», «Радио · Кино», «Спокойное», «Твой микс».
-    pub title: String,
+    pub title: RadioTitle,
+    /// Pre-rendered standalone title in the active locale.
+    pub title_text: String,
+    /// Pre-rendered queue header (`title.queue_header_in(loc)`) in the active locale.
+    pub header_text: String,
     /// Looking for the next tracks right now.
     pub extending: bool,
     /// Started by «Автовоспроизведение» when the queue ran out (the title
@@ -357,6 +453,20 @@ pub struct RadioView {
     /// «Моя волна» (or a card of «Миксы для тебя» started as one): its
     /// filters and the user's scenes to choose from.
     pub wave: Option<WaveView>,
+}
+
+impl RadioView {
+    /// Recomputes [`Self::title_text`] and [`Self::header_text`] for `loc`.
+    pub fn sync_locale(&mut self, loc: Locale) {
+        self.title_text = self.title.title_in(loc).into_owned();
+        self.header_text = self.title.queue_header_in(loc);
+    }
+
+    /// Populates [`Self::title_text`] and [`Self::header_text`] for `loc`.
+    pub fn with_locale(mut self, loc: Locale) -> Self {
+        self.sync_locale(loc);
+        self
+    }
 }
 
 /// «Новизна» of «Моя волна»: how much of it is new music.

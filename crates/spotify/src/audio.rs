@@ -395,13 +395,24 @@ impl SpotifyStream {
     }
 }
 
+/// Machine-readable tag included in [`describe`] when Spotify requires Premium.
+pub const TAG_PREMIUM_REQUIRED: &str = "[spotify:premium_required]";
+/// Machine-readable tag included in [`describe`] when Spotify playback is not logged in.
+pub const TAG_NOT_LOGGED_IN: &str = "[spotify:not_logged_in]";
+/// Machine-readable tag included in [`describe`] when a Spotify track is unavailable.
+pub const TAG_UNAVAILABLE: &str = "[spotify:unavailable]";
+
 /// The error text the engine shows.
 pub fn describe(e: &StreamError) -> String {
-    match e {
-        StreamError::PremiumRequired => "Spotify: для звука нужен Premium".into(),
-        StreamError::NotLoggedIn => "Spotify: включи воспроизведение в настройках".into(),
-        StreamError::Unavailable => "Spotify: трек недоступен".into(),
-        other => format!("Spotify: {other}"),
+    let tag = match e {
+        StreamError::PremiumRequired => Some(TAG_PREMIUM_REQUIRED),
+        StreamError::NotLoggedIn => Some(TAG_NOT_LOGGED_IN),
+        StreamError::Unavailable => Some(TAG_UNAVAILABLE),
+        _ => None,
+    };
+    match tag {
+        Some(tag) => format!("{tag} Spotify: {e}"),
+        None => format!("Spotify: {e}"),
     }
 }
 
@@ -1056,5 +1067,38 @@ mod tests {
         let left: Vec<f32> = out.iter().step_by(2).copied().collect();
         let rms = (left[2000..46_000].iter().map(|s| s * s).sum::<f32>() / 44_000.0).sqrt();
         assert!((rms - 0.3 / 2f32.sqrt()).abs() < 0.03, "rms {rms}");
+    }
+
+    #[test]
+    fn describe_uses_machine_tags_without_localized_prose() {
+        let cases = [
+            (StreamError::PremiumRequired, TAG_PREMIUM_REQUIRED),
+            (StreamError::NotLoggedIn, TAG_NOT_LOGGED_IN),
+            (StreamError::Unavailable, TAG_UNAVAILABLE),
+        ];
+        for (err, expected_tag) in &cases {
+            let msg = describe(err);
+            assert!(msg.starts_with(expected_tag), "{msg}");
+            assert!(msg.contains(&err.to_string()), "{msg}");
+            assert!(msg.is_ascii(), "expected ASCII machine-tagged output: {msg}");
+
+            let mut stream = SpotifyStream::new(Box::new({
+                let err = err.clone();
+                move |_| Err(err)
+            }));
+            let io_err = stream.read(&mut [0; 4]).unwrap_err().to_string();
+            assert!(io_err.starts_with(expected_tag), "{io_err}");
+            assert_eq!(stream.seek(SeekFrom::Start(0)).unwrap_err().to_string(), io_err);
+        }
+
+        let net = describe(&StreamError::Network("timed out".into()));
+        assert_eq!(net, "Spotify: network error: timed out");
+        for tag in [TAG_PREMIUM_REQUIRED, TAG_NOT_LOGGED_IN, TAG_UNAVAILABLE] {
+            assert!(!net.contains(tag), "{net}");
+        }
+        assert_eq!(
+            describe(&StreamError::RateLimited { retry_after: None }),
+            "Spotify: rate limited"
+        );
     }
 }

@@ -612,7 +612,7 @@ impl Worker {
             log::info!("upgrade: nothing can be better than the files of {title}, its item goes");
             self.upgrade_drop(id);
             if item.better_than.is_some() {
-                self.toast(format!("Лучше не нашёл: {title}"), None);
+                self.toast_info(format!("Лучше не нашёл: {title}"), None);
             }
             return;
         }
@@ -633,7 +633,7 @@ impl Worker {
         if asked {
             let title = self.item_title(id);
             log::info!("upgrade: nothing better than the file of {title}");
-            self.toast(format!("Лучше не нашёл: {title}"), None);
+            self.toast_info(format!("Лучше не нашёл: {title}"), None);
         }
         self.publish_wishlist();
     }
@@ -718,15 +718,15 @@ impl Worker {
                 .unwrap_or_default();
             log::info!("upgrade: the user asks for better than {} of {title}: there is none", file_label(&file));
             self.upgrade_drop_track(track);
-            self.toast(format!("Лучше не нашёл: {title}"), None);
+            self.toast_info(format!("Лучше не нашёл: {title}"), None);
             return;
         }
         if self.import.is_none() {
-            self.toast("Импорт недоступен", None);
+            self.toast_err("Импорт недоступен", None);
             return;
         }
         if !self.can_download() {
-            self.toast_open("Нужен источник скачивания", "Настроить", v::Link::Setting(v::SettingLink::Torrents));
+            self.toast_open(v::ToastKind::Error, "Нужен источник скачивания", "Настроить", v::Link::Setting(v::SettingLink::Torrents));
             return;
         }
         let above = file.quality_score;
@@ -764,7 +764,7 @@ impl Worker {
             item.title.as_deref().unwrap_or("?")
         );
         let what = item.title.clone().unwrap_or_default();
-        self.toast_open(format!("Ищу качество лучше: «{what}»"), "Открыть", wishlist);
+        self.toast_open(v::ToastKind::Working, format!("Ищу качество лучше: «{what}»"), "Открыть", wishlist);
         self.streaming.wish.upgrade_runs.push(Instant::now());
         self.wish_search(item);
         self.publish_wishlist();

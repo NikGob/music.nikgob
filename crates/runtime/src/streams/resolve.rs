@@ -484,50 +484,125 @@ async fn lookup_noting(yt: &dyn nikgob_core::streaming::StreamService, q: &Resol
     songs_then_videos(yt, &search_title(&q.title), &|_| true, q, failed).await
 }
 
+/// Machine-readable Spotify error prefixes matching `nikgob_spotify::audio::TAG_*`.
+const SPOTIFY_TAG_PREMIUM_REQUIRED: &str = "[spotify:premium_required]";
+const SPOTIFY_TAG_NOT_LOGGED_IN: &str = "[spotify:not_logged_in]";
+const SPOTIFY_TAG_UNAVAILABLE: &str = "[spotify:unavailable]";
+
 /// Why a stream did not play, from the engine's error text, as the user
 /// reads it ("ARISTOCRAT: <this>"), and the settings row that helps, if
-/// one does (the toast's «Войти»).
-pub(crate) fn failure_text(
+/// one does (the toast's "Sign in" / «Войти»), localized explicitly for `loc`.
+pub(crate) fn failure_text_in(
     message: &str,
     youtube_signed_in: bool,
     service: Option<Service>,
+    loc: nikgob_core::i18n::Locale,
 ) -> (String, Option<nikgob_view::SettingLink>) {
+    use nikgob_core::i18n::{Locale, errors_in};
     use nikgob_view::SettingLink;
+    let err = errors_in(loc);
     let m = message.to_lowercase();
-    if m.contains("age-restricted") {
+    if message.contains(SPOTIFY_TAG_PREMIUM_REQUIRED) {
+        (err.spotify_need_premium.into(), None)
+    } else if service == Some(Service::Spotify) && message.contains(SPOTIFY_TAG_NOT_LOGGED_IN) {
+        // Spotify's sound needs its playback login.
+        (err.spotify_enable_playback.into(), Some(SettingLink::SpotifyPlayback))
+    } else if message.contains(SPOTIFY_TAG_UNAVAILABLE) {
+        (err.spotify_unavailable.into(), None)
+    } else if m.contains("age-restricted") {
         if youtube_signed_in {
-            ("на YouTube только для 18+, и со входом не открылся".into(), None)
+            (
+                match loc {
+                    Locale::Ru => "на YouTube только для 18+, и со входом не открылся",
+                    Locale::En => "YouTube marked this 18+, and it did not open even signed in",
+                }
+                .into(),
+                None,
+            )
         } else {
-            ("на YouTube только для 18+ — нужен вход в YouTube Music".into(), Some(SettingLink::Youtube))
+            (
+                match loc {
+                    Locale::Ru => "на YouTube только для 18+ — нужен вход в YouTube Music",
+                    Locale::En => "YouTube marked this 18+ — sign in to YouTube Music",
+                }
+                .into(),
+                Some(SettingLink::Youtube),
+            )
         }
     } else if m.contains("drm") {
-        ("в SoundCloud только в защищённом виде".into(), None)
+        (
+            match loc {
+                Locale::Ru => "в SoundCloud только в защищённом виде",
+                Locale::En => "only DRM-protected on SoundCloud",
+            }
+            .into(),
+            None,
+        )
     } else if m.contains("blocked in this region") {
-        ("недоступно в твоём регионе".into(), None)
+        (
+            match loc {
+                Locale::Ru => "недоступно в твоём регионе",
+                Locale::En => "unavailable in your region",
+            }
+            .into(),
+            None,
+        )
     } else if m.contains("premium") {
-        ("для звука из Spotify нужен Premium".into(), None)
+        (err.spotify_need_premium.into(), None)
     } else if m.contains("rate limited") {
         // Playback goes on with the next track; this one waits for the user.
-        let who = service.map_or("сервис", |s| s.display_name());
-        (format!("{who} просит подождать — включи трек чуть позже"), None)
+        let who = service.map_or(
+            match loc {
+                Locale::Ru => "сервис",
+                Locale::En => "the service",
+            },
+            Service::display_name,
+        );
+        (
+            match loc {
+                Locale::Ru => format!("{who} просит подождать — включи трек чуть позже"),
+                Locale::En => format!("{who} asks to wait — try playing this track later"),
+            },
+            None,
+        )
     } else if m.contains("not available") || m.contains("недоступ") {
-        ("трек недоступен".into(), None)
+        (err.spotify_unavailable.into(), None)
     } else if service == Some(Service::Youtube) && (m.contains("refused") || m.contains("http 403")) {
         // Every client of the player was asked (see nikgob_youtube::player):
         // YouTube's, not the video's.
-        ("YouTube сейчас не отдаёт звук — попробуй чуть позже".into(), None)
+        (
+            match loc {
+                Locale::Ru => "YouTube сейчас не отдаёт звук — попробуй чуть позже",
+                Locale::En => "YouTube is refusing audio right now — try again later",
+            }
+            .into(),
+            None,
+        )
     } else if let Some(s) = service
         && (m.contains("network") || m.contains("stalled") || m.contains("timed out"))
     {
         // Any service's outage says so (a SoundCloud read that waited too
         // long, Spotify's fetch).
         let who = if s == Service::Youtube { "YouTube" } else { s.display_name() };
-        (format!("нет связи с {who} — проверь интернет"), None)
+        (
+            match loc {
+                Locale::Ru => format!("нет связи с {who} — проверь интернет"),
+                Locale::En => format!("cannot reach {who} — check your internet"),
+            },
+            None,
+        )
     } else if service == Some(Service::Spotify) && (m.contains("включи воспроизведение") || m.contains("not logged in")) {
         // Spotify's sound needs its playback login.
-        ("для звука из Spotify включи воспроизведение в настройках".into(), Some(SettingLink::SpotifyPlayback))
+        (err.spotify_enable_playback.into(), Some(SettingLink::SpotifyPlayback))
     } else {
-        ("не получилось воспроизвести".into(), None)
+        (
+            match loc {
+                Locale::Ru => "не получилось воспроизвести",
+                Locale::En => "could not play",
+            }
+            .into(),
+            None,
+        )
     }
 }
 
@@ -561,7 +636,7 @@ impl Worker {
         let signed_in = self
             .service(Service::Youtube)
             .is_some_and(|y| y.account().is_logged_in());
-        let why = failure_text(message, signed_in, src.kind.service());
+        let why = failure_text_in(message, signed_in, src.kind.service(), self.locale());
         log::info!("{track}: {} source {} failed: {message}", src.kind.as_str(), src.locator);
         self.streaming.failures.insert(track, why);
         if src.kind == SourceKind::Youtube && !video_refused(message) {
@@ -761,7 +836,7 @@ impl Worker {
             && sources.iter().any(|s| s.kind == SourceKind::Youtube && s.available && s.trashed_at.is_none());
         if !copy && !self.can_resolve_on(e.track, PLAYED_MISS_TTL, Service::Youtube) {
             log::info!("{}: no YouTube Music copy to play now", e.track);
-            self.toast("Нет на YouTube Music", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).not_on_youtube, None);
             return;
         }
         log::info!("{}: from YouTube Music at {} s", e.track, self.position_now().as_secs());
@@ -832,16 +907,21 @@ impl Worker {
                 }
                 None => {
                     let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
+                    let loc = self.locale();
+                    let err = nikgob_core::i18n::errors_in(loc);
                     // Better an honest «не нашёл» than someone else's
                     // version: the song can be picked by hand.
-                    let find = Some(("Найти песню…".to_owned(), nikgob_view::Command::FindSong { track, query: None }));
+                    let find = Some((err.find_song.to_owned(), nikgob_view::Command::FindSong { track, query: None }));
                     match why {
                         // The only copies did not play: say why.
                         Some((why, Some(link))) => {
-                            self.toast_open(format!("{title}: {why}"), "Войти", nikgob_view::Link::Setting(link));
+                            self.toast_open(nikgob_view::ToastKind::Error, format!("{title}: {why}"), err.sign_in, nikgob_view::Link::Setting(link));
                         }
-                        Some((why, None)) => self.toast(format!("{title}: {why}"), find),
-                        None => self.toast(format!("{title}: не нашёл эту песню на {}", via.display_name()), find),
+                        Some((why, None)) => self.toast_err(format!("{title}: {why}"), find),
+                        None => self.toast_err(
+                            nikgob_core::i18n::ErrorStrings::song_not_found_on_in(loc, &title, via.display_name()),
+                            find,
+                        ),
                     }
                     match self.queue.skip_forward() {
                         // Paused while it waited: the next one starts paused too.
@@ -898,14 +978,18 @@ impl Worker {
             return;
         }
         let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
-        let until = pause
+        let hm = pause
             .filter(|p| *p > super::search::SHORT_WAIT)
-            .and_then(super::accounts::hm_after)
-            .map(|hm| format!(" до {hm}"))
-            .unwrap_or_default();
+            .and_then(super::accounts::hm_after);
         log::info!("{track}: {who} lookup still rate limited: stopping");
         // Not skipped: the next tracks would hit the same pause.
-        self.toast(format!("{title}: {who} просит подождать{until} — включи трек позже"), None);
+        let msg = nikgob_core::i18n::ErrorStrings::resolve_rate_limited_in(
+            self.locale(),
+            &title,
+            who,
+            hm.as_deref(),
+        );
+        self.toast_err(msg, None);
         self.stop();
     }
 
@@ -1242,35 +1326,66 @@ mod tests {
 
     #[test]
     fn youtube_failures_say_whose_they_are() {
+        use nikgob_core::i18n::Locale;
         let yt = Some(Service::Youtube);
         let refused = "i/o error: stream URL keeps being refused (HTTP 403)";
         assert!(!video_refused(refused));
-        assert_eq!(failure_text(refused, false, yt).0, "YouTube сейчас не отдаёт звук — попробуй чуть позже");
+        assert_eq!(failure_text_in(refused, false, yt, Locale::Ru).0, "YouTube сейчас не отдаёт звук — попробуй чуть позже");
+        assert_eq!(failure_text_in(refused, false, yt, Locale::En).0, "YouTube is refusing audio right now — try again later");
         let offline = "network error: error sending request: dns error";
         assert!(!video_refused(offline));
-        assert_eq!(failure_text(offline, false, yt).0, "нет связи с YouTube — проверь интернет");
+        assert_eq!(failure_text_in(offline, false, yt, Locale::Ru).0, "нет связи с YouTube — проверь интернет");
+        assert_eq!(failure_text_in(offline, false, yt, Locale::En).0, "cannot reach YouTube — check your internet");
         let age = "i/o error: age-restricted";
         assert!(video_refused(age));
-        assert_eq!(failure_text(age, false, yt).1, Some(nikgob_view::SettingLink::Youtube));
+        assert_eq!(failure_text_in(age, false, yt, Locale::Ru).1, Some(nikgob_view::SettingLink::Youtube));
         assert!(video_refused("not available") && video_refused("blocked in this region"));
-        assert_eq!(failure_text("whatever", false, None).0, "не получилось воспроизвести");
+        assert_eq!(failure_text_in("whatever", false, None, Locale::Ru).0, "не получилось воспроизвести");
+        assert_eq!(failure_text_in("whatever", false, None, Locale::En).0, "could not play");
     }
 
     /// Every service's outage says so, with its name; Spotify without its
     /// playback login points at the setting that turns it on.
     #[test]
     fn spotify_and_soundcloud_failures_say_what_happened() {
+        use nikgob_core::i18n::Locale;
         let sp = Some(Service::Spotify);
         let sc = Some(Service::Soundcloud);
-        assert_eq!(failure_text("Spotify: network error: connection reset", false, sp).0, "нет связи с Spotify — проверь интернет");
-        assert_eq!(failure_text("i/o error: SoundCloud: the stream stalled", false, sc).0, "нет связи с SoundCloud — проверь интернет");
-        assert_eq!(failure_text("i/o error: network error: dns error", false, sc).1, None);
-        let login = failure_text("Spotify: включи воспроизведение в настройках", false, sp);
+        assert_eq!(failure_text_in("Spotify: network error: connection reset", false, sp, Locale::Ru).0, "нет связи с Spotify — проверь интернет");
+        assert_eq!(failure_text_in("i/o error: SoundCloud: the stream stalled", false, sc, Locale::Ru).0, "нет связи с SoundCloud — проверь интернет");
+        assert_eq!(failure_text_in("i/o error: network error: dns error", false, sc, Locale::Ru).1, None);
+        let login = failure_text_in("Spotify: включи воспроизведение в настройках", false, sp, Locale::Ru);
         assert_eq!(login.0, "для звука из Spotify включи воспроизведение в настройках");
         assert_eq!(login.1, Some(nikgob_view::SettingLink::SpotifyPlayback));
-        assert_eq!(failure_text("Spotify: not logged in", false, sp).1, Some(nikgob_view::SettingLink::SpotifyPlayback));
+        assert_eq!(failure_text_in("Spotify: not logged in", false, sp, Locale::Ru).1, Some(nikgob_view::SettingLink::SpotifyPlayback));
         // Not for another service's login.
-        assert_eq!(failure_text("SoundCloud: not logged in", false, sc).0, "не получилось воспроизвести");
-        assert_eq!(failure_text("Spotify: для звука нужен Premium", false, sp).0, "для звука из Spotify нужен Premium");
+        assert_eq!(failure_text_in("SoundCloud: not logged in", false, sc, Locale::Ru).0, "не получилось воспроизвести");
+        assert_eq!(failure_text_in("Spotify: для звука нужен Premium", false, sp, Locale::Ru).0, "для звука из Spotify нужен Premium");
+
+        // Machine-readable tags from `nikgob_spotify::audio::describe` localize cleanly.
+        assert_eq!(
+            failure_text_in("[spotify:premium_required] Spotify: Premium required", false, sp, Locale::Ru).0,
+            "для звука из Spotify нужен Premium"
+        );
+        assert_eq!(
+            failure_text_in("[spotify:premium_required] Spotify: Premium required", false, sp, Locale::En).0,
+            "Spotify Premium is required for audio"
+        );
+        assert_eq!(
+            failure_text_in("[spotify:not_logged_in] Spotify: not logged in", false, sp, Locale::Ru),
+            ("для звука из Spotify включи воспроизведение в настройках".into(), Some(nikgob_view::SettingLink::SpotifyPlayback))
+        );
+        assert_eq!(
+            failure_text_in("[spotify:not_logged_in] Spotify: not logged in", false, sp, Locale::En),
+            ("enable Spotify playback in settings".into(), Some(nikgob_view::SettingLink::SpotifyPlayback))
+        );
+        assert_eq!(
+            failure_text_in("[spotify:unavailable] Spotify: unavailable", false, sp, Locale::Ru).0,
+            "трек недоступен"
+        );
+        assert_eq!(
+            failure_text_in("[spotify:unavailable] Spotify: unavailable", false, sp, Locale::En).0,
+            "track unavailable"
+        );
     }
 }

@@ -29,6 +29,7 @@ struct Query {
     seq: u64,
     /// As typed (the view shows it so).
     raw: String,
+    locale: nikgob_core::i18n::Locale,
 }
 
 /// The library's answer to query `seq`.
@@ -91,7 +92,7 @@ fn run(inbox: &Receiver<Query>, later: &Sender<Later>, mut res: Resolver) {
         while let Ok(newer) = inbox.try_recv() {
             q = newer;
         }
-        let answer = read(&mut res, q.seq, q.raw);
+        let answer = read(&mut res, q.seq, q.raw, q.locale);
         if later.send(Later::new("the library's search answer", move |w| w.library_answered(answer))).is_err() {
             return;
         }
@@ -99,7 +100,7 @@ fn run(inbox: &Receiver<Query>, later: &Sender<Later>, mut res: Resolver) {
 }
 
 /// The library's answer to `raw` (its words, at most [`SHOWN`] of each kind).
-fn read(res: &mut Resolver, seq: u64, raw: String) -> Answer {
+fn read(res: &mut Resolver, seq: u64, raw: String, loc: nikgob_core::i18n::Locale) -> Answer {
     let started = Instant::now();
     let lib = res.library().clone();
     let text = raw.trim();
@@ -111,7 +112,7 @@ fn read(res: &mut Resolver, seq: u64, raw: String) -> Answer {
         r.releases.len(),
         started.elapsed().as_millis()
     );
-    let tracks = r.tracks.iter().map(|t| res.track(t)).collect();
+    let tracks = r.tracks.iter().map(|t| res.track_in(t, loc)).collect();
     let releases = r.releases.iter().map(|x| res.release(x)).collect();
     let artists = r.artists.iter().map(|a| res.artist(a)).collect();
     let playlists = r.playlists.iter().map(|p| res.playlist(p)).collect();
@@ -148,8 +149,9 @@ impl Worker {
             self.library_answered(Answer::empty(seq, q));
             return;
         }
+        let locale = self.locale();
         let q = match &self.library_search.queries {
-            Some(queries) => match queries.send(Query { seq, raw: q }) {
+            Some(queries) => match queries.send(Query { seq, raw: q, locale }) {
                 Ok(()) => return,
                 Err(e) => e.0.raw,
             },
@@ -157,7 +159,7 @@ impl Worker {
         };
         log::warn!("search: its thread stopped, the library is read on the loop");
         self.library_search.queries = None;
-        let answer = read(&mut self.res, seq, q);
+        let answer = read(&mut self.res, seq, q, locale);
         self.library_answered(answer);
     }
 

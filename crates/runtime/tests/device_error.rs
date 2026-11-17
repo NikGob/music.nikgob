@@ -6,14 +6,14 @@ use std::time::{Duration, Instant};
 
 use nikgob_library::Library;
 use nikgob_runtime::{NullPlayback, PlayRequest, Playback, PlaybackEvent, Runtime, RuntimeConfig};
-use nikgob_view::{Command, Prefs};
+use nikgob_view::{Command, LangPref, Prefs};
 
-fn config() -> RuntimeConfig {
+fn config(language: LangPref) -> RuntimeConfig {
     RuntimeConfig {
         library: Library::open_in_memory().unwrap(),
         streams: Vec::new(),
         library_dir: std::env::temp_dir(),
-        prefs: Prefs::default(),
+        prefs: Prefs { language, ..Prefs::default() },
         prefs_path: None,
         settings_path: None,
         import: None,
@@ -30,9 +30,16 @@ fn wait(what: &str, f: impl Fn() -> bool) {
 
 #[test]
 fn a_device_that_does_not_open_is_said() {
-    let rt = Runtime::start(config(), Box::new(NullPlayback), Arc::new(|| {}));
+    let rt = Runtime::start(config(LangPref::Ru), Box::new(NullPlayback), Arc::new(|| {}));
     rt.playback_sender().send(PlaybackEvent::DeviceError { generation: 1, message: "no device".into() }).unwrap();
     wait("the toast", || rt.state().toasts.iter().any(|t| t.text == "Не удалось открыть устройство вывода звука"));
+}
+
+#[test]
+fn an_output_device_failure_toast_is_localized_in_en() {
+    let rt = Runtime::start(config(LangPref::En), Box::new(NullPlayback), Arc::new(|| {}));
+    rt.playback_sender().send(PlaybackEvent::DeviceError { generation: 1, message: "no device".into() }).unwrap();
+    wait("the English device error toast", || rt.state().toasts.iter().any(|t| t.text == "Could not open audio output device"));
 }
 
 /// A backend whose device switch opens later, recording what it is told.
@@ -77,7 +84,7 @@ impl Playback for Switching {
 #[test]
 fn a_device_switch_waits_for_the_new_device() {
     let backend = Switching::default();
-    let rt = Runtime::start(config(), Box::new(backend.clone()), Arc::new(|| {}));
+    let rt = Runtime::start(config(LangPref::Ru), Box::new(backend.clone()), Arc::new(|| {}));
     let mut p = rt.state().prefs.clone();
     p.output_device = Some("USB DAC".into());
     rt.send(Command::SetPrefs(Box::new(p)));

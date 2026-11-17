@@ -58,14 +58,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
+use nikgob_core::i18n::{Locale, PerLocale, TileStatic, home_recs_in, tracks_count_in};
 use nikgob_core::model::{ArtistId, EventContext, ReleaseId, TrackId, UnixMs};
 use nikgob_core::streaming::{RemoteId, StreamTrack};
 use nikgob_library::{Library, now_ms};
 use nikgob_recs::{
-    Catalog, DAYLIST_LEN, DailyParams, DayPart, DiscoveryFilter, Ended, FEATURE_VERSION, Item, ModelInput, Mood,
+    Axes, Catalog, DAYLIST_LEN, DailyParams, DayPart, DiscoveryFilter, Ended, FEATURE_VERSION, Item, ModelInput, Mood,
     NewTrack, Pick, RadioParams, RadioState as Engine, Reason, Recs, SONGTYPE_RULES, ServiceSuggestions, Session, SongInput,
-    SongTypes, StyleMix, TasteInput, TrackInfo, UserModel, VectorIndex, Weights, album_key, artist_key, daylist_title,
-    match_suggestions, song_key, stream_song_key, style_words,
+    SongTypes, StyleMix, TasteInput, TrackInfo, UserModel, VectorIndex, Weights, album_key, artist_key, daylist_title_in,
+    match_suggestions, song_key, stream_song_key, style_words_in,
 };
 use nikgob_view::{self as v, Command};
 use serde::{Deserialize, Serialize};
@@ -227,6 +228,22 @@ pub(crate) enum CoverRef {
     Web(String),
 }
 
+/// A style mix with its artist names for synchronous in-memory relocalization.
+pub(crate) struct StyleHome {
+    pub mix: StyleMix,
+    pub artist_names: Vec<String>,
+    pub title: String,
+    pub subtitle: String,
+}
+
+impl StyleHome {
+    /// Updates `title` and `subtitle` for `loc` synchronously in memory.
+    pub fn relocalize(&mut self, loc: Locale) {
+        self.title = style_title(&self.artist_names, self.mix.artists.len(), loc);
+        self.subtitle = style_subtitle(&self.mix, loc);
+    }
+}
+
 /// The home's picks of one build.
 pub(crate) struct RecHome {
     /// The local day they are for (`YYYY-MM-DD`).
@@ -242,8 +259,8 @@ pub(crate) struct RecHome {
     /// The six moods in the order of the day part, with covers (empty
     /// without analysis).
     pub moods: Vec<(Mood, Vec<ReleaseId>)>,
-    /// The style mixes with their titles and subtitles.
-    pub styles: Vec<(StyleMix, String, String)>,
+    /// The style mixes with their titles, subtitles, and metadata.
+    pub styles: Vec<StyleHome>,
     /// The part of the day the daylist is for ([`daylist_key`]).
     pub daylist_key: String,
     /// `None` with an empty library.
@@ -254,6 +271,8 @@ pub(crate) struct RecHome {
     pub lanes: Vec<lanes::LaneHome>,
     /// The taste profiles «Смешать с…» offers.
     pub blend_profiles: Vec<v::BlendProfile>,
+    /// All localized titles for each profile in `blend_profiles`.
+    blend_profile_titles: Vec<(u32, lanes::PerLocale<String>)>,
     /// The mix tiles of the card at the top, picked only
     /// while the app has the card ([`v::HOME_CARD`]); not on the page until
     /// the card comes back redesigned.
@@ -261,18 +280,72 @@ pub(crate) struct RecHome {
     pub top: Vec<top::TopMixHome>,
 }
 
+impl RecHome {
+    /// Returns [`v::BlendProfile`]s rendered in `loc` without touching SQLite.
+    pub fn blend_profiles_in(&self, loc: Locale) -> Vec<v::BlendProfile> {
+        self.blend_profiles
+            .iter()
+            .map(|p| {
+                let title = self
+                    .blend_profile_titles
+                    .iter()
+                    .find(|(k, _)| *k == p.key)
+                    .map_or_else(|| p.title.clone(), |(_, t)| t.get(loc).clone());
+                v::BlendProfile { key: p.key, title }
+            })
+            .collect()
+    }
+
+    /// Recomputes every visible localized string in memory (< 0.2 ms, no I/O).
+    pub fn relocalize(&mut self, loc: Locale) {
+        if let Some(d) = &mut self.daylist {
+            d.relocalize(loc);
+        }
+        for t in &mut self.tiles {
+            t.relocalize(loc);
+        }
+        for l in &mut self.lanes {
+            l.relocalize(loc);
+        }
+        for s in &mut self.styles {
+            s.relocalize(loc);
+        }
+        for p in &mut self.blend_profiles {
+            if let Some((_, titles)) = self.blend_profile_titles.iter().find(|(k, _)| *k == p.key) {
+                p.title.clone_from(titles.get(loc));
+            }
+        }
+    }
+}
+
 /// The daylist of the home.
 pub(crate) struct DaylistHome {
-    /// «НА ВЕЧЕР».
+    pub part: DayPart,
+    pub day: i64,
+    pub centre: Option<[f32; 3]>,
+    /// «НА ВЕЧЕР» / «EVENING».
     pub kicker: &'static str,
     pub title: String,
-    /// «25 треков».
+    /// «25 треков» / «25 tracks».
     pub subtitle: String,
     /// The radio that plays on after the picks.
     pub state: Engine,
     pub picks: Vec<Pick>,
     pub streams: HashMap<RemoteId, StreamTrack>,
     pub covers: Vec<CoverRef>,
+}
+
+impl DaylistHome {
+    /// Updates `kicker`, `title`, and `subtitle` synchronously for `loc`.
+    pub fn relocalize(&mut self, loc: Locale) {
+        self.kicker = daylist_kicker(self.part, loc);
+        self.subtitle = tracks_count(self.picks.len(), loc);
+        if let Some(c) = self.centre {
+            self.title = daylist_title_in(loc, Axes::from_array(c), self.part, self.day);
+        } else if let nikgob_recs::RadioSeed::Daylist { centre, .. } = &self.state.seed {
+            self.title = daylist_title_in(loc, Axes::from_array(*centre), self.part, self.day);
+        }
+    }
 }
 
 /// What a build hands back.
@@ -337,6 +410,8 @@ struct DaylistCache {
     /// [`daylist_key`].
     key: String,
     title: String,
+    #[serde(default)]
+    centre: Option<[f32; 3]>,
     state: Engine,
     picks: Vec<Pick>,
     streams: Vec<StreamTrack>,
@@ -418,16 +493,16 @@ pub(crate) struct RecsState {
     skip_x: Option<(TrackId, [f32; nikgob_recs::model::G])>,
     /// The mixes of the world's page open.
     world: Option<WorldMixes>,
-    /// Why a queue entry was picked, in its row's tooltip.
-    pub(crate) why: HashMap<u64, String>,
+    /// Why a queue entry was picked, in its row's tooltip (bilingual so language switches republish without recomputing).
+    pub(crate) why: HashMap<u64, nikgob_core::i18n::PerLocale<String>>,
     /// The number of this run of the app: the home's epochs are its
     /// ([`crate::home_v2::Epoch`]).
     run: u64,
 }
 
-/// The mixes of a world's page: its key, and each mix with the name the
-/// queue says and its tracks.
-type WorldMixes = (String, Vec<(v::WorldMix, String, Vec<TrackId>)>);
+/// The mixes of a world's page: its key, and each mix with its invariant
+/// Russian context key, localized queue display string, and tracks.
+type WorldMixes = (String, Vec<(v::WorldMix, String, String, Vec<TrackId>)>);
 
 impl RecsState {
     /// A discovery request is on its way.
@@ -547,53 +622,101 @@ pub(crate) fn from_view_mood(m: v::Mood) -> Mood {
     }
 }
 
-/// «A, B и другие» (two artists: «A и B»; one: its name).
-fn style_title(names: &[String], artists: usize) -> String {
+/// «A, B и другие» / «A, B & more» (two artists: «A и B» / «A & B»; one: its name).
+fn style_title(names: &[String], artists: usize, loc: Locale) -> String {
     match names {
-        [] => "Твой микс".to_owned(),
+        [] => home_recs_in(loc).your_mix.to_owned(),
         [a] => a.clone(),
-        [a, b, ..] if artists > 2 => format!("{a}, {b} и другие"),
-        [a, b, ..] => format!("{a} и {b}"),
+        [a, b, ..] if artists > 2 => match loc {
+            Locale::Ru => format!("{a}, {b} и другие"),
+            Locale::En => format!("{a}, {b} & more"),
+        },
+        [a, b, ..] => match loc {
+            Locale::Ru => format!("{a} и {b}"),
+            Locale::En => format!("{a} & {b}"),
+        },
     }
 }
 
-/// «25 треков».
-fn tracks_count(n: usize) -> String {
-    format!("{n} {}", crate::streams::plural(n, "трек", "трека", "треков"))
+/// «25 треков» / «25 tracks».
+fn tracks_count(n: usize, loc: Locale) -> String {
+    tracks_count_in(loc, n as u64)
+}
+
+/// Hero subtitle under «Твой микс» / «Your Mix».
+fn hero_subtitle(history: bool, n: usize, loc: Locale) -> String {
+    if history {
+        match loc {
+            Locale::Ru => format!("{} · любимое и похожее", tracks_count(n, loc)),
+            Locale::En => format!("{} · favorites and similar", tracks_count(n, loc)),
+        }
+    } else {
+        match loc {
+            Locale::Ru => "Слушай — микс соберётся из того, что нравится".to_owned(),
+            Locale::En => "Listen — your mix will form from what you enjoy".to_owned(),
+        }
+    }
 }
 
 /// What binds a style mix, under its artists' names: «по звуку: спокойное и
-/// мрачное», or «12 исполнителей похожего звука» for a style in the middle
-/// of everything.
-fn style_subtitle(m: &StyleMix) -> String {
-    match style_words(m.axes) {
-        Some(words) => format!("по звуку: {words}"),
+/// мрачное» / «sound: calm and dark», or «12 исполнителей похожего звука» /
+/// «12 artists with a similar sound» for a style in the middle of everything.
+fn style_subtitle(m: &StyleMix, loc: Locale) -> String {
+    match style_words_in(m.axes, loc) {
+        Some(words) => match loc {
+            Locale::Ru => format!("по звуку: {words}"),
+            Locale::En => format!("sound: {words}"),
+        },
         None => {
             let n = m.artists.len();
-            format!("{n} {} похожего звука", crate::streams::plural(n, "исполнитель", "исполнителя", "исполнителей"))
+            match loc {
+                Locale::Ru => format!("{n} {} похожего звука", crate::streams::plural(n, "исполнитель", "исполнителя", "исполнителей")),
+                Locale::En => {
+                    let unit = nikgob_core::i18n::plural_forms(loc, n as u64, &nikgob_core::i18n::common_in(loc).artists);
+                    format!("{n} {unit} with a similar sound")
+                }
+            }
         }
     }
 }
 
 /// What a mood card plays, in a few words.
-pub(crate) const fn mood_subtitle(m: v::Mood) -> &'static str {
-    match m {
-        v::Mood::Calm => "тихое и неспешное",
-        v::Mood::Energetic => "быстрое и громкое",
-        v::Mood::Dark => "минорное, тёмное по звуку",
-        v::Mood::Bright => "мажорное, светлое по звуку",
-        v::Mood::Focus => "ровное и негромкое",
-        v::Mood::Drive => "громкое и ровное, в дорогу",
+pub(crate) const fn mood_subtitle(m: v::Mood, loc: Locale) -> &'static str {
+    match loc {
+        Locale::Ru => match m {
+            v::Mood::Calm => "тихое и неспешное",
+            v::Mood::Energetic => "быстрое и громкое",
+            v::Mood::Dark => "минорное, тёмное по звуку",
+            v::Mood::Bright => "мажорное, светлое по звуку",
+            v::Mood::Focus => "ровное и негромкое",
+            v::Mood::Drive => "громкое и ровное, в дорогу",
+        },
+        Locale::En => match m {
+            v::Mood::Calm => "quiet and unhurried",
+            v::Mood::Energetic => "fast and loud",
+            v::Mood::Dark => "minor, dark in tone",
+            v::Mood::Bright => "major, bright in tone",
+            v::Mood::Focus => "steady and gentle",
+            v::Mood::Drive => "loud and steady, for the road",
+        },
     }
 }
 
 /// The daylist's kicker: the part of the day it is for.
-const fn daylist_kicker(part: DayPart) -> &'static str {
-    match part {
-        DayPart::Morning => "НА УТРО",
-        DayPart::Day => "НА ДЕНЬ",
-        DayPart::Evening => "НА ВЕЧЕР",
-        DayPart::Night => "НА НОЧЬ",
+const fn daylist_kicker(part: DayPart, loc: Locale) -> &'static str {
+    match loc {
+        Locale::Ru => match part {
+            DayPart::Morning => "НА УТРО",
+            DayPart::Day => "НА ДЕНЬ",
+            DayPart::Evening => "НА ВЕЧЕР",
+            DayPart::Night => "НА НОЧЬ",
+        },
+        Locale::En => match part {
+            DayPart::Morning => "MORNING",
+            DayPart::Day => "DAYTIME",
+            DayPart::Evening => "EVENING",
+            DayPart::Night => "NIGHT",
+        },
     }
 }
 
@@ -647,6 +770,7 @@ struct BuildInput {
     lib: Library,
     index: SoundIndex,
     day: String,
+    locale: Locale,
     /// The home's epoch: «Миксы для тебя» are its.
     epoch: crate::home_v2::Epoch,
     utc_offset_min: i32,
@@ -729,6 +853,7 @@ pub(crate) struct ReadExtra {
     pub background_less: bool,
     pub split_by_sound: bool,
     pub names: v::ProfileNames,
+    pub locale: Locale,
     /// The graph of similar music: used at all, the personal graph, the
     /// library as the taste while the history is short.
     pub graph: bool,
@@ -750,6 +875,7 @@ impl ReadExtra {
             background_less: prefs.background_counts_less,
             split_by_sound: prefs.profiles_split,
             names: prefs.profile_names,
+            locale: prefs.resolved_locale(),
             graph: prefs.graph_use,
             personal_graph: prefs.graph_personal,
             library_prior: prefs.library_as_taste,
@@ -1044,7 +1170,7 @@ fn read_parts(
     {
         log::warn!("recs: cannot keep the profiles: {e}");
     }
-    log_profiles(&model, &tiles_input, &names, extra.names);
+    log_profiles(&model, &tiles_input, &names, extra.names, extra.locale);
     let artist_affinity: HashMap<String, f32> = model
         .taste
         .all_artist_affinities()
@@ -1416,10 +1542,10 @@ pub(crate) fn whole(plays: &[nikgob_recs::Play]) -> Vec<bool> {
 /// of them all, then each, the largest share first — its name and artists,
 /// its share of the recent plays, how much of it is background, three of
 /// its best loved songs; and how the user listens.
-fn log_profiles(model: &UserModel, tiles: &nikgob_recs::TilesInput, names: &HashMap<ArtistId, String>, style: v::ProfileNames) {
+fn log_profiles(model: &UserModel, tiles: &nikgob_recs::TilesInput, names: &HashMap<ArtistId, String>, style: v::ProfileNames, loc: Locale) {
     log::info!("{}", listening_line(model));
-    let lines = profile_lines(model, tiles, names, style);
-    let short: Vec<String> = profile_order(model).into_iter().map(|j| format!("{} {:.2}", profile_name(model, names, style, j).0, model.profile_share.get(j).copied().unwrap_or(0.0))).collect();
+    let lines = profile_lines(model, tiles, names, style, loc);
+    let short: Vec<String> = profile_order(model).into_iter().map(|j| format!("{} {:.2}", profile_name(model, names, style, loc, j).0, model.profile_share.get(j).copied().unwrap_or(0.0))).collect();
     let born = model.profiles.list.iter().filter(|p| !p.visible).count();
     log::info!("profiles: {} ({}), not shown yet {born}", model.profiles.len(), short.join(", "));
     for line in lines {
@@ -1450,17 +1576,17 @@ fn profile_order(model: &UserModel) -> Vec<usize> {
     order
 }
 
-/// The name and the subtitle of profile `j`.
-fn profile_name(model: &UserModel, names: &HashMap<ArtistId, String>, style: v::ProfileNames, j: usize) -> (String, String) {
+/// The name and the subtitle of profile `j` in `loc`.
+fn profile_name(model: &UserModel, names: &HashMap<ArtistId, String>, style: v::ProfileNames, loc: Locale, j: usize) -> (String, String) {
     let style = match style {
         v::ProfileNames::Kind => nikgob_recs::profiles::NameStyle::Kind,
         v::ProfileNames::Artists => nikgob_recs::profiles::NameStyle::Artists,
     };
-    model.profiles.name(j, style, &|a| names.get(&a).cloned())
+    model.profiles.name_in(j, style, loc, &|a| names.get(&a).cloned())
 }
 
 /// [`log_profiles`]' lines of each profile.
-pub(crate) fn profile_lines(model: &UserModel, tiles: &nikgob_recs::TilesInput, names: &HashMap<ArtistId, String>, style: v::ProfileNames) -> Vec<String> {
+pub(crate) fn profile_lines(model: &UserModel, tiles: &nikgob_recs::TilesInput, names: &HashMap<ArtistId, String>, style: v::ProfileNames, loc: Locale) -> Vec<String> {
     let now = model.now();
     let mut out = Vec::new();
     for j in profile_order(model) {
@@ -1472,7 +1598,7 @@ pub(crate) fn profile_lines(model: &UserModel, tiles: &nikgob_recs::TilesInput, 
             .take(3)
             .filter_map(|&i| tiles.facts.get(&model.id(i)).map(|f| format!("«{}» {}", f.title, f.artist)))
             .collect();
-        let (name, sub) = profile_name(model, names, style, j);
+        let (name, sub) = profile_name(model, names, style, loc, j);
         out.push(format!(
             "{name} ({sub}): {:?}, key {}{}, {:.0} % of the plays, background {:.2}, {} members; {}",
             p.lane,
@@ -1650,7 +1776,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
     let daily_covers = covers_of(snap, &daily, &daily_streams);
     let (daylist_key, daylist) = build_daylist(snap, input);
     let tiles = tiles::build(snap, input, tiles_input);
-    let (lanes, blend_profiles) = lanes::build(snap, input, tiles_input);
+    let built_lanes = lanes::build(snap, input, tiles_input);
     let top = if v::HOME_CARD { top::build(snap, input, tiles_input, None) } else { Vec::new() };
 
     // Moods: covers of the releases most liked among each mood's top.
@@ -1697,9 +1823,9 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
                 .iter()
                 .filter_map(|a| lib.get_artist(*a).ok().flatten().map(|a| a.name))
                 .collect();
-            let title = style_title(&names, m.artists.len());
-            let subtitle = style_subtitle(&m);
-            (m, title, subtitle)
+            let title = style_title(&names, m.artists.len(), input.locale);
+            let subtitle = style_subtitle(&m, input.locale);
+            StyleHome { mix: m, artist_names: names, title, subtitle }
         })
         .collect();
 
@@ -1715,8 +1841,9 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
         daylist_key,
         daylist,
         tiles,
-        lanes,
-        blend_profiles,
+        lanes: built_lanes.lanes,
+        blend_profiles: built_lanes.blend_profiles,
+        blend_profile_titles: built_lanes.blend_titles,
         top,
     }
 }
@@ -1725,6 +1852,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
 /// unless «Обновить» or a history appeared since.
 fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<DaylistHome>) {
     let lib = &input.lib;
+    let loc = input.locale;
     let history = snap.model.taste.has_history();
     let (part, day, key) = daylist_key(input.now, input.utc_offset_min);
     let cached = cache_read::<DaylistCache>(lib, DAYLIST_KEY)
@@ -1747,7 +1875,8 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
                 .collect();
             let c = DaylistCache {
                 key: key.clone(),
-                title: daylist_title(centre.axes, part, day),
+                title: daylist_title_in(loc, centre.axes, part, day),
+                centre: Some(centre.axes.to_array()),
                 state,
                 picks,
                 streams,
@@ -1764,12 +1893,23 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
     if picks.is_empty() {
         return (key, None);
     }
+    let centre = c.centre.or_else(|| match &c.state.seed {
+        nikgob_recs::RadioSeed::Daylist { centre, .. } => Some(*centre),
+        _ => None,
+    });
+    let title = match centre {
+        Some(axes) => daylist_title_in(loc, Axes::from_array(axes), part, day),
+        None => c.title,
+    };
     // The number of songs only: no «what it is made of», no «until 23:00».
-    let subtitle = tracks_count(picks.len());
+    let subtitle = tracks_count(picks.len(), loc);
     let covers = covers_of(snap, &picks, &streams);
     let home = DaylistHome {
-        kicker: daylist_kicker(part),
-        title: c.title,
+        part,
+        day,
+        centre,
+        kicker: daylist_kicker(part, loc),
+        title,
         subtitle,
         state: c.state,
         picks,
@@ -1783,6 +1923,7 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
 struct LaneParts {
     key: v::MixKey,
     title: String,
+    mix_title: Option<v::MixTitle>,
     short: Vec<String>,
     artists: Vec<String>,
     /// The new songs' artists.
@@ -1801,13 +1942,14 @@ struct LaneParts {
 /// copies of the build's picks, so they can be resolved on another thread
 /// (the home's builder, [`crate::home_build`]).
 pub(crate) struct HomeParts {
+    pub(crate) locale: Locale,
     hero: Option<(String, String, Vec<CoverRef>)>,
     /// The library tracks of «Твой микс», read when resolved.
     mix: Vec<TrackId>,
     /// Kicker, title, subtitle, covers.
     daylist: Option<(String, String, String, Vec<CoverRef>)>,
-    /// Id, kicker, title, subtitle, covers.
-    tiles: Vec<(v::MixId, String, String, String, Vec<CoverRef>)>,
+    /// Id, kicker, title, subtitle, covers, mix_title.
+    tiles: Vec<(v::MixId, String, String, String, Vec<CoverRef>, Option<v::MixTitle>)>,
     moods: Vec<(v::Mood, Vec<CoverRef>)>,
     styles: Vec<(String, String, Vec<CoverRef>)>,
     discover: Vec<v::StreamTrackRow>,
@@ -1823,9 +1965,21 @@ pub(crate) struct HomeParts {
 }
 
 impl HomeParts {
-    /// The parts of `home` (none before the first build). It reads nothing:
-    /// the rows are read when the parts are resolved.
+    /// The parts of `home` (none before the first build) in the active locale. It reads
+    /// nothing: the rows are read when the parts are resolved.
+    #[cfg(test)]
     pub(crate) fn of(
+        home: Option<&RecHome>,
+        discover: Vec<v::StreamTrackRow>,
+        new_releases: Vec<v::StreamAlbumCard>,
+        local_only: bool,
+        card: bool,
+    ) -> Self {
+        Self::of_in(nikgob_core::i18n::locale(), home, discover, new_releases, local_only, card)
+    }
+
+    pub(crate) fn of_in(
+        loc: Locale,
         home: Option<&RecHome>,
         discover: Vec<v::StreamTrackRow>,
         new_releases: Vec<v::StreamAlbumCard>,
@@ -1834,6 +1988,7 @@ impl HomeParts {
     ) -> Self {
         let Some(h) = home else {
             return Self {
+                locale: loc,
                 hero: None,
                 mix: Vec::new(),
                 daylist: None,
@@ -1850,12 +2005,8 @@ impl HomeParts {
             };
         };
         let n = h.daily.len();
-        let subtitle = if h.history {
-            format!("{} · любимое и похожее", tracks_count(n))
-        } else {
-            "Слушай — микс соберётся из того, что нравится".to_owned()
-        };
-        let hero = (n > 0).then(|| ("Твой микс".to_owned(), subtitle, h.daily_covers.clone()));
+        let subtitle = hero_subtitle(h.history, n, loc);
+        let hero = (n > 0).then(|| (home_recs_in(loc).your_mix.to_owned(), subtitle, h.daily_covers.clone()));
         let mix = h
             .daily
             .iter()
@@ -1871,7 +2022,16 @@ impl HomeParts {
         let tiles = h
             .tiles
             .iter()
-            .map(|t| (t.mix_id(), t.kicker().to_owned(), t.title.clone(), t.duration.clone(), t.covers.clone()))
+            .map(|t| {
+                (
+                    t.mix_id(),
+                    t.kicker(loc).to_owned(),
+                    t.title.clone(),
+                    t.duration.clone(),
+                    t.covers.clone(),
+                    Some(t.mix_title()),
+                )
+            })
             .collect();
         let lanes = h
             .lanes
@@ -1899,6 +2059,7 @@ impl HomeParts {
                 LaneParts {
                     key: l.key,
                     title: l.title.clone(),
+                    mix_title: lane_mix_title(l.key, l.ru_title(), l.side_flavor, Some(&l.labels)),
                     short: l.short.clone(),
                     artists: l.artists.clone(),
                     new_artists,
@@ -1919,9 +2080,10 @@ impl HomeParts {
         let styles = h
             .styles
             .iter()
-            .map(|(m, title, subtitle)| (title.clone(), subtitle.clone(), m.covers.iter().copied().map(CoverRef::Release).collect()))
+            .map(|s| (s.title.clone(), s.subtitle.clone(), s.mix.covers.iter().copied().map(CoverRef::Release).collect()))
             .collect();
         Self {
+            locale: loc,
             hero,
             mix,
             daylist,
@@ -1977,16 +2139,19 @@ impl HomeParts {
                 .take(COVERS)
                 .collect()
         };
+        let loc = self.locale;
         let hero = self.hero.map(|(title, subtitle, c)| v::MixCard {
             id: v::MixId::Daily,
             title,
-            kicker: "НА СЕГОДНЯ".to_owned(),
+            mix_title: Some(v::MixTitle::YourMix),
+            kicker: home_recs_in(loc).kicker_for_today.to_owned(),
             subtitle,
             covers: covers(c),
         });
         let daylist = self.daylist.map(|(kicker, title, subtitle, c)| v::MixCard {
             id: v::MixId::Daylist,
             title,
+            mix_title: None,
             kicker,
             subtitle,
             covers: covers(c),
@@ -1994,9 +2159,10 @@ impl HomeParts {
         let tiles: Vec<_> = self
             .tiles
             .into_iter()
-            .map(|(id, kicker, title, subtitle, c)| v::MixCard {
+            .map(|(id, kicker, title, subtitle, c, mix_title)| v::MixCard {
                 id,
                 title,
+                mix_title,
                 kicker,
                 subtitle,
                 covers: covers(c),
@@ -2007,9 +2173,10 @@ impl HomeParts {
             .into_iter()
             .map(|(m, c)| v::MixCard {
                 id: v::MixId::Mood(m),
-                title: m.title().to_owned(),
+                title: m.title_in(loc).to_owned(),
+                mix_title: Some(v::MixTitle::Mood(m.kind())),
                 kicker: String::new(),
-                subtitle: mood_subtitle(m).to_owned(),
+                subtitle: mood_subtitle(m, loc).to_owned(),
                 covers: covers(c),
             })
             .collect();
@@ -2020,6 +2187,7 @@ impl HomeParts {
             .map(|(i, (title, subtitle, c))| v::MixCard {
                 id: v::MixId::Style(i as u8),
                 title,
+                mix_title: None,
                 kicker: String::new(),
                 subtitle,
                 covers: covers(c),
@@ -2036,12 +2204,13 @@ impl HomeParts {
             .map(|(((l, covers), rows), new_tracks)| v::LaneCard {
                 key: l.key,
                 title: l.title,
+                mix_title: l.mix_title,
                 short_titles: l.short,
                 artists: l.artists,
                 new_artists: l.new_artists,
                 covers,
                 new_cover: l.new_cover.map(v::Cover::web),
-                tracks: rows.iter().map(|t| res.track(t)).collect(),
+                tracks: rows.iter().map(|t| res.track_in(t, loc)).collect(),
                 new_tracks,
                 blend_base: l.blend_base,
                 queue: None,
@@ -2050,9 +2219,10 @@ impl HomeParts {
             .collect();
         let blend_profiles = self.blend_profiles;
         let history = self.history;
-        let mix: Option<Vec<_>> = (!mix_rows.is_empty()).then(|| mix_rows.iter().map(|t| res.track(t)).collect());
+        let mix: Option<Vec<_>> = (!mix_rows.is_empty()).then(|| mix_rows.iter().map(|t| res.track_in(t, loc)).collect());
         let (discover, new_releases) = (self.discover, self.new_releases);
         RecsFill {
+            locale: loc,
             hero,
             daylist,
             tiles,
@@ -2070,10 +2240,54 @@ impl HomeParts {
     }
 }
 
+pub(super) fn lane_mix_title(
+    key: v::MixKey,
+    ru_title: &str,
+    side_flavor: Option<nikgob_recs::mixes::SideFlavor>,
+    labels: Option<&lanes::PerLocale<lanes::LaneText>>,
+) -> Option<v::MixTitle> {
+    match key {
+        v::MixKey::Daily(0) => Some(v::MixTitle::Daily),
+        v::MixKey::Everything => Some(v::MixTitle::Everything),
+        v::MixKey::Calm | v::MixKey::Lively => side_flavor
+            .map(|flavor| v::MixTitle::Side {
+                calm: key == v::MixKey::Calm,
+                flavor,
+            })
+            .or_else(|| labels.map(|l| v::MixTitle::Localized(PerLocale::init(|loc| l.get(loc).title.clone())))),
+        v::MixKey::OnRepeat => Some(v::MixTitle::OnRepeat),
+        v::MixKey::Liked => Some(v::MixTitle::Liked),
+        v::MixKey::Part(p) => Some(v::MixTitle::DayPart(p)),
+        v::MixKey::Genre(g) => Some(v::MixTitle::Genre(g)),
+        v::MixKey::World(w) => match v::MixTitle::from_legacy(ru_title) {
+            mt @ v::MixTitle::World { .. } => Some(mt),
+            _ => Some(v::MixTitle::World { world: None, mix: w.kind() }),
+        },
+        _ => match v::MixTitle::from_legacy(ru_title) {
+            v::MixTitle::Custom(_) => {
+                labels.map(|l| v::MixTitle::Localized(PerLocale::init(|loc| l.get(loc).title.clone())))
+            }
+            mt => Some(mt),
+        },
+    }
+}
+
+pub(super) fn play_lane_mix_title(
+    key: v::MixKey,
+    ru_title: &str,
+    display_title: &str,
+    side_flavor: Option<nikgob_recs::mixes::SideFlavor>,
+    labels: Option<&lanes::PerLocale<lanes::LaneText>>,
+) -> v::MixTitle {
+    lane_mix_title(key, ru_title, side_flavor, labels)
+        .unwrap_or_else(|| v::MixTitle::Custom(display_title.to_owned()))
+}
+
 /// The recommendation parts of the home view resolved ([`HomeParts::resolve`]):
 /// what fills the page, made off the state lock and, by the home's builder,
 /// off the worker's thread.
 pub(crate) struct RecsFill {
+    locale: Locale,
     hero: Option<v::MixCard>,
     daylist: Option<v::MixCard>,
     tiles: Vec<v::MixCard>,
@@ -2112,7 +2326,7 @@ impl RecsFill {
         }
         dedupe_rows(home);
         if self.card {
-            card_first(home);
+            card_first(home, self.locale);
         }
     }
 }
@@ -2160,7 +2374,7 @@ pub(crate) fn only_downloaded(home: &mut v::HomeView) {
 /// as its third card, and what the world opened on shows (its albums on
 /// the tiles and the stage, that new album) do not show again below; the
 /// next in line takes their place.
-pub(crate) fn card_first(home: &mut v::HomeView) {
+pub(crate) fn card_first(home: &mut v::HomeView, loc: Locale) {
     if home.worlds.is_empty() {
         return;
     }
@@ -2180,7 +2394,11 @@ pub(crate) fn card_first(home: &mut v::HomeView) {
                 }
                 let card = v::WorldCard {
                     icon: v::WorldIcon::Album,
-                    kicker: "Новый альбом".into(),
+                    kicker: match loc {
+                        Locale::Ru => "Новый альбом",
+                        Locale::En => "New Album",
+                    }
+                    .into(),
                     title: name,
                     go: v::WorldGo::Stream(a.remote.clone()),
                 };
@@ -2275,6 +2493,7 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
         lib: lib.clone(),
         index: index.clone(),
         day,
+        locale: prefs.resolved_locale(),
         epoch: epoch.clone(),
         utc_offset_min,
         now: recs_now(),
@@ -2304,8 +2523,8 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
     visit.profiles = Some(built.snap.profiles.clone());
     visit.epoch = epoch;
 
-    let mut home = res.home(&crate::home::build_with(lib, &visit));
-    HomeParts::of(Some(h), Vec::new(), Vec::new(), prefs.mixes_downloaded_only, prefs.home_card_shown()).apply(&mut home, &mut res);
+    let mut home = res.home_in(&crate::home::build_with(lib, &visit), prefs.resolved_locale());
+    HomeParts::of_in(prefs.resolved_locale(), Some(h), Vec::new(), Vec::new(), prefs.mixes_downloaded_only, prefs.home_card_shown()).apply(&mut home, &mut res);
     Ok(HomePreview {
         catalog: built.snap.catalog.len(),
         vectors,
@@ -2454,11 +2673,12 @@ impl ModelPreview {
         let (part, _, _) = daylist_key(recs_now(), local_day().1);
         let recs = self.snap.recs();
         let name = self.world_title(world).unwrap_or_default();
+        let loc = nikgob_core::i18n::locale();
         let title = |i: usize| lib.get_track(self.snap.model.id(i)).ok().flatten().map(|t| t.title);
         recs.world_mixes(world, part)
             .into_iter()
             .map(|m| {
-                let why = recs.why_world_mix(&m, &name, &title);
+                let why = recs.why_world_mix(&m, &name, &title, loc);
                 (m.kind, m.tracks.iter().map(|&i| self.snap.model.id(i)).collect(), why)
             })
             .collect()
@@ -2467,7 +2687,7 @@ impl ModelPreview {
     /// Why a radio's pick `p` after `before` ([`nikgob_recs::explain`]).
     pub fn why_pick(&self, lib: &Library, p: &Pick, before: Option<TrackId>) -> Option<String> {
         let title = |t: TrackId| lib.get_track(t).ok().flatten().map(|t| t.title);
-        self.snap.recs().why_pick(p, before, &title)
+        self.snap.recs().why_pick(p, before, &title, nikgob_core::i18n::locale())
     }
 
     /// The track suits the background ([`background_fit`]).
@@ -2479,7 +2699,7 @@ impl ModelPreview {
     pub fn profile_name(&self, lib: &Library, id: TrackId) -> Option<String> {
         let names: HashMap<ArtistId, String> = lib.artist_names().unwrap_or_default().into_iter().collect();
         let j = self.snap.catalog.position(id).and_then(|i| self.snap.model.profile_at(i))?;
-        Some(profile_name(&self.snap.model, &names, v::ProfileNames::Kind, j).0)
+        Some(profile_name(&self.snap.model, &names, v::ProfileNames::Kind, nikgob_core::i18n::locale(), j).0)
     }
 
     /// The next `n` of a radio.
@@ -2516,7 +2736,7 @@ impl ModelPreview {
         let rows = lib.rec_tracks().unwrap_or_default();
         let events = lib.listening_events().unwrap_or_default();
         let tiles = tiles::input(lib, &rows, &events, names.clone());
-        profile_lines(&self.snap.model, &tiles, &names, v::ProfileNames::Kind)
+        profile_lines(&self.snap.model, &tiles, &names, v::ProfileNames::Kind, nikgob_core::i18n::locale())
     }
 
     /// How the user listens ([`Listening`](nikgob_recs::listening::Listening)), in a line.
@@ -2532,10 +2752,11 @@ impl ModelPreview {
         let model = &self.snap.model;
         let fit = &self.snap.background;
         let home = model.home_profiles(slots, nikgob_recs::profiles::BG_CARDS, |i| fit[i]);
+        let loc = nikgob_core::i18n::locale();
         profile_order(model)
             .into_iter()
             .map(|j| {
-                let (name, _) = profile_name(model, &names, v::ProfileNames::Kind, j);
+                let (name, _) = profile_name(model, &names, v::ProfileNames::Kind, loc, j);
                 let bg: Vec<usize> = home.background[j].iter().map(Vec::len).collect();
                 format!("{name}: {} cards{}", home.cards[j], if bg.is_empty() { String::new() } else { format!(", «Фон» of {bg:?} tracks") })
             })
@@ -2622,11 +2843,11 @@ impl Worker {
     /// their rows: the home's builder reads those, resolves the covers and
     /// makes the new-music rows ([`Self::discover_input`]).
     pub(crate) fn recs_home_parts(&self) -> HomeParts {
-        let (local_only, card) = {
+        let (loc, local_only, card) = {
             let p = &self.state.read().prefs;
-            (p.mixes_downloaded_only, p.home_card_shown())
+            (p.resolved_locale(), p.mixes_downloaded_only, p.home_card_shown())
         };
-        HomeParts::of(self.recs.home.as_ref(), Vec::new(), Vec::new(), local_only, card)
+        HomeParts::of_in(loc, self.recs.home.as_ref(), Vec::new(), Vec::new(), local_only, card)
     }
 
     /// Draws the recommendation parts of the home page again (built off
@@ -2643,7 +2864,8 @@ impl Worker {
         }
         let key = m.key;
         self.patch_home(move |home| home.lanes.retain(|l| l.key != key));
-        self.toast(format!("Не буду предлагать «{}»", m.title), Some(("Отменить".into(), Command::SetPref(v::PrefPatch::ShowMix(m.key)))));
+        let undo = self.undo_action(Command::SetPref(v::PrefPatch::ShowMix(m.key)));
+        self.toast_info(format!("Не буду предлагать «{}»", m.title), Some(undo));
     }
 
     /// «Миксы для тебя» scrolled to its end: [`ROW_MORE`] more cards, built
@@ -2876,6 +3098,7 @@ impl Worker {
             lib: self.lib.clone(),
             index: self.analysis.index().clone(),
             day,
+            locale: prefs.resolved_locale(),
             epoch: self.home_epoch(),
             utc_offset_min,
             now: recs_now(),
@@ -2938,13 +3161,15 @@ impl Worker {
         self.recs.built_at = Some(Instant::now());
         self.recs.build_took = self.recs.build_began.take().map_or(Duration::ZERO, |t| t.elapsed());
         let rerank = match b {
-            Ok(b) => {
+            Ok(mut b) => {
                 let rerank = b.rerank;
                 self.recs.built_index_len = b.index_len;
                 let built = b.snap.model.weights;
                 if self.recs.weights.is_none_or(|w| w.version != built.version || w.next.seen + w.skip.seen <= built.next.seen + built.skip.seen) {
                     self.recs.weights = None;
                 }
+                let loc = self.state.read().prefs.resolved_locale();
+                b.home.relocalize(loc);
                 // The run's first, or a new epoch's: the home's shortcuts
                 // and «Слушать снова» come with its mixes (the first drawn
                 // again with the taste profiles they were drawn without).
@@ -2983,6 +3208,43 @@ impl Worker {
         }
         self.discover_tick();
         self.turn.lap("discover");
+    }
+
+    /// Synchronously relocalizes cached home recommendations and active wave
+    /// scenes after a UI language change (`< 0.2 ms`, no SQLite queries).
+    pub(crate) fn relocalize_recs(&mut self, loc: Locale) {
+        if let Some(h) = self.recs.home.as_mut() {
+            h.relocalize(loc);
+        }
+        if let Some(snap) = self.snapshot() {
+            let needs_scenes = self.recs.radio.scenes.as_ref().is_none_or(|(w, cached_loc, _)| {
+                *cached_loc != loc || !std::sync::Weak::ptr_eq(w, &Arc::downgrade(&snap))
+            });
+            if needs_scenes {
+                let profiles = self.recs.home.as_ref().map(|h| h.blend_profiles_in(loc)).unwrap_or_default();
+                let list = wave::scenes(&snap, &profiles, loc);
+                self.recs.radio.scenes = Some((Arc::downgrade(&snap), loc, list));
+            }
+        }
+        let mut active_changed = self.relocalize_active_radio(loc);
+        if !active_changed
+            && self.recs.radio.run_id().is_none()
+            && self.play_context == EventContext::HomeSection
+            && let Some(ru_name) = self.play_context_id.as_deref().and_then(|id| id.strip_prefix("mix:"))
+            && let Some(h) = self.recs.home.as_ref()
+        {
+            if let Some(l) = h.lanes.iter().find(|l| l.ru_title() == ru_name) {
+                let mt = play_lane_mix_title(l.key, l.ru_title(), &l.title, l.side_flavor, Some(&l.labels));
+                self.queue.set_origin(v::QueueOrigin::Mix(mt));
+                active_changed = true;
+            } else if let Some(t) = h.tiles.iter().find(|t| t.ru_title() == ru_name) {
+                self.queue.set_origin(v::QueueOrigin::Mix(t.mix_title()));
+                active_changed = true;
+            }
+        }
+        if active_changed || self.wave_seed().is_some() || !self.recs.why.is_empty() {
+            self.publish_player();
+        }
     }
 
     /// Test hook: the online metadata the graph's pass asks.
@@ -3026,9 +3288,8 @@ impl Worker {
         match id {
             v::MixId::Daily => self.play_daily(),
             v::MixId::Mood(m) => {
-                let m = from_view_mood(m);
-                let seed = nikgob_recs::RadioSeed::Mood(m);
-                self.start_radio(seed, m.title().to_owned(), EventContext::HomeSection, None);
+                let seed = nikgob_recs::RadioSeed::Mood(from_view_mood(m));
+                self.start_radio(seed, v::RadioTitle::Mix(v::MixTitle::Mood(m.kind())), EventContext::HomeSection, None);
             }
             v::MixId::Style(i) => {
                 let style = self
@@ -3036,44 +3297,67 @@ impl Worker {
                     .home
                     .as_ref()
                     .and_then(|h| h.styles.get(usize::from(i)))
-                    .map(|(m, title, _)| (m.seed(), title.clone()));
+                    .map(|s| (s.mix.seed(), s.artist_names.clone(), s.mix.artists.len()));
                 match style {
-                    Some((seed, title)) => self.start_radio(seed, title, EventContext::HomeSection, None),
-                    None => self.toast("Этого микса уже нет — главная обновилась", None),
+                    Some((seed, artists, total_artists)) => {
+                        let mt = v::MixTitle::Localized(PerLocale::init(|loc| style_title(&artists, total_artists, loc)));
+                        self.start_radio(seed, v::RadioTitle::Mix(mt), EventContext::HomeSection, None);
+                        self.set_run_mix_naming(radio::ActiveMixNaming::Style { artists, total_artists });
+                    }
+                    None => self.toast_err(nikgob_core::i18n::errors_in(self.locale()).mix_gone_home, None),
                 }
             }
             v::MixId::Artist(a) => {
                 let name = self.lib.get_artist(a).ok().flatten().map_or_else(String::new, |a| a.name);
                 let seed = nikgob_recs::RadioSeed::Artist(a);
-                self.start_radio(seed, format!("Радио · {name}"), EventContext::HomeSection, None);
+                self.start_radio(seed, v::RadioTitle::Seed(name), EventContext::HomeSection, None);
             }
             v::MixId::Discover => {
                 if self.state.read().prefs.mixes_downloaded_only {
-                    self.toast("Включено «Только скачанное» — нового сейчас нет", None);
+                    self.toast_err(nikgob_core::i18n::errors_in(self.locale()).downloaded_only_no_new, None);
                     return;
                 }
                 if self.discoveries().is_empty() {
-                    self.toast("Новое ещё ищется — загляни чуть позже", None);
+                    self.toast_err(nikgob_core::i18n::errors_in(self.locale()).discover_still_loading, None);
                     return;
                 }
                 let seed = nikgob_recs::RadioSeed::Discover;
-                self.start_radio(seed, "Новое для тебя".to_owned(), EventContext::HomeSection, None);
+                self.start_radio(seed, v::RadioTitle::Discover, EventContext::HomeSection, None);
             }
             v::MixId::Daylist => {
                 let daylist = self.recs.home.as_ref().and_then(|h| h.daylist.as_ref());
                 let Some(d) = daylist else {
-                    self.toast("Нечего играть", None);
+                    self.toast_nothing_to_play();
                     return;
                 };
-                let (state, picks, title) = (d.state.clone(), d.picks.clone(), d.title.clone());
+                let (state, picks, title, part, day) = (d.state.clone(), d.picks.clone(), d.title.clone(), d.part, d.day);
+                let centre = d.centre.or_else(|| match state.seed {
+                    nikgob_recs::RadioSeed::Daylist { centre, .. } => Some(centre),
+                    _ => None,
+                });
+                let mt = match centre {
+                    Some(c) => v::MixTitle::Localized(PerLocale::init(|loc| {
+                        daylist_title_in(loc, Axes::from_array(c), part, day)
+                    })),
+                    None => v::MixTitle::Custom(title),
+                };
                 let streams = d.streams.values().cloned().collect();
-                self.start_radio_picked(state, picks, streams, title, EventContext::HomeSection);
+                self.start_radio_picked(state, picks, streams, v::RadioTitle::Mix(mt), EventContext::HomeSection);
+                if let Some(centre) = centre {
+                    self.set_run_mix_naming(radio::ActiveMixNaming::Daylist { part, centre, day });
+                }
             }
             v::MixId::Lane(v::MixKey::World(kind)) => {
+                let world_title = self.state.read().world.as_ref().map(|w| w.world.title.clone());
                 let mix = self.recs.world.as_ref().and_then(|(_, m)| m.iter().find(|m| m.0 == kind));
-                match mix.map(|m| (m.1.clone(), m.2.iter().map(|&id| Pick { item: Item::Track(id), reason: Reason::Random }).collect::<Vec<_>>())) {
-                    Some((title, picks)) => self.play_picks(&picks, &HashMap::new(), &title),
-                    None => self.toast("Этого микса уже нет — страница мира обновилась", None),
+                match mix.map(|m| (m.1.clone(), m.3.iter().map(|&id| Pick { item: Item::Track(id), reason: Reason::Random }).collect::<Vec<_>>())) {
+                    Some((ru_title, picks)) => {
+                        let mt = world_title
+                            .map(|world| v::MixTitle::World { world: Some(world), mix: kind.kind() })
+                            .unwrap_or_else(|| v::MixTitle::World { world: None, mix: kind.kind() });
+                        self.play_picks(&picks, &HashMap::new(), &ru_title, mt);
+                    }
+                    None => self.toast_err(nikgob_core::i18n::errors_in(self.locale()).mix_gone_world, None),
                 }
             }
             v::MixId::Lane(key) => {
@@ -3082,24 +3366,29 @@ impl Worker {
                     p.mixes_with_new && !p.mixes_downloaded_only
                 };
                 let lane = self.recs.home.as_ref().and_then(|h| h.lanes.iter().find(|l| l.key == key));
-                match lane.map(|l| (l.picks(with_new), l.new.clone(), l.title.clone())) {
-                    Some((picks, new, title)) => {
+                match lane.map(|l| {
+                    let mt = play_lane_mix_title(key, l.ru_title(), &l.title, l.side_flavor, Some(&l.labels));
+                    (l.picks(with_new), l.new.clone(), l.ru_title().to_owned(), mt)
+                }) {
+                    Some((picks, new, ru_title, mt)) => {
                         let streams = new.into_iter().map(|t| (t.id.clone(), t)).collect();
-                        self.play_picks(&picks, &streams, &title);
+                        self.play_picks(&picks, &streams, &ru_title, mt);
                     }
-                    None => self.toast("Этого микса уже нет — главная обновилась", None),
+                    None => self.toast_err(nikgob_core::i18n::errors_in(self.locale()).mix_gone_home, None),
                 }
             }
             v::MixId::Tile(v::TileKind::Lottery) => self.play_lottery(),
-            v::MixId::Tile(kind) => match self.home_tile(kind).map(|t| (t.picks.clone(), t.title.clone())) {
-                Some((picks, title)) => self.play_picks(&picks, &HashMap::new(), &title),
-                None => self.toast("Этой подборки уже нет — главная обновилась", None),
+            v::MixId::Tile(kind) => match self.home_tile(kind).map(|t| (t.picks.clone(), t.ru_title(), t.mix_title())) {
+                Some((picks, ru_title, mt)) => {
+                    self.play_picks(&picks, &HashMap::new(), &ru_title, mt);
+                }
+                None => self.toast_err(nikgob_core::i18n::errors_in(self.locale()).tile_gone_home, None),
             },
         }
     }
 
     /// Keeps why each of `entries` was picked (`whys` beside them).
-    pub(crate) fn explain_entries(&mut self, entries: &[u64], whys: Vec<Option<String>>) {
+    pub(crate) fn explain_entries(&mut self, entries: &[u64], whys: Vec<Option<nikgob_core::i18n::PerLocale<String>>>) {
         for (e, why) in entries.iter().zip(whys) {
             if let Some(why) = why {
                 self.recs.why.insert(*e, why);
@@ -3117,7 +3406,10 @@ impl Worker {
         };
         let (part, _, _) = daylist_key(recs_now(), local_day().1);
         let token = nikgob_recs::world_token(&world.key);
-        let local_only = self.state.read().prefs.mixes_downloaded_only;
+        let (local_only, loc) = {
+            let p = &self.state.read().prefs;
+            (p.mixes_downloaded_only, p.resolved_locale())
+        };
         let started = Instant::now();
         let recs = snap.recs();
         let lib = &self.lib;
@@ -3133,7 +3425,7 @@ impl Worker {
                     nikgob_recs::WorldMixKind::Calm => v::WorldMix::Calm,
                     nikgob_recs::WorldMixKind::Moving => v::WorldMix::Moving,
                 };
-                let why = recs.why_world_mix(&m, &world.title, &title);
+                let why = recs.why_world_mix(&m, &world.title, &title, loc);
                 (kind, m.tracks.iter().map(|&i| snap.model.id(i)).collect(), why)
             })
             .collect();
@@ -3167,20 +3459,21 @@ impl Worker {
             count.sort_by(|a, b| b.1.cmp(&a.1));
             let artists: Vec<String> = count.into_iter().map(|c| c.0).collect();
             let covers = releases.into_iter().filter_map(|r| self.res.release_cover(r)).take(COVERS).collect();
-            let name = kind.title();
-            let mut rest = name.chars();
-            let lower: String = rest.next().map(|c| c.to_lowercase().chain(rest).collect()).unwrap_or_default();
-            let queue = format!("{}: {lower}", world.title);
-            kept.push((kind, queue.clone(), rows.iter().map(|t| t.id).collect()));
+            let name = kind.title_in(loc);
+            let mt = v::MixTitle::World { world: Some(world.title.clone()), mix: kind.kind() };
+            let ru_queue = mt.title_in(Locale::Ru).into_owned();
+            let queue = mt.title_in(loc).into_owned();
+            kept.push((kind, ru_queue, queue.clone(), rows.iter().map(|t| t.id).collect()));
             cards.push(v::LaneCard {
                 key: v::MixKey::World(kind),
                 title: name.to_owned(),
+                mix_title: Some(mt),
                 short_titles: Vec::new(),
                 artists,
                 new_artists: Vec::new(),
                 covers,
                 new_cover: None,
-                tracks: rows.iter().map(|t| self.res.track(t)).collect(),
+                tracks: rows.iter().map(|t| self.res.track_in(t, loc)).collect(),
                 new_tracks: Vec::new(),
                 blend_base: None,
                 queue: Some(queue),
@@ -3209,11 +3502,10 @@ impl Worker {
         let Some(snap) = self.recs.snap.clone() else { return };
         let picks = snap.recs().lottery(fastrand::u64(..));
         if picks.is_empty() {
-            self.toast("Нечего играть", None);
+            self.toast_nothing_to_play();
             return;
         }
-        let title = self.home_tile(v::TileKind::Lottery).map_or_else(|| "Лотерея".to_owned(), |t| t.title.clone());
-        self.play_picks(&picks, &HashMap::new(), &title);
+        self.play_picks(&picks, &HashMap::new(), TileStatic::Lottery.title_in(Locale::Ru), v::MixTitle::Tile(TileStatic::Lottery));
     }
 
     /// A tile of today's board.
@@ -3227,7 +3519,7 @@ impl Worker {
     /// of their own as playing them does.
     fn download_mix(&mut self, id: v::MixId) {
         let Some((picks, streams, _)) = self.day_mix(id) else {
-            self.toast("Этой подборки уже нет — главная обновилась", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).tile_gone_home, None);
             return;
         };
         let mut ids = Vec::with_capacity(picks.len());
@@ -3241,7 +3533,7 @@ impl Worker {
             }
         }
         if ids.is_empty() {
-            self.toast("Нечего скачивать", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).nothing_to_download, None);
             return;
         }
         self.download_tracks(&ids);
@@ -3267,7 +3559,7 @@ impl Worker {
     /// or at the end of the queue.
     fn queue_mix(&mut self, id: v::MixId, next: bool) {
         let Some((picks, streams, _)) = self.day_mix(id) else {
-            self.toast("Этой подборки уже нет — главная обновилась", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).tile_gone_home, None);
             return;
         };
         let prefs = self.state.read().prefs.clone();
@@ -3288,7 +3580,7 @@ impl Worker {
             }
         }
         if ids.is_empty() {
-            self.toast("Нечего играть", None);
+            self.toast_nothing_to_play();
             return;
         }
         self.command(if next { Command::PlayNext(ids) } else { Command::Enqueue(ids) });
@@ -3299,11 +3591,12 @@ impl Worker {
         let Some(h) = &self.recs.home else { return };
         let picks = h.daily.clone();
         let streams = h.daily_streams.clone();
-        self.play_picks(&picks, &streams, "Твой микс");
+        self.play_picks(&picks, &streams, home_recs_in(Locale::Ru).your_mix, v::MixTitle::YourMix);
     }
 
     /// A mix of the home as it is (not endless), from its first track.
-    fn play_picks(&mut self, picks: &[Pick], streams: &HashMap<RemoteId, StreamTrack>, title: &str) {
+    /// `context_title` must be locale-invariant (`play_context_id = "mix:{context_title}"`).
+    fn play_picks(&mut self, picks: &[Pick], streams: &HashMap<RemoteId, StreamTrack>, context_title: &str, mix_title: v::MixTitle) {
         // «Только скачанное» holds even for a mix picked before it was on.
         let prefs = self.state.read().prefs.clone();
         let snap = self.snapshot();
@@ -3331,19 +3624,19 @@ impl Worker {
             }
         }
         if ids.is_empty() {
-            self.toast("Нечего играть", None);
+            self.toast_nothing_to_play();
             return;
         }
         self.user_switch(nikgob_core::model::EventOrigin::Mix);
         // Shuffled or in its order, as the setting of mixes says.
         self.new_list(Some(v::ListKind::Mix));
-        self.queue.set_from(&ids, None, Some(format!("микса «{title}»")));
+        self.queue.set_from(&ids, None, v::QueueOrigin::Mix(mix_title));
         // The entries in the mix's own order, as `whys` are.
         let entries: Vec<u64> = self.queue.context_order().iter().map(|e| e.id).collect();
         self.recs.why.clear();
         self.explain_entries(&entries, whys);
         self.play_context = EventContext::HomeSection;
-        self.play_context_id = Some(format!("mix:{title}"));
+        self.play_context_id = Some(format!("mix:{context_title}"));
         if let Some(e) = self.queue.current() {
             self.start(e);
         }
@@ -3354,22 +3647,29 @@ impl Worker {
     /// day's end (the next builds draw it again the same).
     fn play_blend(&mut self, profiles: &[u32]) {
         let Some(snap) = self.recs.snap.clone() else {
-            self.toast("Рекомендации ещё собираются — попробуй чуть позже", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).recs_still_building, None);
             return;
         };
-        let prefs = lanes::MixPrefs::of(&self.state.read().prefs);
+        let (prefs, loc) = {
+            let p = &self.state.read().prefs;
+            (lanes::MixPrefs::of(p), p.resolved_locale())
+        };
         let lib = self.lib.clone();
         let names = |a: nikgob_core::model::ArtistId| lib.get_artist(a).ok().flatten().map(|a| a.name);
         let epoch = self.home_epoch();
-        let Some(lane) = lanes::blend_now(&snap, &prefs, profiles, &names, &self.recs.session, epoch.seed) else {
-            self.toast("Из этих профилей микса не собрать", None);
+        let Some(lane) = lanes::blend_now(&snap, &prefs, profiles, &names, &self.recs.session, epoch.seed, loc) else {
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).blend_impossible, None);
             return;
         };
         let (day, _) = local_day();
         lanes::remember_blend(&self.lib, &prefs, &day, &epoch.key, recs_now(), lane.key);
         self.recs.blends.retain(|b| b.0 == day && b.1 != lane.key);
         self.recs.blends.push((day, lane.key));
-        let (picks, title) = (lane.picks(false), lane.title.clone());
+        let (picks, ru_title, mt) = (
+            lane.picks(false),
+            lane.ru_title().to_owned(),
+            play_lane_mix_title(lane.key, lane.ru_title(), &lane.title, lane.side_flavor, Some(&lane.labels)),
+        );
         if let Some(h) = self.recs.home.as_mut() {
             h.lanes.retain(|l| l.key != lane.key);
             let at = lanes::blend_place(&h.lanes);
@@ -3391,7 +3691,7 @@ impl Worker {
             }
         }
         self.publish_recs_home();
-        self.play_picks(&picks, &HashMap::new(), &title);
+        self.play_picks(&picks, &HashMap::new(), &ru_title, mt);
     }
 
     /// `Command::RefreshMix`.
@@ -3476,9 +3776,11 @@ impl Worker {
             } else {
                 format!("Не буду рекомендовать «{name}»")
             };
-            self.toast(text, Some(("Отменить".into(), Command::RecFeedback { target, dislike: false })));
+            let undo = self.undo_action(Command::RecFeedback { target, dislike: false });
+            self.toast_info(text, Some(undo));
         } else {
-            self.toast(format!("«{name}» снова в рекомендациях"), Some(("Отменить".into(), Command::RecFeedback { target, dislike: true })));
+            let undo = self.undo_action(Command::RecFeedback { target, dislike: true });
+            self.toast_info(format!("«{name}» снова в рекомендациях"), Some(undo));
         }
         // Discoveries follow at once; the mixes after the next build.
         self.dislikes_load(true);
@@ -3651,6 +3953,8 @@ mod tests {
             key: v::MixKey::Calm,
             title: "Спокойное".into(),
             short: Vec::new(),
+            labels: lanes::PerLocale::default(),
+            side_flavor: None,
             tracks: (0..12).map(|_| TrackId::new()).collect(),
             // Two gaps between loved ones only: two of the three play.
             anchors: (0..12).map(|k| !matches!(k, 0 | 1 | 4 | 5 | 6 | 7 | 10 | 11)).collect(),
@@ -3676,9 +3980,10 @@ mod tests {
             tiles: Vec::new(),
             lanes: vec![lane],
             blend_profiles: Vec::new(),
+            blend_profile_titles: Vec::new(),
             top: Vec::new(),
         };
-        let parts = HomeParts::of(Some(&home), Vec::new(), Vec::new(), false, false);
+        let parts = HomeParts::of_in(Locale::Ru, Some(&home), Vec::new(), Vec::new(), false, false);
         let played: Vec<RemoteId> = home.lanes[0]
             .picks(true)
             .into_iter()
@@ -3704,9 +4009,47 @@ mod tests {
     #[test]
     fn style_titles_name_their_artists() {
         let n = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        assert_eq!(style_title(&n(&["mzlff", "MORGENSHTERN"]), 7), "mzlff, MORGENSHTERN и другие");
-        assert_eq!(style_title(&n(&["A", "B"]), 2), "A и B");
-        assert_eq!(style_title(&n(&["A"]), 1), "A");
+        assert_eq!(style_title(&n(&["mzlff", "MORGENSHTERN"]), 7, Locale::Ru), "mzlff, MORGENSHTERN и другие");
+        assert_eq!(style_title(&n(&["mzlff", "MORGENSHTERN"]), 7, Locale::En), "mzlff, MORGENSHTERN & more");
+        assert_eq!(style_title(&n(&["A", "B"]), 2, Locale::Ru), "A и B");
+        assert_eq!(style_title(&n(&["A", "B"]), 2, Locale::En), "A & B");
+        assert_eq!(style_title(&n(&["A"]), 1, Locale::Ru), "A");
+    }
+
+    #[test]
+    fn calm_and_lively_lanes_preserve_generated_titles() {
+        let calm_flavor = Some(nikgob_core::i18n::SideMixFlavor::Russian);
+        let lively_flavor = Some(nikgob_core::i18n::SideMixFlavor::Instrumental);
+        let calm_mt = lane_mix_title(v::MixKey::Calm, "Русские песни потише", calm_flavor, None);
+        let lively_mt = lane_mix_title(v::MixKey::Lively, "Бодрое без слов", lively_flavor, None);
+        assert_eq!(calm_mt, Some(v::MixTitle::Side { calm: true, flavor: nikgob_core::i18n::SideMixFlavor::Russian }));
+        assert_eq!(lively_mt, Some(v::MixTitle::Side { calm: false, flavor: nikgob_core::i18n::SideMixFlavor::Instrumental }));
+
+        let card = v::LaneCard {
+            key: v::MixKey::Calm,
+            title: "Русские песни потише".into(),
+            mix_title: calm_mt,
+            short_titles: Vec::new(),
+            artists: Vec::new(),
+            new_artists: Vec::new(),
+            covers: Vec::new(),
+            new_cover: None,
+            tracks: Vec::new(),
+            new_tracks: Vec::new(),
+            blend_base: None,
+            queue: None,
+            why: None,
+        };
+        assert_eq!(card.display_title_in(Locale::En), "Calm Russian Songs");
+        assert_ne!(card.display_title_in(Locale::En), "Calm Mix");
+        assert_eq!(
+            card.origin(),
+            v::QueueOrigin::Mix(v::MixTitle::Side { calm: true, flavor: nikgob_core::i18n::SideMixFlavor::Russian })
+        );
+        assert_eq!(
+            lively_mt.as_ref().map(|m| m.title_in(Locale::En)).as_deref(),
+            Some("Upbeat Instrumental")
+        );
     }
 
     /// «ATM 4» of two artists' discographies, a tile twice: each row keeps
@@ -3729,6 +4072,7 @@ mod tests {
         let card = |id, title: &str| v::MixCard {
             id,
             title: title.into(),
+            mix_title: None,
             kicker: String::new(),
             subtitle: String::new(),
             covers: Vec::new(),
@@ -3754,7 +4098,9 @@ mod tests {
     fn moods_map_both_ways() {
         for m in Mood::ALL {
             assert_eq!(from_view_mood(to_view_mood(m)), m);
-            assert_eq!(to_view_mood(m).title(), m.title());
+            for loc in Locale::ALL {
+                assert_eq!(to_view_mood(m).title_in(loc), m.title_in(loc));
+            }
         }
     }
 }

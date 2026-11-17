@@ -47,7 +47,7 @@ fn start(lib: &Library, streams: Vec<Arc<dyn StreamService>>) -> (Runtime, Arc<M
             library: lib.clone(),
             streams,
             library_dir: std::env::temp_dir(),
-            prefs: Prefs::default(),
+            prefs: Prefs { language: nikgob_view::LangPref::Ru, ..Prefs::default() },
             prefs_path: None,
             settings_path: None,
             import: None,

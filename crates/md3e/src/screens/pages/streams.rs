@@ -44,10 +44,10 @@ fn overline(ui: &mut Ui, parts: &[&str]) {
 #[derive(Clone, Debug)]
 pub enum StreamFrom {
     /// The rows themselves, as a queue named `context`.
-    Rows(String),
+    Rows(nikgob_view::QueueOrigin),
     /// Rows of a service's search: the row played is a search's pick
     /// ([`nikgob_view::Prefs::search_play`] says what follows it).
-    SearchRows(String),
+    SearchRows(nikgob_view::QueueOrigin),
     Album(RemoteId),
     Playlist(RemoteId),
     /// The merged «Всё» search: a queue of library and stream tracks,
@@ -55,7 +55,7 @@ pub enum StreamFrom {
     Search {
         picks: Vec<nikgob_view::SearchPick>,
         at: usize,
-        context: String,
+        context: nikgob_view::QueueOrigin,
     },
 }
 

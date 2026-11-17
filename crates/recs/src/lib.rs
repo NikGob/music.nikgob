@@ -89,7 +89,7 @@ pub use sketch::{Crest, SKETCHED_WITH, STYLED_WITH, SoundSketch};
 pub use styles::Styles;
 pub use context::{PlayActor, PlayDevice, TimeModel, TimeSlot};
 pub use daily::DailyParams;
-pub use daylist::{Centre, DAYLIST_LEN, daylist_title};
+pub use daylist::{Centre, DAYLIST_LEN, daylist_title_in};
 pub use discover::{
     Discovery, DiscoveryFilter, DiscoverySeeds, NewRelease, SeedFinds, SeedRef, album_key, artist_key, credit_keys,
     main_artist_key, rank_discoveries, song_key, stream_song_key,
@@ -105,11 +105,14 @@ pub use pick::{Item, NewTrack, Pick, Reason, Recs};
 pub use radio::{NO_REPEAT_MS, Outcome, RadioParams, RadioSeed, RadioState, SeedFacts};
 pub use session::{Ended, Familiarity, Session, TrackLookup, Verdict};
 pub use songtype::{Lang, SONGTYPE_RULES, SongInput, SongLane, SongType, SongTypes, Voice, song_types, song_types_with, work_title};
-pub use style::{StyleMix, style_words};
+pub use style::{StyleMix, StyleWord, style_traits, style_words_in};
 pub use suggest::{Matched, ServiceSuggestions, match_suggestions, suggestion_finds};
 pub use taste::{Catalog, DayPart, Play, Taste, TasteInput, TrackInfo, hot_affinity, world_token};
 pub use world_mixes::{WorldMix, WorldMixKind};
-pub use tiles::{LyricsKind, like_title, PlaylistFacts, TILES_PER_DAY, TileGroup, TileHistory, TileKind, TileMix, TilesInput, TrackFacts};
+pub use tiles::{
+    LyricsKind, PlaylistFacts, TILES_PER_DAY, TileGroup, TileHistory, TileKind, TileMix, TilesInput, TrackFacts,
+    like_subject, like_title_in, month_year_in, tile_title_in, year_ago_title_in,
+};
 
 #[cfg(test)]
 pub(crate) mod test_util {

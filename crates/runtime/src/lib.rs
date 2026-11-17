@@ -1071,6 +1071,7 @@ impl Worker {
             .import
             .and_then(|setup| ImportService::start(setup, config.library.clone(), internal));
         let mut playback = playback;
+        nikgob_core::i18n::apply_pref(config.prefs.language);
         let session_path = config.prefs_path.as_ref().map(|p| p.with_file_name("session.json"));
         let saved = session_path.as_deref().map(session::Session::load).unwrap_or_default();
         let volume = saved.volume.unwrap_or(0.8).clamp(0.0, 1.0);
@@ -1409,16 +1410,63 @@ impl Worker {
         (self.wake)();
     }
 
-    fn toast(&mut self, text: impl Into<String>, action: Option<(String, Command)>) {
-        self.push_toast(text.into(), action, None);
+    pub(crate) fn locale(&self) -> nikgob_core::i18n::Locale {
+        self.state.read().prefs.resolved_locale()
+    }
+
+    pub(crate) fn undo_label(&self) -> String {
+        nikgob_core::i18n::common_in(self.locale()).undo.to_owned()
+    }
+
+    pub(crate) fn undo_action(&self, cmd: Command) -> (String, Command) {
+        (self.undo_label(), cmd)
+    }
+
+    pub(crate) fn toast_nothing_to_play(&mut self) {
+        let msg = nikgob_core::i18n::errors_in(self.locale()).nothing_to_play;
+        self.toast_err(msg, None);
+    }
+
+    pub(crate) fn toast_failed_save_prefs(&mut self) {
+        let msg = nikgob_core::i18n::errors_in(self.locale()).failed_save_prefs;
+        self.toast_err(msg, None);
+    }
+
+    pub(crate) fn toast_info(&mut self, text: impl Into<String>, action: Option<(String, Command)>) {
+        self.push_toast(nikgob_view::ToastKind::Info, text.into(), action, None, false);
+    }
+
+    pub(crate) fn toast_ok(&mut self, text: impl Into<String>, action: Option<(String, Command)>) {
+        self.push_toast(nikgob_view::ToastKind::Success, text.into(), action, None, false);
+    }
+
+    pub(crate) fn toast_err(&mut self, text: impl Into<String>, action: Option<(String, Command)>) {
+        self.push_toast(nikgob_view::ToastKind::Error, text.into(), action, None, false);
+    }
+
+    pub(crate) fn toast_work(&mut self, text: impl Into<String>, action: Option<(String, Command)>) {
+        self.push_toast(nikgob_view::ToastKind::Working, text.into(), action, None, false);
     }
 
     /// A toast whose button takes the user somewhere ([`nikgob_view::Link`]).
-    fn toast_open(&mut self, text: impl Into<String>, label: &str, link: nikgob_view::Link) {
-        self.push_toast(text.into(), None, Some((label.to_owned(), link)));
+    pub(crate) fn toast_open(
+        &mut self,
+        kind: nikgob_view::ToastKind,
+        text: impl Into<String>,
+        label: &str,
+        link: nikgob_view::Link,
+    ) {
+        self.push_toast(kind, text.into(), None, Some((label.to_owned(), link)), false);
     }
 
-    fn push_toast(&mut self, text: String, action: Option<(String, Command)>, open: Option<(String, nikgob_view::Link)>) {
+    pub(crate) fn push_toast(
+        &mut self,
+        kind: nikgob_view::ToastKind,
+        text: String,
+        action: Option<(String, Command)>,
+        open: Option<(String, nikgob_view::Link)>,
+        long: bool,
+    ) -> u64 {
         // A like or unlike makes the undo of the one before on the same
         // thing wrong («Убрано из Любимых · Отменить» after a like again):
         // it is withdrawn, so the snackbar says what the heart shows.
@@ -1431,25 +1479,31 @@ impl Worker {
         // The same message while it is up: its time starts over.
         let same = self.state.read().toasts.iter().position(|t| t.text == text && t.action == action && t.open == open);
         if let Some(k) = same {
+            let mut id = 0;
             self.publish(|s| {
                 let t = &mut s.toasts[k];
+                t.kind = kind;
                 t.at = Instant::now();
+                t.long |= long;
                 t.again += 1;
+                id = t.id;
             });
-            return;
+            return id;
         }
         self.toast_id += 1;
+        let id = self.toast_id;
         let t = Toast {
-            id: self.toast_id,
-            kind: nikgob_view::ToastKind::guess(&text),
+            id,
+            kind,
             text,
             action,
             open,
             at: Instant::now(),
-            long: false,
+            long,
             again: 0,
         };
         self.publish(|s| s.toasts.push(t));
+        id
     }
 
     /// Toasts no snackbar host took away (the window was hidden): the UI
@@ -1471,7 +1525,8 @@ impl Worker {
             Ok(v) => Some(v),
             Err(e) => {
                 log::error!("{what}: {e}");
-                self.toast(format!("Ошибка: {what}"), None);
+                let msg = nikgob_core::i18n::ErrorStrings::error_with_in(self.locale(), what);
+                self.toast_err(msg, None);
                 None
             }
         }
@@ -1609,10 +1664,14 @@ impl Worker {
             Command::PlayReleaseMine { id, start, shuffle } => self.play_release(id, start, shuffle, Some(false)),
             Command::PlayPlaylist { id, start, shuffle } => {
                 let (ids, name) = self.playlist_tracks(id, start);
-                let name = format!("плейлиста «{name}»");
+                let origin = if id == LIKED_PLAYLIST {
+                    nikgob_view::QueueOrigin::Liked
+                } else {
+                    nikgob_view::QueueOrigin::Playlist(name)
+                };
                 let kind = self.playlist_kind(id);
                 let n = ids.len();
-                self.play_list(ids, start, shuffle, kind, Some(name), EventContext::Playlist, Some(format!("playlist:{id}")));
+                self.play_list(ids, start, shuffle, kind, origin, EventContext::Playlist, Some(format!("playlist:{id}")));
                 // Its entries are its own («✦ С дополнением» counts them).
                 if n > 0 {
                     self.plus_queued(id);
@@ -1622,10 +1681,15 @@ impl Worker {
                 let rows = self
                     .log_err("исполнитель", self.lib.tracks_of_artist(id, 0, 500))
                     .unwrap_or_default();
-                let name = self.lib.get_artist(id).ok().flatten().map(|a| a.name);
+                let origin = self
+                    .lib
+                    .get_artist(id)
+                    .ok()
+                    .flatten()
+                    .map_or(nikgob_view::QueueOrigin::None, |a| nikgob_view::QueueOrigin::Artist(a.name));
                 let ids = self.playable(&rows, None);
                 // Without «Перемешать» it is the artist's «Слушать микс».
-                self.play_list(ids, None, shuffle, nikgob_view::ListKind::Mix, name, EventContext::Artist, Some(format!("artist:{id}")));
+                self.play_list(ids, None, shuffle, nikgob_view::ListKind::Mix, origin, EventContext::Artist, Some(format!("artist:{id}")));
             }
             Command::PlayTracks {
                 tracks,
@@ -1637,13 +1701,15 @@ impl Worker {
                 self.queue.play_next(&t);
                 self.preload_next();
                 self.publish_player();
-                self.toast("Сыграет следующим", None);
+                let msg = nikgob_core::i18n::player_in(self.locale()).queued_next;
+                self.toast_ok(msg, None);
             }
             Command::Enqueue(t) => {
                 self.queue.enqueue(&t);
                 self.preload_next();
                 self.publish_player();
-                self.toast("Добавлено в очередь", None);
+                let msg = nikgob_core::i18n::player_in(self.locale()).added_to_queue;
+                self.toast_ok(msg, None);
             }
             Command::PlayReleaseNext(id) => {
                 let ids = self.release_tracks(id);
@@ -1654,7 +1720,8 @@ impl Worker {
                 self.preload_next();
                 self.publish_player();
                 let title = self.lib.get_release(id).ok().flatten().map(|r| r.title).unwrap_or_default();
-                self.toast(format!("Следующим: «{title}»"), None);
+                let msg = nikgob_core::i18n::PlayerStrings::next_up_quoted_in(self.locale(), &title);
+                self.toast_ok(msg, None);
             }
             Command::EnqueueRelease(id) => {
                 let ids = self.release_tracks(id);
@@ -1675,7 +1742,8 @@ impl Worker {
                 self.queue.play_next(&ids);
                 self.preload_next();
                 self.publish_player();
-                self.toast(format!("Следующим: «{name}»"), None);
+                let msg = nikgob_core::i18n::PlayerStrings::next_up_quoted_in(self.locale(), &name);
+                self.toast_ok(msg, None);
             }
             Command::EnqueuePlaylist(id) => {
                 let (ids, _) = self.playlist_tracks(id, None);
@@ -1696,7 +1764,13 @@ impl Worker {
                 self.preload_next();
                 self.publish_player();
                 let name = self.lib.get_artist(id).ok().flatten().map(|a| a.name).unwrap_or_default();
-                self.toast(if name.is_empty() { "Сыграет следующим".to_owned() } else { format!("Следующим: {name}") }, None);
+                let loc = self.locale();
+                let msg = if name.is_empty() {
+                    nikgob_core::i18n::player_in(loc).queued_next.to_owned()
+                } else {
+                    nikgob_core::i18n::PlayerStrings::next_up_in(loc, &name)
+                };
+                self.toast_ok(msg, None);
             }
             Command::EnqueueArtist(id) => {
                 let rows = self
@@ -1737,7 +1811,9 @@ impl Worker {
                 self.publish_player();
                 if !before.is_empty() || !after.is_empty() {
                     self.cleared_queue = Some((playing, before, after));
-                    self.toast("Очередь очищена", Some(("Отменить".into(), Command::UndoClearQueue)));
+                    let msg = nikgob_core::i18n::player_in(self.locale()).queue_cleared;
+                    let undo = self.undo_action(Command::UndoClearQueue);
+                    self.toast_info(msg, Some(undo));
                 }
             }
             Command::UndoClearQueue => {
@@ -1756,7 +1832,7 @@ impl Worker {
                 let before = self.library_tracks();
                 if let Some(p) = self.log_err("плейлист", self.lib.create_playlist(&name)) {
                     let _ = self.log_err("плейлист", self.lib.playlist_add_many(p.id, &tracks));
-                    self.toast(format!("Плейлист «{name}» сохранён"), None);
+                    self.toast_ok(format!("Плейлист «{name}» сохранён"), None);
                     self.library_edited(before, Vec::new());
                 }
             }
@@ -1764,22 +1840,20 @@ impl Worker {
                 self.publish(|s| s.prefs.home_card = false);
                 self.save_prefs();
                 self.load_home();
-                self.toast(
-                    "Карточка скрыта. Включить её снова можно в Настройках → Внешний вид → Главная.",
+                self.push_toast(
+                    nikgob_view::ToastKind::Info,
+                    "Карточка скрыта. Включить её снова можно в Настройках → Внешний вид → Главная.".into(),
                     Some(("Вернуть".into(), Command::SetPref(nikgob_view::PrefPatch::HomeCard(true)))),
+                    None,
+                    true,
                 );
-                self.publish(|s| {
-                    if let Some(t) = s.toasts.last_mut() {
-                        t.long = true;
-                    }
-                });
             }
             Command::SaveQueueAsPlaylist(name) => {
                 let tracks = self.queue.tracks();
                 let before = self.library_tracks();
                 if let Some(p) = self.log_err("плейлист", self.lib.create_playlist(&name)) {
                     let _ = self.log_err("плейлист", self.lib.playlist_add_many(p.id, &tracks));
-                    self.toast(format!("Плейлист «{name}» сохранён"), None);
+                    self.toast_ok(format!("Плейлист «{name}» сохранён"), None);
                     self.library_edited(before, Vec::new());
                 }
             }
@@ -1826,7 +1900,12 @@ impl Worker {
                         (true, false) => "Добавлено в Любимые",
                         (false, _) => "Убрано из Любимых",
                     };
-                    self.toast(text, Some(("Отменить".into(), Command::Like(target, !on))));
+                    let undo = Some(self.undo_action(Command::Like(target, !on)));
+                    if on {
+                        self.toast_ok(text, undo);
+                    } else {
+                        self.toast_info(text, undo);
+                    }
                     // Its album's cards are read again below.
                     if let LikeTarget::Track(t) = target {
                         let _ = self.single_follows_like(t, on);
@@ -1848,7 +1927,7 @@ impl Worker {
             Command::DeletePlaylist(id) => {
                 let before = self.library_tracks();
                 if self.log_err("плейлист", self.lib.delete_playlist(id)).is_some() {
-                    self.toast("Плейлист удалён", None);
+                    self.toast_ok("Плейлист удалён", None);
                     self.library_edited(before, Vec::new());
                 }
             }
@@ -1881,7 +1960,12 @@ impl Worker {
                         .flatten()
                         .map_or_else(String::new, |p| p.name)
                 };
-                self.toast(added_to_playlist(&name, added, already), None);
+                let msg = added_to_playlist(&name, added, already);
+                if added == 0 && already > 0 {
+                    self.toast_info(msg, None);
+                } else {
+                    self.toast_ok(msg, None);
+                }
                 let releases = if id == LIKED_PLAYLIST { self.releases_of(&tracks) } else { Vec::new() };
                 self.library_edited(before, releases);
                 self.playlist_edited(id);
@@ -1906,7 +1990,8 @@ impl Worker {
                 self.library_edited(before, releases);
                 self.playlist_edited(id);
                 if let Some((text, cmd)) = undo {
-                    self.toast(text, Some(("Отменить".into(), cmd)));
+                    let undo = self.undo_action(cmd);
+                    self.toast_info(text, Some(undo));
                 }
             }
             Command::RestoreToPlaylist { playlist, track, at } => {
@@ -2432,7 +2517,8 @@ impl Worker {
             Some(t) => format!("«{t}» снова как записан"),
             None => "Скорость сброшена".to_owned(),
         };
-        self.toast(text, Some(("Отменить".into(), Command::SetTrackSpeed { track, variant: was })));
+        let undo = self.undo_action(Command::SetTrackSpeed { track, variant: was });
+        self.toast_info(text, Some(undo));
     }
 
     /// The speed of `changed` (or of everything: the settings) changed: the
@@ -2572,10 +2658,10 @@ impl Worker {
     /// снова», worlds, cards) from `start`, or from the first (a random one
     /// under shuffle) when the user picked none; shuffle stays as the
     /// button is.
-    fn play_tracks(&mut self, tracks: &[TrackId], start: Option<usize>, context: String) {
+    fn play_tracks(&mut self, tracks: &[TrackId], start: Option<usize>, origin: nikgob_view::QueueOrigin) {
         self.user_switch(EventOrigin::Manual);
         self.new_list(None);
-        self.queue.set_from(tracks, start, Some(context));
+        self.queue.set_from(tracks, start, origin);
         self.play_context = EventContext::Library;
         self.play_context_id = None;
         if let Some(e) = self.queue.current() {
@@ -2590,12 +2676,12 @@ impl Worker {
         start: Option<TrackId>,
         shuffle: bool,
         kind: nikgob_view::ListKind,
-        context: Option<String>,
+        origin: nikgob_view::QueueOrigin,
         ctx: EventContext,
         context_id: Option<String>,
     ) {
         if ids.is_empty() {
-            self.toast("Нечего играть", None);
+            self.toast_nothing_to_play();
             return;
         }
         let start_idx = start.and_then(|s| ids.iter().position(|&t| t == s));
@@ -2608,7 +2694,7 @@ impl Worker {
         if shuffle {
             self.queue.shuffle = true;
         }
-        self.queue.set_from(&ids, start_idx, context);
+        self.queue.set_from(&ids, start_idx, origin);
         self.turn.lap("queue");
         // The new queue's own context, never the one before it (a mix's,
         // a playlist's) carried over.
@@ -2684,9 +2770,9 @@ impl Worker {
                 let text = if streamed && self.service(StreamKind::Youtube).is_none() {
                     self.off_text(StreamKind::Youtube)
                 } else {
-                    "Нет файла для этого трека".to_owned()
+                    nikgob_core::i18n::errors_in(self.locale()).no_file_for_track.to_owned()
                 };
-                self.toast(text, None);
+                self.toast_err(text, None);
             }
             match self.queue.skip_forward() {
                 Some(n) if n.id != e.id => e = n,
@@ -3217,7 +3303,7 @@ impl Worker {
                 // A switch whose device did not open: the old one plays on.
                 self.playback.drop_device(generation);
                 // The same message while one is up only starts it over.
-                self.toast("Не удалось открыть устройство вывода звука", None);
+                self.toast_err(nikgob_core::i18n::errors_in(self.locale()).audio_output_failed, None);
             }
             PlaybackEvent::DeviceReady { generation } => self.device_ready(generation),
             PlaybackEvent::Duration { id, duration } => {
@@ -3389,13 +3475,12 @@ impl Worker {
                 let why = playing.and_then(|e| self.streaming.failures.remove(&e.track));
                 // A guest of «✦ С дополнением» is passed over without a word.
                 let guest = playing.is_some_and(|e| self.plus_failed(e.id));
-                match (title, why) {
-                    _ if guest => {}
-                    (Some(t), Some((why, Some(link)))) => {
-                        self.toast_open(format!("{t}: {why}"), "Войти", nikgob_view::Link::Setting(link));
+                if !guest {
+                    let (msg, action) = playback_error_toast(self.locale(), title, why);
+                    match action {
+                        Some((label, link)) => self.toast_open(nikgob_view::ToastKind::Error, msg, label, link),
+                        None => self.toast_err(msg, None),
                     }
-                    (Some(t), Some((why, None))) => self.toast(format!("{t}: {why}"), None),
-                    _ => self.toast("Не получилось воспроизвести трек", None),
                 }
                 if playing.is_some() {
                     match self.queue.skip_forward() {
@@ -3433,7 +3518,7 @@ impl Worker {
         let speed = self.speed as f32;
         let (volume, muted) = (self.volume, self.muted);
         let (shuffle, repeat) = (self.queue.shuffle, self.queue.repeat);
-        let context = self.queue.context.clone();
+        let origin = self.queue.origin.clone();
         let page = self.context_page_id().and_then(context_page);
         let upcoming: Vec<Entry> = self.queue.upcoming().iter().take(200).copied().collect();
         let history = self.queue.history();
@@ -3445,8 +3530,9 @@ impl Worker {
         // The rows of both lists in one query, before the lock.
         let ids: Vec<TrackId> = upcoming.iter().chain(&history).map(|e| e.track).collect();
         let found = self.lib.get_track_rows(&ids).unwrap_or_default();
+        let loc = self.locale();
         let why = &self.recs.why;
-        let current_why = current_entry.and_then(|e| why.get(&e).cloned());
+        let current_why = current_entry.and_then(|e| why.get(&e)).map(|w| w.get(loc).clone());
         let guests = self.recs.plus.guests();
         let current_guest = current_entry.is_some_and(|e| guests.contains(&e));
         let res = &mut self.res;
@@ -3455,8 +3541,8 @@ impl Worker {
                 .filter_map(|e| {
                     found.get(&e.track).map(|r| nikgob_view::QueueEntry {
                         entry: e.id,
-                        track: res.track(r),
-                        why: why.get(&e.id).cloned(),
+                        track: res.track_in(r, loc),
+                        why: why.get(&e.id).map(|w| w.get(loc).clone()),
                         guest: guests.contains(&e.id),
                     })
                 })
@@ -3478,8 +3564,7 @@ impl Worker {
             p.muted = muted;
             p.shuffle = shuffle;
             p.repeat = repeat;
-            p.context = context;
-            p.context_page = page;
+            p.set_context(origin, page, loc);
             s.queue.next = next;
             s.queue.prev = prev;
             s.queue.current_entry = current_entry;
@@ -3528,12 +3613,19 @@ impl Worker {
         let audio_quality = self.audio_quality();
         let changed = self.state.read().player.current.as_ref().map(|r| r.id)
             != current.as_ref().map(|r| r.id);
-        let row = current.as_ref().map(|r| self.res.track(r));
-        let mut info = self.res.info(current.as_ref(), src.as_ref());
+        let loc = self.state.read().prefs.resolved_locale();
+        let row = current.as_ref().map(|r| self.res.track_in(r, loc));
+        let mut info = self.res.info_in(current.as_ref(), src.as_ref(), loc);
+        if !changed
+            && let Some(s) = src.as_ref().filter(|s| s.kind.is_local())
+            && let Some(tags) = self.res.facts().get(&self.res.path(&s.locator)).and_then(|f| f.tags)
+        {
+            info.tags.extend(crate::import::extra_tags_in(&tags, loc));
+        }
         if audio_quality.is_some() {
             // «Качество» of a stream: what it gives.
             if let (Some(d), Some(q)) = (info.sound.as_mut(), audio_quality.as_ref()) {
-                d.facts.insert(0, ("Поток".into(), q.clone()));
+                d.facts.insert(0, (nikgob_core::i18n::player_in(loc).fact_stream.into(), q.clone()));
             }
             info.quality = audio_quality;
         }
@@ -3563,8 +3655,9 @@ impl Worker {
         let only_local = self.state.read().prefs.library_only_downloaded;
         let mut errors = Vec::new();
         let shelf = library_load::shelf(&self.lib, &mut self.res, only_local, &mut errors);
+        let loc = self.locale();
         for what in errors {
-            self.toast(format!("Ошибка: {what}"), None);
+            self.toast_err(nikgob_core::i18n::ErrorStrings::error_with_in(loc, &what), None);
         }
         shelf
     }
@@ -3586,7 +3679,8 @@ impl Worker {
             .filter(|t| t.has_local || !only_local)
             .collect();
         let q = q.to_owned();
-        let hits = rows.iter().map(|t| self.res.track(t)).collect();
+        let loc = self.locale();
+        let hits = rows.iter().map(|t| self.res.track_in(t, loc)).collect();
         self.publish(|s| {
             s.library.track_hits = Some((q, hits));
         });
@@ -3606,7 +3700,8 @@ impl Worker {
         let rows = self
             .log_err("треки", self.lib.tracks_filtered(offset as u32, limit as u32, key, filter))
             .unwrap_or_default();
-        let rows = rows.iter().map(|r| self.res.track(r)).collect();
+        let loc = self.locale();
+        let rows = rows.iter().map(|r| self.res.track_in(r, loc)).collect();
         self.publish(|s| {
             s.library.tracks_offset = offset;
             s.library.tracks = rows;
@@ -3626,7 +3721,8 @@ impl Worker {
         };
         let liked = self.lib.release_liked(id).unwrap_or(false);
         let rules = self.album_rules();
-        let mut detail = self.res.release_detail(&release, &listing, liked, rules);
+        let loc = self.locale();
+        let mut detail = self.res.release_detail_in(&release, &listing, liked, rules, loc);
         detail.added_whole = self.lib.release_choice(id).is_ok_and(|(whole, _)| whole);
         (detail.released, detail.label) = self.release_facts(&release, &detail.tracks);
         self.publish(|s| {
@@ -3677,7 +3773,8 @@ impl Worker {
         let top: Vec<_> = plays.iter().take(5).map(|&(_, i)| tracks[i].clone()).collect();
         tracks.clear();
         let liked = self.lib.is_liked(id).unwrap_or(false);
-        let detail = self.res.artist_detail(&artist, &top, &releases, liked);
+        let loc = self.locale();
+        let detail = self.res.artist_detail_in(&artist, &top, &releases, liked, loc);
         self.publish(|s| {
             s.artist = Some(detail);
         });
@@ -3726,7 +3823,8 @@ impl Worker {
             .find(|p| p.id.unwrap_or(LIKED_PLAYLIST) == id);
         let Some(summary) = summary else { return };
         let sync = self.playlist_sync_view(id);
-        let mut detail = self.res.playlist_detail(&summary, &rows);
+        let loc = self.locale();
+        let mut detail = self.res.playlist_detail_in(&summary, &rows, loc);
         detail.sync = sync;
         self.publish(|s| {
             s.playlist = Some(detail);
@@ -3756,6 +3854,10 @@ impl Worker {
         }
         let speed_changed = (old.speed_enabled, old.keep_timbre) != (p.speed_enabled, p.keep_timbre);
         let speed_enabled = p.speed_enabled;
+        let lang_changed = old.language != p.language;
+        if lang_changed {
+            nikgob_core::i18n::apply_pref(p.language);
+        }
         self.torrent_prefs(&p);
         self.publish(|s| {
             s.prefs = *p.clone();
@@ -3887,6 +3989,49 @@ impl Worker {
         if !old.autoplay && p.autoplay {
             self.publish_player();
         }
+        if lang_changed {
+            let loc = p.resolved_locale();
+            if self.connect.remote() {
+                self.publish(move |s| {
+                    s.player.sync_context(loc);
+                    if let Some(r) = s.queue.radio.as_mut() {
+                        r.sync_locale(loc);
+                    }
+                });
+            }
+            self.relocalize_recs(loc);
+            self.publish_now_playing();
+            self.load_library();
+            if !self.state.read().library.downloaded.is_empty() {
+                self.load_downloaded(0, self.downloaded_shown().max(crate::import::DOWNLOADED_PAGE));
+            }
+            if !self.state.read().library.trash.is_empty() {
+                self.load_trash();
+            }
+            self.load_home();
+            let (pl, world, release, artist) = {
+                let s = self.state.read();
+                (
+                    s.playlist.as_ref().map(|d| d.card.id),
+                    s.world.as_ref().map(|w| w.world.key.clone()),
+                    s.release.as_ref().map(|r| r.card.id),
+                    s.artist.as_ref().map(|a| a.card.id),
+                )
+            };
+            if let Some(pl) = pl {
+                self.load_playlist(pl);
+            }
+            if let Some(w) = world {
+                self.load_world(&w);
+            }
+            if let Some(r) = release {
+                self.load_release(r);
+            }
+            if let Some(a) = artist {
+                self.load_artist(a);
+            }
+            self.publish_downloads();
+        }
     }
 
     /// A world's page ([`Command::LoadWorld`]).
@@ -3898,7 +4043,8 @@ impl Worker {
         };
         let (_, releases) = if visit.local_only { (Vec::new(), Vec::new()) } else { self.discover_rows() };
         let new_album = home_v2::world_release(&w.world, &releases).map(|i| releases[i].clone());
-        let mut view = self.res.world_view(&w, new_album);
+        let loc = self.locale();
+        let mut view = self.res.world_view_in(&w, new_album, loc);
         view.mixes = self.world_mix_cards(&view.world);
         let stage = view.world.release;
         self.publish(|s| s.world = Some(view));
@@ -3949,7 +4095,12 @@ impl Worker {
             (true, false) => format!("Альбом в Любимых · {what}"),
             (false, _) => format!("Альбом убран из Любимых · {what}"),
         };
-        self.toast(text, Some(("Отменить".into(), Command::Like(LikeTarget::Release(id), !on))));
+        let undo = Some(self.undo_action(Command::Like(LikeTarget::Release(id), !on)));
+        if on {
+            self.toast_ok(text, undo);
+        } else {
+            self.toast_info(text, undo);
+        }
         self.publish(|s| {
             let fix = |t: &mut nikgob_view::TrackRow| {
                 if tracks.contains(&t.id) {
@@ -3994,7 +4145,12 @@ impl Worker {
             (true, false) => "Добавлено в любимые альбомы",
             (false, _) => "Убрано из любимых альбомов",
         };
-        self.toast(text, Some(("Отменить".into(), Command::Like(LikeTarget::Release(id), !on))));
+        let undo = Some(self.undo_action(Command::Like(LikeTarget::Release(id), !on)));
+        if on {
+            self.toast_ok(text, undo);
+        } else {
+            self.toast_info(text, undo);
+        }
         self.publish(|s| {
             s.search.releases.iter_mut().filter(|c| c.id == id).for_each(|c| c.liked = on);
         });
@@ -4124,8 +4280,12 @@ impl Worker {
                 (false, true) => "Трек остаётся в библиотеке: он в «Любимых» или в плейлисте",
             };
             let undo = (on || !now)
-                .then(|| ("Отменить".into(), Command::TrackLibraryRestore { track, put: was.put, choice: was.choice }));
-            self.toast(text, undo);
+                .then(|| self.undo_action(Command::TrackLibraryRestore { track, put: was.put, choice: was.choice }));
+            if on {
+                self.toast_ok(text, undo);
+            } else {
+                self.toast_info(text, undo);
+            }
         } else if let Some(was) = restore
             && self.log_err("библиотека", self.lib.restore_track_in_library(track, was)).is_none()
         {
@@ -4146,13 +4306,14 @@ impl Worker {
         let before = self.library_tracks();
         if on {
             let Some(undo) = self.log_err("альбом", self.lib.add_release_whole(id)) else { return };
-            let back = undo.map(|u| ("Отменить".into(), Command::UndoWholeAlbum { id, mine: u.mine, excluded: u.excluded }));
-            self.toast("Альбом в библиотеке", back);
+            let back = undo.map(|u| self.undo_action(Command::UndoWholeAlbum { id, mine: u.mine, excluded: u.excluded }));
+            self.toast_ok("Альбом в библиотеке", back);
         } else {
             if self.log_err("альбом", self.lib.set_release_whole(id, false)).is_none() {
                 return;
             }
-            self.toast("В библиотеке только твои треки альбома", Some(("Отменить".into(), Command::AddWholeAlbum { id, on: true })));
+            let back = self.undo_action(Command::AddWholeAlbum { id, on: true });
+            self.toast_info("В библиотеке только твои треки альбома", Some(back));
         }
         self.library_edited(before, vec![id]);
         self.album_changed(id);
@@ -4178,7 +4339,12 @@ impl Worker {
         }
         let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
         let text = if mine { format!("«{title}» в твоих треках альбома") } else { format!("«{title}» убран из твоих треков альбома") };
-        self.toast(text, Some(("Отменить".into(), Command::AlbumTrackChoice { release, track, choice: was })));
+        let undo = Some(self.undo_action(Command::AlbumTrackChoice { release, track, choice: was }));
+        if mine {
+            self.toast_ok(text, undo);
+        } else {
+            self.toast_info(text, undo);
+        }
         self.library_edited(before, vec![release]);
         self.album_changed(release);
     }
@@ -4200,17 +4366,17 @@ impl Worker {
         if ids.is_empty() && !whole {
             // Nothing of it to play (none of its songs the user's): the
             // queue that plays stays, no tracklist joins it.
-            self.toast("Нечего играть", None);
+            self.toast_nothing_to_play();
             return;
         }
-        let title = self
+        let origin = self
             .lib
             .get_release(id)
             .ok()
             .flatten()
-            .map(|r| format!("альбома «{}»", r.title));
+            .map_or(nikgob_view::QueueOrigin::None, |r| nikgob_view::QueueOrigin::Album(r.title));
         self.turn.lap("album read");
-        self.play_list(ids, start, shuffle, nikgob_view::ListKind::Album, title, EventContext::Album, Some(format!("release:{id}")));
+        self.play_list(ids, start, shuffle, nikgob_view::ListKind::Album, origin, EventContext::Album, Some(format!("release:{id}")));
         // An album known in part plays at once; the rest of its tracklist
         // joins the queue when the services tell it.
         self.album_queue = Some((id, self.queue.generation(), whole));
@@ -4416,21 +4582,26 @@ impl Worker {
 
     /// Creates `sources.toml` if it is missing and opens it for editing.
     fn open_sources_config(&mut self) {
+        let loc = self.locale();
+        let err = nikgob_core::i18n::errors_in(loc);
         let Some(settings) = self.settings_path.clone() else {
-            self.toast("Некуда сохранить настройки", None);
+            self.toast_err(err.no_settings_path, None);
             return;
         };
         let path = nikgob_sources::config::beside(&settings);
         let saved = nikgob_core::settings::Settings::load(&settings).unwrap_or_default();
         if let Err(e) = nikgob_sources::config::ensure(&path, source_defaults(), &saved.sources) {
             log::error!("sources.toml: {e}");
-            self.toast("Не получилось создать файл инстансов", None);
+            self.toast_err(err.sources_file_failed, None);
             return;
         }
         self.sources_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         if let Err(e) = open_file(&path) {
             log::warn!("sources.toml: {e}");
-            self.toast(format!("Файл инстансов: {}", path.display()), None);
+            self.toast_info(
+                nikgob_core::i18n::ErrorStrings::instances_file_in(loc, &path.display().to_string()),
+                None,
+            );
         }
     }
 }
@@ -4472,8 +4643,9 @@ fn open_file(path: &std::path::Path) -> std::io::Result<()> {
 impl Worker {
     /// Stores the Prowlarr address and key in settings.toml (never in prefs).
     fn set_indexer(&mut self, url: String, api_key: String) {
+        let err = nikgob_core::i18n::errors_in(self.locale());
         let Some(path) = self.settings_path.clone() else {
-            self.toast("Некуда сохранить настройки", None);
+            self.toast_err(err.no_settings_path, None);
             return;
         };
         // A file that cannot be read or parsed is not replaced by defaults: that
@@ -4482,7 +4654,7 @@ impl Worker {
             Ok(s) => s,
             Err(e) => {
                 log::error!("loading settings: {e}");
-                self.toast("settings.toml не читается — поправь файл вручную", None);
+                self.toast_err(err.settings_unreadable, None);
                 return;
             }
         };
@@ -4504,10 +4676,11 @@ impl Worker {
                 }
                 self.publish_sources();
                 self.wish_sources_ready();
-                self.toast(
-                    if usable { "Prowlarr сохранён" } else { "Адрес или ключ Prowlarr не подходят" },
-                    None,
-                );
+                if usable {
+                    self.toast_ok(err.prowlarr_saved, None);
+                } else {
+                    self.toast_err(err.prowlarr_invalid, None);
+                }
                 // Whether it answers, right away (the settings show it).
                 if usable {
                     self.check_indexer(String::new(), String::new());
@@ -4515,7 +4688,7 @@ impl Worker {
             }
             Err(e) => {
                 log::error!("saving settings: {e}");
-                self.toast("Не удалось сохранить настройки", None);
+                self.toast_failed_save_prefs();
             }
         }
     }
@@ -4600,7 +4773,7 @@ impl Worker {
         let copied = std::fs::create_dir_all(&dir).and_then(|()| std::fs::copy(&path, &dest));
         if let Err(e) = copied {
             log::warn!("playlist cover {}: {e}", path.display());
-            self.toast("Не получилось взять картинку", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).cover_load_failed, None);
             return;
         }
         let previous = self.lib.get_playlist(id).ok().flatten().and_then(|p| p.cover);
@@ -4625,15 +4798,16 @@ impl Worker {
 
     /// MusicBrainz contact and AcoustID key → settings.toml, applied live.
     fn set_metadata(&mut self, contact: String, acoustid_key: Option<String>) {
+        let err = nikgob_core::i18n::errors_in(self.locale());
         let Some(path) = self.settings_path.clone() else {
-            self.toast("Некуда сохранить настройки", None);
+            self.toast_err(err.no_settings_path, None);
             return;
         };
         let mut settings = match nikgob_core::settings::Settings::load(&path) {
             Ok(s) => s,
             Err(e) => {
                 log::error!("loading settings: {e}");
-                self.toast("settings.toml не читается — поправь файл вручную", None);
+                self.toast_err(err.settings_unreadable, None);
                 return;
             }
         };
@@ -4643,7 +4817,7 @@ impl Worker {
         }
         if let Err(e) = settings.save(&path) {
             log::error!("saving settings: {e}");
-            self.toast("Не удалось сохранить настройки", None);
+            self.toast_failed_save_prefs();
             return;
         }
         self.set_metadata_config(&metadata_config(&settings.metadata));
@@ -4652,7 +4826,7 @@ impl Worker {
             s.prefs.metadata_contact = settings.metadata.contact;
             s.prefs.acoustid_configured = configured;
         });
-        self.toast("Сохранено", None);
+        self.toast_ok(err.saved, None);
     }
 
     /// The Last.fm key of the graph of similar music → settings.toml
@@ -4660,7 +4834,12 @@ impl Worker {
     fn set_lastfm_key(&mut self, key: &str) {
         let Some(configured) = self.set_metadata_secret(|m| &mut m.lastfm_key, key) else { return };
         self.publish(|s| s.prefs.lastfm_configured = configured);
-        self.toast(if configured { "Сохранено" } else { "Ключ убран" }, None);
+        let err = nikgob_core::i18n::errors_in(self.locale());
+        if configured {
+            self.toast_ok(err.saved, None);
+        } else {
+            self.toast_info(err.key_removed, None);
+        }
     }
 
     /// The ListenBrainz token of the graph's popularity → settings.toml
@@ -4669,22 +4848,28 @@ impl Worker {
         let Some(configured) = self.set_metadata_secret(|m| &mut m.listenbrainz_token, token) else { return };
         self.publish(|s| s.prefs.listenbrainz_configured = configured);
         self.graph_popularity_reopened();
-        self.toast(if configured { "Сохранено" } else { "Токен убран" }, None);
+        let err = nikgob_core::i18n::errors_in(self.locale());
+        if configured {
+            self.toast_ok(err.saved, None);
+        } else {
+            self.toast_info(err.token_removed, None);
+        }
     }
 
     /// Keeps one secret of the online metadata in settings.toml (empty:
     /// none) and applies the config live; whether one is set now, none when
     /// it could not be kept (a toast says why).
     fn set_metadata_secret(&mut self, field: impl FnOnce(&mut nikgob_core::settings::MetadataSettings) -> &mut Option<String>, value: &str) -> Option<bool> {
+        let err = nikgob_core::i18n::errors_in(self.locale());
         let Some(path) = self.settings_path.clone() else {
-            self.toast("Некуда сохранить настройки", None);
+            self.toast_err(err.no_settings_path, None);
             return None;
         };
         let mut settings = match nikgob_core::settings::Settings::load(&path) {
             Ok(s) => s,
             Err(e) => {
                 log::error!("loading settings: {e}");
-                self.toast("settings.toml не читается — поправь файл вручную", None);
+                self.toast_err(err.settings_unreadable, None);
                 return None;
             }
         };
@@ -4693,7 +4878,7 @@ impl Worker {
         let configured = slot.is_some();
         if let Err(e) = settings.save(&path) {
             log::error!("saving settings: {e}");
-            self.toast("Не удалось сохранить настройки", None);
+            self.toast_failed_save_prefs();
             return None;
         }
         self.set_metadata_config(&metadata_config(&settings.metadata));
@@ -4816,7 +5001,7 @@ impl Worker {
                 self.prefs_failing = true;
                 self.prefs_unsaved = true;
                 if say {
-                    self.toast("Не удалось сохранить настройки", None);
+                    self.toast_failed_save_prefs();
                 }
                 false
             }
@@ -4886,6 +5071,23 @@ fn youtube_refused_midway(message: &str) -> bool {
 /// the window) teach the live recommendations ([`Worker::queue_teaches`]).
 pub(crate) fn teaches_live_recs(actor: Option<nikgob_core::settings::ApiActor>) -> bool {
     !matches!(actor, Some(nikgob_core::settings::ApiActor::Guest | nikgob_core::settings::ApiActor::Assistant))
+}
+
+/// Formats a playback failure toast and optional settings button for `loc`.
+fn playback_error_toast(
+    loc: nikgob_core::i18n::Locale,
+    title: Option<String>,
+    why: Option<(String, Option<nikgob_view::SettingLink>)>,
+) -> (String, Option<(&'static str, nikgob_view::Link)>) {
+    let err = nikgob_core::i18n::errors_in(loc);
+    match (title, why) {
+        (Some(t), Some((why, Some(link)))) => (
+            format!("{t}: {why}"),
+            Some((err.sign_in, nikgob_view::Link::Setting(link))),
+        ),
+        (Some(t), Some((why, None))) => (format!("{t}: {why}"), None),
+        _ => (err.playback_failed.to_owned(), None),
+    }
 }
 
 #[cfg(test)]
@@ -5034,5 +5236,37 @@ mod tests {
         assert!(offset < 0.02, "{offset}");
         assert!(stall < 0.55, "{stall}");
         assert!(after_stall < 0.02, "{after_stall}");
+    }
+
+    #[test]
+    fn playback_error_toast_localizes_all_branches() {
+        use nikgob_core::i18n::{Locale, errors_in};
+        use nikgob_view::{Link, SettingLink};
+
+        assert_eq!(playback_error_toast(Locale::En, None, None), (errors_in(Locale::En).playback_failed.to_owned(), None));
+        assert_eq!(playback_error_toast(Locale::Ru, None, None), (errors_in(Locale::Ru).playback_failed.to_owned(), None));
+        assert_eq!(
+            playback_error_toast(Locale::En, Some("Song".into()), None),
+            ("Failed to play track".to_owned(), None),
+        );
+        assert_eq!(
+            playback_error_toast(Locale::Ru, Some("Song".into()), None),
+            ("Не получилось воспроизвести трек".to_owned(), None),
+        );
+        assert_eq!(
+            playback_error_toast(Locale::En, Some("Song".into()), Some(("could not play".into(), None))),
+            ("Song: could not play".to_owned(), None),
+        );
+        assert_eq!(
+            playback_error_toast(
+                Locale::En,
+                Some("Song".into()),
+                Some(("enable Spotify playback in settings".into(), Some(SettingLink::SpotifyPlayback))),
+            ),
+            (
+                "Song: enable Spotify playback in settings".to_owned(),
+                Some(("Sign in", Link::Setting(SettingLink::SpotifyPlayback))),
+            ),
+        );
     }
 }

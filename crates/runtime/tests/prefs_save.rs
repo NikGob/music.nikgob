@@ -40,7 +40,10 @@ fn a_failed_prefs_write_is_said() {
     let mut p = rt.state().prefs.clone();
     p.normalization = !p.normalization;
     rt.send(Command::SetPrefs(Box::new(p)));
-    wait_for(&rt, "the error", |s| s.toasts.iter().any(|t| t.text == "Не удалось сохранить настройки"));
+    wait_for(&rt, "the error", |s| {
+        let want = nikgob_core::i18n::errors_in(s.prefs.resolved_locale()).failed_save_prefs;
+        s.toasts.iter().any(|t| t.text == want)
+    });
     assert!(!path.exists());
 }
 
@@ -71,7 +74,10 @@ fn a_failed_prefs_write_is_tried_again() {
     p.normalization = !p.normalization;
     let want = p.normalization;
     rt.send(Command::SetPrefs(Box::new(p)));
-    wait_for(&rt, "the error", |s| s.toasts.iter().any(|t| t.text == "Не удалось сохранить настройки"));
+    wait_for(&rt, "the error", |s| {
+        let want = nikgob_core::i18n::errors_in(s.prefs.resolved_locale()).failed_save_prefs;
+        s.toasts.iter().any(|t| t.text == want)
+    });
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     wait_for(&rt, "the write", |_| path.exists());
     let written: Prefs = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -89,7 +95,10 @@ fn a_failed_prefs_write_is_made_at_shutdown() {
     p.normalization = !p.normalization;
     let want = p.normalization;
     rt.send(Command::SetPrefs(Box::new(p)));
-    wait_for(&rt, "the error", |s| s.toasts.iter().any(|t| t.text == "Не удалось сохранить настройки"));
+    wait_for(&rt, "the error", |s| {
+        let want = nikgob_core::i18n::errors_in(s.prefs.resolved_locale()).failed_save_prefs;
+        s.toasts.iter().any(|t| t.text == want)
+    });
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     drop(rt);
     let written: Prefs = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();

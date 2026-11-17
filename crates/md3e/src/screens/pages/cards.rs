@@ -238,7 +238,11 @@ fn shortcut_playing(state: &ViewState, sc: &Shortcut) -> bool {
     match sc {
         Shortcut::Release(r) => cur.release_id == Some(r.id),
         Shortcut::Artist(a) => cur.artist_id() == Some(a.id),
-        Shortcut::Playlist(p, _) => state.player.context.as_deref().is_some_and(|c| c.contains(&format!("«{}»", p.name))),
+        Shortcut::Playlist(p, _) => {
+            state.player.context_page == Some(Route::Playlist(p.id))
+                || matches!(&state.player.origin, nikgob_view::QueueOrigin::Playlist(name) if name == &p.name)
+                || (p.id == nikgob_view::LIKED_PLAYLIST && matches!(state.player.origin, nikgob_view::QueueOrigin::Liked))
+        }
     }
 }
 
@@ -264,7 +268,7 @@ pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize
         Shortcut::Playlist(p, _) => {
             let n = u64::from(p.track_count);
             (
-                p.name.clone(),
+                p.display_name().to_owned(),
                 format!("Плейлист · {n} {}", crate::screens::common::plural(n, "трек", "трека", "треков")),
                 Route::Playlist(p.id),
                 Command::PlayPlaylist { id: p.id, start: None, shuffle: false },
@@ -464,11 +468,12 @@ pub fn mix(
     // A blend's name too long for its line says a shorter form of it, the
     // whole in the name's tooltip.
     let title_role = TypeRole::TitleMedium.style();
-    let title = std::iter::once(&l.title)
-        .chain(&l.short_titles)
+    let full_title = l.title.as_str();
+    let title = std::iter::once(full_title)
+        .chain(l.short_titles.iter().map(String::as_str))
         .find(|t| rows_at(ui, t, title_role, text_w) <= 1)
-        .or(l.short_titles.last())
-        .unwrap_or(&l.title);
+        .or_else(|| l.short_titles.last().map(String::as_str))
+        .unwrap_or(full_title);
     let mut play = false;
     let mut more: Option<Response> = None;
     // While the mix plays its outline turns, as the player's cover does
@@ -481,7 +486,13 @@ pub fn mix(
         paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
-        let tip = if playing { "Пауза".to_owned() } else { format!("Слушать «{}»", l.title) };
+        let tip: std::borrow::Cow<'static, str> = if playing {
+            std::borrow::Cow::Borrowed("Пауза")
+        } else if hover {
+            std::borrow::Cow::Owned(format!("Слушать «{full_title}»"))
+        } else {
+            std::borrow::Cow::Borrowed("")
+        };
         if let Some(b) = grow_button(ui, id.with("play"), hover || playing, slot, play_button(playing, Size::M, &tip, id.with("play-btn"))) {
             play = b.clicked();
         }
@@ -495,8 +506,8 @@ pub fn mix(
     ui.painter().galley(name_rect.min, name, title_c);
     // Over the name: the whole of it when it is shortened; elsewhere why
     // the mix is offered.
-    if *title != l.title && resp.hover_pos().is_some_and(|p| name_rect.contains(p)) {
-        resp.clone().md3_tooltip(&l.title, None);
+    if title != full_title && resp.hover_pos().is_some_and(|p| name_rect.contains(p)) {
+        resp.clone().md3_tooltip(full_title, None);
     } else if let Some(why) = &l.why {
         resp.clone().md3_tooltip(why, None);
     }
@@ -807,7 +818,8 @@ pub fn liked_playlist(
         paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
-        let tip = if playing { "Пауза".to_owned() } else { format!("Слушать «{}»", p.name) };
+        let display = p.display_name();
+        let tip = if playing { "Пауза".to_owned() } else { format!("Слушать «{display}»") };
         let clicked = grow_button(ui, id.with("play"), hover || playing, slot, play_button(playing, Size::M, &tip, id.with("play-btn")))
             .is_some_and(|r| r.clicked());
         let m = Size::S.height();
@@ -816,7 +828,7 @@ pub fn liked_playlist(
         clicked
     });
     let name_c = if playing { s.primary } else { s.on_surface };
-    let name = text(ui, &p.name, TypeRole::TitleMedium.style(), name_c, cell.width(), 1);
+    let name = text(ui, p.display_name(), TypeRole::TitleMedium.style(), name_c, cell.width(), 1);
     ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0), name, name_c);
     let n = u64::from(p.track_count);
     let count = format!("{n} {}", crate::screens::common::plural(n, "трек", "трека", "треков"));
@@ -950,11 +962,14 @@ pub fn mix_do(ctx: &egui::Context, l: &LaneCard, item: MixItem, world: Option<&s
         MixItem::Shuffle => {
             let mut t = tracks();
             shuffle(&mut t);
-            out.push(Command::PlayTracks { tracks: t, start: 0, context: l.context() });
+            out.push(Command::PlayTracks { tracks: t, start: 0, context: l.origin() });
         }
         MixItem::PlayNext => out.push(Command::PlayNext(tracks())),
         MixItem::Enqueue => out.push(Command::Enqueue(tracks())),
-        MixItem::Save => out.push(Command::SaveTracksAsPlaylist { name: l.title.clone(), tracks: tracks() }),
+        MixItem::Save => out.push(Command::SaveTracksAsPlaylist {
+            name: l.origin().save_name().unwrap_or_else(|| l.display_title().into_owned()),
+            tracks: tracks(),
+        }),
         MixItem::Download => out.push(Command::DownloadTracks(l.tracks.iter().filter(|t| !t.has_local).map(|t| t.id).collect())),
         MixItem::Redraw => out.push(Command::RefreshMix { id: l.id() }),
         MixItem::Blend => {
@@ -1082,7 +1097,8 @@ pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usiz
         let w = (cell.right() - trail - left).max(10.0);
         let title_c = if playing { s.primary } else { s.on_surface };
         let k = text(ui, &kicker_case(&m.kicker), TypeRole::LabelMedium.style(), s.on_surface_variant, w, 1);
-        let t = text(ui, &m.title, TypeRole::TitleMedium.style(), title_c, w, 2);
+        let title = m.title.as_str();
+        let t = text(ui, title, TypeRole::TitleMedium.style(), title_c, w, 2);
         let d = text(ui, &m.subtitle, TypeRole::BodyMedium.style(), s.on_surface_variant, w, 1);
         let h = k.size().y + 4.0 + t.size().y + d.size().y;
         let mut y = cell.center().y - h / 2.0;
@@ -1097,7 +1113,12 @@ pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usiz
             crate::components::Equalizer::new(id.with("eq"), s.primary).size(20.0).playing(true).paint_at(ui, slot);
         }
         let slot = Rect::from_center_size(cover.center(), vec2(40.0, 40.0));
-        let clicked = grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::S, &format!("Слушать «{}»", m.title), id.with("play-btn")))
+        let tip: std::borrow::Cow<'static, str> = if hover {
+            std::borrow::Cow::Owned(format!("Слушать «{title}»"))
+        } else {
+            std::borrow::Cow::Borrowed("")
+        };
+        let clicked = grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::S, &tip, id.with("play-btn")))
             .is_some_and(|r| r.clicked());
         let d = Size::S.height();
         more = more_button(ui, id, hover, Rect::from_min_size(pos2(cell.right() - 8.0 - d, cell.top() + 8.0), vec2(d, d)));
@@ -1408,6 +1429,7 @@ mod tests {
         let l = LaneCard {
             key: nikgob_view::MixKey::OnRepeat,
             title: "Mix".into(),
+            mix_title: None,
             short_titles: Vec::new(),
             artists: Vec::new(),
             new_artists: Vec::new(),

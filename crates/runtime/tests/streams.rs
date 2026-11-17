@@ -351,7 +351,10 @@ fn a_copy_set_aside_is_tried_again_and_counts_once_it_plays() {
     rig.play(track);
     let first = rig.asked(0);
     assert_eq!(first.source, stream(Service::Youtube, "yt-discovery-1"));
-    assert!(!rig.rt.state().toasts.iter().any(|t| t.text.contains("Нет файла")));
+    let st = rig.rt.state();
+    let no_file = nikgob_core::i18n::errors_in(st.prefs.resolved_locale()).no_file_for_track;
+    assert!(!st.toasts.iter().any(|t| t.text == no_file || t.text.contains("Нет файла")));
+    drop(st);
     let tx = rig.rt.playback_sender();
     tx.send(PlaybackEvent::Started { id: first.id }).unwrap();
     tx.send(PlaybackEvent::Quality { id: first.id, label: "Opus".into() }).unwrap();

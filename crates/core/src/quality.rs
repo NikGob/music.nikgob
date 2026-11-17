@@ -14,6 +14,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::Locale;
 use crate::model::{Codec, UnixMs, quality_score, score};
 
 /// Bands of the averaged spectrum kept for the quality panel's chart.
@@ -336,8 +337,13 @@ pub fn codec_name(c: &Codec) -> String {
 /// «MP3 из поддельного FLAC», else the codec («FLAC», «Opus»). A doubt (a
 /// cut a real master may have too, [`CheckSummary::sure`]) is not said
 /// here: it belongs to the quality panel ([`label`], [`verdict_text`]).
+pub fn row_label_in(codec: &Codec, check: Option<&CheckSummary>, loc: Locale) -> String {
+    label_in(codec, None, check.filter(|c| c.sure()), loc)
+}
+
+/// [`row_label_in`] in Russian (preserved for callers not yet localized).
 pub fn row_label(codec: &Codec, check: Option<&CheckSummary>) -> String {
-    label(codec, None, check.filter(|c| c.sure()))
+    row_label_in(codec, check, Locale::Ru)
 }
 
 /// The check found the file (or the lossless one it was made from) made
@@ -390,18 +396,21 @@ pub fn can_get_better(codec: &Codec, rank: i32, check: Option<&CheckSummary>) ->
 }
 
 /// A row's label ([`row_label`]) says what [`mp3_inside`] does: «FLAC из
-/// MP3 ~192», «FLAC из сжатого». For a list that has only the label.
+/// MP3 ~192», «FLAC из сжатого», or their English equivalents. For a list
+/// that has only the label (callers with [`CheckSummary`] should use [`mp3_inside`]).
 pub fn row_label_mp3_inside(label: &str) -> bool {
-    [Codec::Flac, Codec::Alac, Codec::Wav]
-        .iter()
-        .any(|c| label.strip_prefix(codec_name(c).as_str()).is_some_and(|rest| rest.starts_with(" из ")))
+    [Codec::Flac, Codec::Alac, Codec::Wav].iter().any(|c| {
+        label
+            .strip_prefix(codec_name(c).as_str())
+            .is_some_and(|rest| rest.starts_with(" из ") || rest.starts_with(" from "))
+    })
 }
 
 /// The full label of the quality panel and of the import's questions, with
 /// the bitrate where it says something and a doubt worded as one: «MP3 320
 /// из поддельного FLAC», «MP3 320 из FLAC, возможно поддельного», «FLAC из
-/// MP3 ~192», «FLAC, возможно из MP3 320», «Opus 160».
-pub fn label(codec: &Codec, bitrate: Option<u32>, check: Option<&CheckSummary>) -> String {
+/// MP3 ~192», «FLAC, возможно из MP3 320», «Opus 160» (and English equivalents).
+pub fn label_in(codec: &Codec, bitrate: Option<u32>, check: Option<&CheckSummary>, loc: Locale) -> String {
     let name = codec_name(codec);
     let with_rate = match bitrate.filter(|_| !codec.is_lossless()) {
         Some(b) => format!("{name} {b}"),
@@ -410,77 +419,160 @@ pub fn label(codec: &Codec, bitrate: Option<u32>, check: Option<&CheckSummary>) 
     // A lossy file's own check says nothing (see [`check_counts`]).
     let Some(c) = check.filter(|c| check_counts(codec, c.made_from.as_ref())) else { return with_rate };
     if c.fake(codec) {
-        return match (c.origin.lossy_kbps(), c.sure()) {
-            (Some(k), true) => format!("{name} из MP3 ~{k}"),
-            (Some(k), false) => format!("{name}, возможно из MP3 {k}"),
-            (None, true) => format!("{name} из сжатого"),
-            (None, false) => format!("{name}, возможно из сжатого"),
+        return match loc {
+            Locale::Ru => match (c.origin.lossy_kbps(), c.sure()) {
+                (Some(k), true) => format!("{name} из MP3 ~{k}"),
+                (Some(k), false) => format!("{name}, возможно из MP3 {k}"),
+                (None, true) => format!("{name} из сжатого"),
+                (None, false) => format!("{name}, возможно из сжатого"),
+            },
+            Locale::En => match (c.origin.lossy_kbps(), c.sure()) {
+                (Some(k), true) => format!("{name} from MP3 ~{k}"),
+                (Some(k), false) => format!("{name}, possibly from MP3 {k}"),
+                (None, true) => format!("{name} from lossy"),
+                (None, false) => format!("{name}, possibly from lossy"),
+            },
         };
     }
     if c.from_fake(codec) {
         let from = c.made_from.as_ref().map(codec_name).unwrap_or_default();
-        return if c.sure() {
-            format!("{with_rate} из поддельного {from}")
-        } else {
-            format!("{with_rate} из {from}, возможно поддельного")
+        return match loc {
+            Locale::Ru => {
+                if c.sure() {
+                    format!("{with_rate} из поддельного {from}")
+                } else {
+                    format!("{with_rate} из {from}, возможно поддельного")
+                }
+            }
+            Locale::En => {
+                if c.sure() {
+                    format!("{with_rate} from fake {from}")
+                } else {
+                    format!("{with_rate} from possibly fake {from}")
+                }
+            }
         };
     }
     with_rate
 }
 
-/// "16,1 кГц".
-pub fn khz(hz: f32) -> String {
-    format!("{:.1} кГц", hz / 1000.0).replace('.', ",")
+/// [`label_in`] in Russian (preserved for callers not yet localized).
+pub fn label(codec: &Codec, bitrate: Option<u32>, check: Option<&CheckSummary>) -> String {
+    label_in(codec, bitrate, check, Locale::Ru)
 }
 
-/// The verdict in plain words for the quality panel. `codec` and
+/// Localized frequency label (`"16,1 кГц"` / `"16.1 kHz"`).
+pub fn khz_in(hz: f32, loc: Locale) -> String {
+    match loc {
+        Locale::Ru => format!("{:.1} кГц", hz / 1000.0).replace('.', ","),
+        Locale::En => format!("{:.1} kHz", hz / 1000.0),
+    }
+}
+
+/// "16,1 кГц".
+pub fn khz(hz: f32) -> String {
+    khz_in(hz, Locale::Ru)
+}
+
+/// The verdict in plain words for the quality panel in `loc`. `codec` and
 /// `bitrate` are the source's own; the check is one that counts
 /// ([`check_counts`]).
-pub fn verdict_text(codec: &Codec, bitrate: Option<u32>, check: &QualityCheck) -> String {
+pub fn verdict_text_in(codec: &Codec, bitrate: Option<u32>, check: &QualityCheck, loc: Locale) -> String {
     let _ = bitrate;
     let s = check.summary();
-    let like = |o: SoundOrigin| match o.lossy_kbps() {
-        Some(k) => format!("похоже на MP3 ~{k} кбит/с"),
-        None => "сжатый источник".to_owned(),
+    let like = |o: SoundOrigin| match loc {
+        Locale::Ru => match o.lossy_kbps() {
+            Some(k) => format!("похоже на MP3 ~{k} кбит/с"),
+            None => "сжатый источник".to_owned(),
+        },
+        Locale::En => match o.lossy_kbps() {
+            Some(k) => format!("looks like MP3 ~{k} kbps"),
+            None => "lossy source".to_owned(),
+        },
     };
     // A cut a real master may have too is said as a possibility.
-    let maybe = |o: SoundOrigin| {
-        let from = o.lossy_kbps().map_or_else(|| "сжатого файла".to_owned(), |k| format!("MP3 ~{k} кбит/с"));
-        format!("сделан из {from}; срез {} бывает и у настоящих записей", khz(check.cutoff_hz))
+    let maybe = |o: SoundOrigin| match loc {
+        Locale::Ru => {
+            let from = o.lossy_kbps().map_or_else(|| "сжатого файла".to_owned(), |k| format!("MP3 ~{k} кбит/с"));
+            format!("сделан из {from}; срез {} бывает и у настоящих записей", khz_in(check.cutoff_hz, loc))
+        }
+        Locale::En => {
+            let from = o.lossy_kbps().map_or_else(|| "a lossy file".to_owned(), |k| format!("MP3 ~{k} kbps"));
+            format!("transcoded from {from}; a {} cutoff also occurs in genuine masters", khz_in(check.cutoff_hz, loc))
+        }
     };
     if s.fake(codec) {
         if !s.sure() {
-            return format!("Возможно, {}", maybe(check.origin));
+            return match loc {
+                Locale::Ru => format!("Возможно, {}", maybe(check.origin)),
+                Locale::En => format!("Possibly {}", maybe(check.origin)),
+            };
         }
-        return format!("Не настоящий lossless: сделан из сжатого файла, {}", like(check.origin));
+        return match loc {
+            Locale::Ru => format!("Не настоящий lossless: сделан из сжатого файла, {}", like(check.origin)),
+            Locale::En => format!("Not true lossless: transcoded from a lossy file, {}", like(check.origin)),
+        };
     }
     if s.from_fake(codec) {
         let from = check.made_from.as_ref().map(codec_name).unwrap_or_default();
         if !s.sure() {
-            return format!("Сделан из {from}, который, возможно, {}", maybe(check.origin));
+            return match loc {
+                Locale::Ru => format!("Сделан из {from}, который, возможно, {}", maybe(check.origin)),
+                Locale::En => format!("Encoded from {from}, possibly {}", maybe(check.origin)),
+            };
         }
-        return format!("Сделан из поддельного {from}: внутри был сжатый звук, {}", like(check.origin));
+        return match loc {
+            Locale::Ru => format!("Сделан из поддельного {from}: внутри был сжатый звук, {}", like(check.origin)),
+            Locale::En => format!("Encoded from fake {from}: contained lossy audio, {}", like(check.origin)),
+        };
     }
-    match (s.verdict, &check.made_from) {
-        (Verdict::Unknown, _) => "Не определить: запись слишком тихая или короткая".into(),
-        (Verdict::Upsampled, _) => "Lossless, но не Hi-Res: внутри качество CD, растянутое до большей частоты".into(),
-        (Verdict::Genuine, Some(from)) => format!("Сделан из настоящего {}", codec_name(from)),
-        (Verdict::Genuine, None) if codec.is_lossless() => "Настоящий lossless: полоса без среза".into(),
-        _ => "Полоса соответствует формату".into(),
+    match (loc, s.verdict, &check.made_from) {
+        (Locale::Ru, Verdict::Unknown, _) => "Не определить: запись слишком тихая или короткая".into(),
+        (Locale::En, Verdict::Unknown, _) => "Inconclusive: recording is too quiet or too short".into(),
+        (Locale::Ru, Verdict::Upsampled, _) => "Lossless, но не Hi-Res: внутри качество CD, растянутое до большей частоты".into(),
+        (Locale::En, Verdict::Upsampled, _) => "Lossless, not Hi-Res: CD-quality audio upsampled to a higher rate".into(),
+        (Locale::Ru, Verdict::Genuine, Some(from)) => format!("Сделан из настоящего {}", codec_name(from)),
+        (Locale::En, Verdict::Genuine, Some(from)) => format!("Encoded from genuine {}", codec_name(from)),
+        (Locale::Ru, Verdict::Genuine, None) if codec.is_lossless() => "Настоящий lossless: полоса без среза".into(),
+        (Locale::En, Verdict::Genuine, None) if codec.is_lossless() => "True lossless: full frequency band".into(),
+        (Locale::Ru, _, _) => "Полоса соответствует формату".into(),
+        (Locale::En, _, _) => "Spectrum matches format".into(),
     }
 }
 
-/// «Полоса до 16,1 кГц»; for a full band, «Полоса до 22,0 кГц, без среза».
-pub fn cutoff_text(check: &QualityCheck) -> Option<String> {
+/// [`verdict_text_in`] in Russian (preserved for callers not yet localized).
+pub fn verdict_text(codec: &Codec, bitrate: Option<u32>, check: &QualityCheck) -> String {
+    verdict_text_in(codec, bitrate, check, Locale::Ru)
+}
+
+/// «до 16,1 кГц» / «up to 16.1 kHz»; for a full band, «до 22,0 кГц, без среза» / «up to 22.0 kHz, no cutoff».
+pub fn cutoff_text_in(check: &QualityCheck, loc: Locale) -> Option<String> {
     if check.verdict == Verdict::Unknown || check.cutoff_hz <= 0.0 {
         return None;
     }
     let nyquist = check.sample_rate as f32 / 2.0;
-    Some(if check.cutoff_hz >= nyquist * 0.98 {
-        format!("до {}, без среза", khz(nyquist))
-    } else {
-        format!("до {}", khz(check.cutoff_hz))
+    let full = check.cutoff_hz >= nyquist * 0.98;
+    Some(match loc {
+        Locale::Ru => {
+            if full {
+                format!("до {}, без среза", khz_in(nyquist, loc))
+            } else {
+                format!("до {}", khz_in(check.cutoff_hz, loc))
+            }
+        }
+        Locale::En => {
+            if full {
+                format!("up to {}, no cutoff", khz_in(nyquist, loc))
+            } else {
+                format!("up to {}", khz_in(check.cutoff_hz, loc))
+            }
+        }
     })
+}
+
+/// [`cutoff_text_in`] in Russian (preserved for callers not yet localized).
+pub fn cutoff_text(check: &QualityCheck) -> Option<String> {
+    cutoff_text_in(check, Locale::Ru)
 }
 
 /// Averages `levels_db` (dB, bin `k` of `0..=n-1` spanning 0..nyquist) into
@@ -805,5 +897,98 @@ mod tests {
         assert!(really_better(&Codec::Flac, score::CD_LOSSLESS, None, score::HI_RES_LOSSLESS));
         assert!(!really_better(&Codec::Flac, score::CD_LOSSLESS, None, score::CD_LOSSLESS));
         assert!(!can_get_better(&Codec::Flac, score::CD_LOSSLESS, None));
+    }
+
+    #[test]
+    fn english_labels_verdicts_and_cutoffs() {
+        let plain = check(Verdict::Transcoded, 16_000.0, None);
+        assert_eq!(row_label_in(&Codec::Flac, Some(&plain.summary()), Locale::En), "FLAC from MP3 ~128");
+        assert_eq!(label_in(&Codec::Flac, Some(1000), Some(&plain.summary()), Locale::En), "FLAC from MP3 ~128");
+        assert!(row_label_mp3_inside(&row_label_in(&Codec::Flac, Some(&plain.summary()), Locale::En)));
+        assert!(row_label_mp3_inside("WAV from lossy"));
+        assert!(!row_label_mp3_inside("FLAC, possibly from MP3 320"));
+        assert_eq!(
+            verdict_text_in(&Codec::Flac, None, &plain, Locale::En),
+            "Not true lossless: transcoded from a lossy file, looks like MP3 ~128 kbps"
+        );
+        assert_eq!(cutoff_text_in(&plain, Locale::En).as_deref(), Some("up to 16.0 kHz"));
+
+        let no_kbps = CheckSummary {
+            verdict: Verdict::Transcoded,
+            origin: SoundOrigin::Unknown,
+            made_from: None,
+            cutoff_hz: Some(16_000),
+        };
+        assert_eq!(row_label_in(&Codec::Wav, Some(&no_kbps), Locale::En), "WAV from lossy");
+
+        let maybe = check(Verdict::Transcoded, 20_186.0, None);
+        assert_eq!(row_label_in(&Codec::Flac, Some(&maybe.summary()), Locale::En), "FLAC");
+        assert_eq!(
+            label_in(&Codec::Flac, Some(1000), Some(&maybe.summary()), Locale::En),
+            "FLAC, possibly from MP3 320"
+        );
+        assert!(!row_label_mp3_inside(&row_label_in(&Codec::Flac, Some(&maybe.summary()), Locale::En)));
+        assert_eq!(
+            verdict_text_in(&Codec::Flac, None, &maybe, Locale::En),
+            "Possibly transcoded from MP3 ~320 kbps; a 20.2 kHz cutoff also occurs in genuine masters"
+        );
+
+        let unsure_unknown = CheckSummary {
+            verdict: Verdict::Transcoded,
+            origin: SoundOrigin::Unknown,
+            made_from: None,
+            cutoff_hz: Some(20_186),
+        };
+        assert_eq!(
+            label_in(&Codec::Flac, None, Some(&unsure_unknown), Locale::En),
+            "FLAC, possibly from lossy"
+        );
+
+        let conv = check(Verdict::Transcoded, 19_600.0, Some(Codec::Flac));
+        assert_eq!(label_in(&Codec::Mp3, Some(320), Some(&conv.summary()), Locale::En), "MP3 320 from fake FLAC");
+        assert_eq!(row_label_in(&Codec::Mp3, Some(&conv.summary()), Locale::En), "MP3 from fake FLAC");
+        assert!(!row_label_mp3_inside(&row_label_in(&Codec::Mp3, Some(&conv.summary()), Locale::En)));
+        assert_eq!(
+            verdict_text_in(&Codec::Mp3, Some(320), &conv, Locale::En),
+            "Encoded from fake FLAC: contained lossy audio, looks like MP3 ~256 kbps"
+        );
+
+        let conv_unsure = check(Verdict::Transcoded, 20_100.0, Some(Codec::Flac));
+        assert_eq!(
+            label_in(&Codec::Mp3, Some(320), Some(&conv_unsure.summary()), Locale::En),
+            "MP3 320 from possibly fake FLAC"
+        );
+        assert_eq!(row_label_in(&Codec::Mp3, Some(&conv_unsure.summary()), Locale::En), "MP3");
+        assert_eq!(
+            verdict_text_in(&Codec::Mp3, Some(320), &conv_unsure, Locale::En),
+            "Encoded from FLAC, possibly transcoded from MP3 ~320 kbps; a 20.1 kHz cutoff also occurs in genuine masters"
+        );
+
+        let real = check(Verdict::Genuine, 22_050.0, None);
+        assert_eq!(row_label_in(&Codec::Flac, Some(&real.summary()), Locale::En), "FLAC");
+        assert_eq!(verdict_text_in(&Codec::Flac, None, &real, Locale::En), "True lossless: full frequency band");
+        assert_eq!(cutoff_text_in(&real, Locale::En).as_deref(), Some("up to 22.0 kHz, no cutoff"));
+
+        let opus = check(Verdict::Genuine, 22_050.0, Some(Codec::Flac));
+        assert_eq!(label_in(&Codec::Opus, Some(160), Some(&opus.summary()), Locale::En), "Opus 160");
+        assert_eq!(verdict_text_in(&Codec::Opus, Some(160), &opus, Locale::En), "Encoded from genuine FLAC");
+
+        let up = check(Verdict::Upsampled, 22_000.0, None);
+        assert_eq!(
+            verdict_text_in(&Codec::Flac, None, &up, Locale::En),
+            "Lossless, not Hi-Res: CD-quality audio upsampled to a higher rate"
+        );
+
+        let unknown = check(Verdict::Unknown, 0.0, None);
+        assert_eq!(
+            verdict_text_in(&Codec::Flac, None, &unknown, Locale::En),
+            "Inconclusive: recording is too quiet or too short"
+        );
+        assert_eq!(cutoff_text_in(&unknown, Locale::En), None);
+
+        let mp3 = check(Verdict::Transcoded, 20_100.0, None);
+        assert_eq!(verdict_text_in(&Codec::Mp3, Some(320), &mp3, Locale::En), "Spectrum matches format");
+        assert_eq!(khz_in(16_100.0, Locale::En), "16.1 kHz");
+        assert_eq!(khz_in(16_100.0, Locale::Ru), "16,1 кГц");
     }
 }

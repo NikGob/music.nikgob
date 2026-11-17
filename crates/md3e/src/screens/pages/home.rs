@@ -775,13 +775,15 @@ pub(super) fn shortcut_key(sc: &Shortcut) -> u64 {
 
 /// The lane playing now: its queue was started from it and plays.
 pub(super) fn lane_playing(state: &ViewState, l: &LaneCard) -> bool {
-    state.player.status == Status::Playing && state.player.context.as_deref() == Some(l.context().as_str())
+    state.player.status == Status::Playing && l.matches_origin(&state.player.origin)
 }
 
 /// The queue plays from «Любимые» (its page is the queue's), as a mix's
 /// card says of its own ([`lane_playing`]).
 fn liked_playing(state: &ViewState, p: &PlaylistCard) -> bool {
-    state.player.status == Status::Playing && state.player.context_page == Some(Route::Playlist(p.id))
+    state.player.status == Status::Playing
+        && (state.player.context_page == Some(Route::Playlist(p.id))
+            || matches!(state.player.origin, nikgob_view::QueueOrigin::Liked))
 }
 
 /// Where the playing song is, in seconds (the heart of «Любимые» beats
@@ -1282,8 +1284,7 @@ pub fn day_tiles(h: &HomeView) -> Vec<&MixCard> {
 /// The queue plays the tile of the day `m` (started from it: the queue
 /// says its name, «микса «…»» or «радио «…»»).
 pub(super) fn tile_playing(state: &ViewState, m: &MixCard) -> bool {
-    state.player.status == Status::Playing
-        && state.player.context.as_deref().is_some_and(|c| c.ends_with(&format!("«{}»", m.title)) && !m.title.is_empty())
+    state.player.status == Status::Playing && m.matches_origin(&state.player.origin)
 }
 
 /// Tiles of the day in view of `n`, `fit` to a row: those that fit share

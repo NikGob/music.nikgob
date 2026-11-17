@@ -166,7 +166,7 @@ impl Worker {
             self.recs.newlog.log.offered.insert(p.song.clone());
             self.new_log_save();
             log::info!("new music: «{}» heard out twice, offered to keep", p.title);
-            self.toast(
+            self.toast_info(
                 format!("Оставить у себя «{}»?", p.title),
                 Some(("♡ Оставить".into(), Command::Like(LikeTarget::Track(track), true))),
             );

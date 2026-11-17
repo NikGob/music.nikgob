@@ -410,7 +410,7 @@ pub fn playlist_card_with(
     if let Some(s) = p.service {
         subtitle = format!("{} · {subtitle}", s.display_name());
     }
-    let o = MediaCard::new(&p.name)
+    let o = MediaCard::new(p.display_name())
         .subtitle(subtitle)
         .cover_opt(p.cover.as_ref().map(|c| c.uri()))
         .placeholder_icon(if p.pinned { Icon::Favorite } else { Icon::QueueMusic })
@@ -1054,16 +1054,16 @@ pub enum PlayFrom {
     /// «Весь альбом» (true) or «Мои треки».
     ReleaseAs(nikgob_view::ReleaseId, bool),
     Playlist(nikgob_view::PlaylistId),
-    Tracks(Vec<nikgob_view::TrackId>, String),
+    Tracks(Vec<nikgob_view::TrackId>, nikgob_view::QueueOrigin),
     /// Library rows of the search: the row played is a search's pick
     /// ([`nikgob_view::Prefs::search_play`] says what follows it).
-    SearchRows(String),
+    SearchRows(nikgob_view::QueueOrigin),
     /// The merged «Всё» search: a queue of library and stream tracks,
     /// started at `at` (the row's own place in it).
     Search {
         picks: Vec<nikgob_view::SearchPick>,
         at: usize,
-        context: String,
+        context: nikgob_view::QueueOrigin,
     },
 }
 

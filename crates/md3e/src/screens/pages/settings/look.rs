@@ -19,6 +19,7 @@ use crate::{
 
 pub(super) fn show(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
     group(ui, "Тема");
+    menu(ui, Id::Language, p);
     segments(ui, Id::Theme, p);
     menu(ui, Id::Scheme, p);
     segments(ui, Id::Contrast, p);

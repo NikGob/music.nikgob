@@ -46,7 +46,7 @@ const SLOW_BUILD: Duration = Duration::from_millis(1000);
 /// The page shown is kept for the next start at most this often.
 const KEEP_EVERY: Duration = Duration::from_secs(20);
 /// The kept page's format: one of another is not read.
-const KEPT_VERSION: u32 = 1;
+const KEPT_VERSION: u32 = 2;
 /// The kept page's file, beside the prefs.
 const KEPT_FILE: &str = "home.json";
 /// «Слушать снова» gets this many more songs at its row's end.
@@ -103,14 +103,15 @@ enum ToBuilder {
     Job(Box<Job>),
     /// Something to let go of off the loop ([`Worker::drop_off_loop`]).
     Drop(Box<dyn Any + Send>),
-    /// The page to keep for the next start, and its file.
-    Keep(Box<v::HomeView>, PathBuf),
+    /// The page to keep for the next start, its locale, and its file.
+    Keep(Box<v::HomeView>, v::Locale, PathBuf),
 }
 
 /// The kept page as written…
 #[derive(serde::Serialize)]
 struct KeptRef<'a> {
     version: u32,
+    locale: &'a str,
     page: &'a v::HomeView,
 }
 
@@ -118,14 +119,16 @@ struct KeptRef<'a> {
 #[derive(serde::Deserialize)]
 struct Kept {
     version: u32,
+    #[serde(default)]
+    locale: String,
     page: v::HomeView,
 }
 
-/// The page the last run kept in `path`, if it reads.
-fn read_kept(path: &Path) -> Option<v::HomeView> {
+/// The page the last run kept in `path`, if it reads and matches `loc`.
+fn read_kept(path: &Path, loc: v::Locale) -> Option<v::HomeView> {
     let bytes = std::fs::read(path).ok()?;
     match serde_json::from_slice::<Kept>(&bytes) {
-        Ok(k) if k.version == KEPT_VERSION => Some(k.page),
+        Ok(k) if k.version == KEPT_VERSION && k.locale == loc.code() => Some(k.page),
         Ok(_) => None,
         Err(e) => {
             log::debug!("home: the kept page does not read: {e}");
@@ -135,8 +138,8 @@ fn read_kept(path: &Path) -> Option<v::HomeView> {
 }
 
 /// Keeps `page` in `path` (written aside and renamed: never half a file).
-fn write_kept(page: &v::HomeView, path: &Path) {
-    let json = match serde_json::to_vec(&KeptRef { version: KEPT_VERSION, page }) {
+fn write_kept(page: &v::HomeView, loc: v::Locale, path: &Path) {
+    let json = match serde_json::to_vec(&KeptRef { version: KEPT_VERSION, locale: loc.code(), page }) {
         Ok(j) => j,
         Err(e) => {
             log::warn!("home: the page cannot be kept: {e}");
@@ -260,7 +263,7 @@ fn run(inbox: &Receiver<ToBuilder>, out: &Sender<Done>, mut res: Resolver) {
 fn take(m: ToBuilder, job: &mut Option<Box<Job>>) {
     match m {
         ToBuilder::Drop(garbage) => drop(garbage),
-        ToBuilder::Keep(page, path) => write_kept(&page, &path),
+        ToBuilder::Keep(page, loc, path) => write_kept(&page, loc, &path),
         ToBuilder::Job(mut next) => {
             next.full |= job.as_ref().is_some_and(|j| j.full);
             *job = Some(next);
@@ -280,7 +283,7 @@ fn build(res: &mut Resolver, job: Job) -> Done {
     let page = if full {
         let home = crate::home::build_with(&lib, &visit);
         let base = started.elapsed();
-        let mut view = res.home(&home);
+        let mut view = res.home_in(&home, parts.locale);
         parts.apply(&mut view, res);
         let took = started.elapsed();
         let line = format!(
@@ -453,7 +456,8 @@ impl Worker {
     /// first page is built.
     pub(crate) fn show_kept_home(&mut self) {
         let Some(path) = self.home_build.keep.clone() else { return };
-        let Some(mut page) = read_kept(&path) else { return };
+        let loc = self.state.read().prefs.resolved_locale();
+        let Some(mut page) = read_kept(&path, loc) else { return };
         page.loading = false;
         page.greeting_hour = jiff::Zoned::now().hour() as u8;
         log::debug!("home: the last run's page is shown while this run's is built");
@@ -480,18 +484,21 @@ impl Worker {
         }
         hb.kept_at = Some(Instant::now());
         hb.keep_due = false;
-        let page = self.state.read().home.clone();
+        let (page, loc) = {
+            let s = self.state.read();
+            (s.home.clone(), s.prefs.resolved_locale())
+        };
         if page.loading {
             return;
         }
         if now || self.home_build.here.is_some() {
-            write_kept(&page, &path);
+            write_kept(&page, loc, &path);
             return;
         }
-        if let Err(e) = self.home_build.jobs.send(ToBuilder::Keep(Box::new(page), path))
-            && let ToBuilder::Keep(page, path) = e.0
+        if let Err(e) = self.home_build.jobs.send(ToBuilder::Keep(Box::new(page), loc, path))
+            && let ToBuilder::Keep(page, loc, path) = e.0
         {
-            write_kept(&page, &path);
+            write_kept(&page, loc, &path);
         }
     }
 
@@ -589,6 +596,7 @@ mod tests {
         v::LaneCard {
             key,
             title: "Любимые".into(),
+            mix_title: None,
             short_titles: Vec::new(),
             artists: vec!["Кино".into()],
             new_artists: Vec::new(),
@@ -626,11 +634,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(KEPT_FILE);
         let page = v::HomeView { greeting_hour: 7, history: true, lanes: vec![lane(v::MixKey::Liked)], ..Default::default() };
-        write_kept(&page, &path);
-        assert_eq!(read_kept(&path), Some(page));
+        write_kept(&page, v::Locale::Ru, &path);
+        assert_eq!(read_kept(&path, v::Locale::Ru), Some(page));
+        assert_eq!(read_kept(&path, v::Locale::En), None);
         std::fs::write(&path, br#"{"version":0,"page":{}}"#).unwrap();
-        assert_eq!(read_kept(&path), None);
-        assert_eq!(read_kept(&dir.path().join("none.json")), None);
+        assert_eq!(read_kept(&path, v::Locale::Ru), None);
+        assert_eq!(read_kept(&dir.path().join("none.json"), v::Locale::Ru), None);
     }
 
     #[test]

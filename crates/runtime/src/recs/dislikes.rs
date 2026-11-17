@@ -162,15 +162,15 @@ impl Worker {
             }
             // Taken back by hand (not the undo of a dislike): «Отменить»
             // marks it again.
-            let undo = (!relike).then(|| ("Отменить".to_owned(), Command::Dislike { track, dislike: true, sure: true, relike: false }));
-            self.toast(format!("«{title}» снова в рекомендациях"), undo);
+            let undo = (!relike).then(|| self.undo_action(Command::Dislike { track, dislike: true, sure: true, relike: false }));
+            self.toast_info(format!("«{title}» снова в рекомендациях"), undo);
             self.dislikes_changed();
             return;
         }
         let liked = self.lib.is_liked(LikeTarget::Track(track)).unwrap_or(false);
         if !sure && (liked || self.loved(track)) {
             let text = if liked { format!("«{title}» в Любимых. Не нравится?") } else { format!("«{title}» ты часто дослушиваешь. Не нравится?") };
-            self.toast(text, Some(("Не нравится".into(), Command::Dislike { track, dislike: true, sure: true, relike: false })));
+            self.toast_info(text, Some(("Не нравится".into(), Command::Dislike { track, dislike: true, sure: true, relike: false })));
             return;
         }
         if self.log_err("отзыв", self.lib.set_rec_feedback("track", &track.to_string(), true)).is_none() {
@@ -179,10 +179,8 @@ impl Worker {
         if liked {
             self.like_quietly(track, false);
         }
-        self.toast(
-            format!("Не нравится: «{title}»"),
-            Some(("Отменить".into(), Command::Dislike { track, dislike: false, sure: true, relike: liked })),
-        );
+        let undo = self.undo_action(Command::Dislike { track, dislike: false, sure: true, relike: liked });
+        self.toast_info(format!("Не нравится: «{title}»"), Some(undo));
         self.dislikes_changed();
         let skips = self.state.read().prefs.dislike_skips;
         self.radio_disliked(track, skips);
@@ -199,7 +197,7 @@ impl Worker {
             if OFFER_AT.contains(&n)
                 && let Some(name) = self.lib.get_artist(a).ok().flatten().map(|a| a.name)
             {
-                self.toast(
+                self.toast_info(
                     format!("Не рекомендовать исполнителя «{name}»?"),
                     Some(("Не рекомендовать".into(), Command::RecFeedback { target: v::RecTarget::Artist(a), dislike: true })),
                 );

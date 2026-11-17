@@ -367,7 +367,7 @@ fn start_ahead(
             library: lib.clone(),
             streams,
             library_dir: std::env::temp_dir(),
-            prefs: Prefs { autoplay: false, ..Prefs::default() },
+            prefs: Prefs { autoplay: false, language: nikgob_view::LangPref::Ru, ..Prefs::default() },
             prefs_path: None,
             settings_path: None,
             import: None,

@@ -79,7 +79,7 @@ pub fn show(ui: &mut Ui, key: &str, state: &ViewState, pages: &mut PageState, ou
                 "world-liked",
                 &v.liked,
                 widgets::Lead::Cover,
-                &widgets::PlayFrom::Tracks(ids, v.world.title.clone()),
+                &widgets::PlayFrom::Tracks(ids, nikgob_view::QueueOrigin::World(v.world.title.clone())),
                 state,
                 pages,
                 out,
@@ -168,7 +168,7 @@ fn header(ui: &mut Ui, grid: Grid, v: &WorldView, state: &ViewState, out: &mut V
         out.push(worlds::play_primary(w));
     }
     if b.add(Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Outlined).id_salt("world-shuffle")).clicked() {
-        out.push(Command::PlayTracks { tracks: w.shuffled.clone(), start: 0, context: format!("мира «{}»", w.title) });
+        out.push(Command::PlayTracks { tracks: w.shuffled.clone(), start: 0, context: nikgob_view::QueueOrigin::World(w.title.clone()) });
     }
     Theme::set(&ctx, page_theme);
 }

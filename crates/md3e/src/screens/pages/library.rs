@@ -799,7 +799,7 @@ fn playlist_row(ui: &mut Ui, p: &PlaylistCard, pages: &mut PageState, out: &mut 
     if let Some(service) = p.service {
         line = format!("{} · {line}", service.display_name());
     }
-    let o = ListItem::new(&p.name)
+    let o = ListItem::new(p.display_name())
         .supporting(line)
         .leading(Leading::Image(
             p.cover.as_ref().map(|c| c.uri()),

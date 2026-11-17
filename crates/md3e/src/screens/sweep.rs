@@ -212,7 +212,7 @@ pub const ALL: &[SettingId] = {
         LyricsGapSize, LyricsCountdown, WaveFallback, LyricsReturn, LyricsGenius, SaveLyrics, LyricsCheck, LyricsKeepMisfits, LyricsWordsPlaying,
         LyricsLinesAuto, LyricsStreams, LyricsStreamKeep, LyricsRecognize, LyricsModels,
         // Вид.
-        Theme, Scheme, Contrast, Preset(Area::Track), SettingId::CoverShape, ShapeRange, ShapePick, CoverSpin, CoverDir,
+        Language, Theme, Scheme, Contrast, Preset(Area::Track), SettingId::CoverShape, ShapeRange, ShapePick, CoverSpin, CoverDir,
         CoverSpinSpeed, CoverPulse, CoverPulseStrength, CoverPauseMorph, Ring, RingStyle,
         Ambient, AmbientStrength, BgShapes, BgCount, BgSize, BgOpacity, BgSpeed, BgReact, BgColors, BgHue, ProgressWave, NpVolume,
         NpVolumeHold, CoverClickPause, DblClickShape, TapWait, NpMotion, PlayerButton(B::Shuffle), PlayerButton(B::Repeat),
@@ -287,7 +287,7 @@ fn spec(id: SettingId) -> Spec {
         | S::LikedAlbumsPlace | S::UpgradeBar | S::UpgradeAuto | S::PlaylistSync | S::AlbumDate => Spec::Choice(Segments),
         // Swatches, picked like segments.
         S::BgHue => Spec::Choice(Segments),
-        S::Scheme | S::WaveFallback | S::LyricsGap | S::DblClickShape | S::NewShareBy(_) | S::RadioNoRepeat | S::RadioExplore
+        S::Language | S::Scheme | S::WaveFallback | S::LyricsGap | S::DblClickShape | S::NewShareBy(_) | S::RadioNoRepeat | S::RadioExplore
         | S::RadioUnheard | S::BackgroundCards | S::BgShapes | S::UpgradeEvery | S::FakeFlac | S::ListShuffle(_) | S::AlbumOpens
         | S::SearchPlay => Spec::Choice(Menu),
         S::SoundNeural => Spec::Fixed(Menu, "a mode downloads the neural sound model; the sweep leaves it as it is"),
@@ -700,6 +700,7 @@ pub fn screens(id: SettingId) -> Vec<Screen> {
     use Screen::*;
     use SettingId as S;
     match id {
+        S::Language => vec![Home, Library, Album, Np, NpQueue],
         S::Theme | S::Contrast | S::Scheme => vec![Home, Album, Np, NpLyrics],
         S::ProgressWave => vec![Np, NpPaused, Home],
         S::NpVolume | S::NpVolumeHold | S::FpsLimit | S::DislikeButton | S::PlayerButton(_) => vec![Np],
@@ -776,7 +777,7 @@ pub fn tab_first(tab: usize) -> SettingId {
     match tab {
         settings_help::TAB_MUSIC => SettingId::OutputDevice,
         settings_help::TAB_LYRICS => SettingId::LyricsStyle,
-        settings_help::TAB_LOOK => SettingId::Theme,
+        settings_help::TAB_LOOK => SettingId::Language,
         settings_help::TAB_SERVICES => SettingId::SpotifyEnabled,
         settings_help::TAB_DOWNLOADS => SettingId::Preset(Area::Sources),
         settings_help::TAB_NET => SettingId::MeshDevices,
@@ -919,7 +920,7 @@ mod tests {
             | S::LyricsGlow | S::LyricsSoftEdges | S::LyricsSoftDepth | S::LyricsSoftStrength | S::LyricsSoftFade | S::LyricsGap
             | S::LyricsGapWaves | S::LyricsGapHeight | S::LyricsGapSize | S::LyricsCountdown | S::WaveFallback | S::LyricsReturn
             | S::LyricsGenius | S::SaveLyrics | S::LyricsCheck | S::LyricsWordsPlaying | S::LyricsLinesAuto | S::LyricsStreams
-            | S::LyricsStreamKeep | S::LyricsRecognize | S::LyricsModels | S::Theme | S::Scheme | S::Contrast | S::CoverShape
+            | S::LyricsStreamKeep | S::LyricsRecognize | S::LyricsModels | S::Language | S::Theme | S::Scheme | S::Contrast | S::CoverShape
             | S::ShapeRange | S::ShapePick | S::CoverSpin | S::CoverDir | S::CoverPulse | S::CoverPauseMorph | S::Ring
             | S::RingStyle | S::Ambient | S::AmbientStrength | S::BgShapes | S::BgCount
             | S::BgSize | S::BgOpacity | S::BgSpeed | S::BgReact | S::BgColors | S::BgHue | S::ProgressWave | S::NpVolume

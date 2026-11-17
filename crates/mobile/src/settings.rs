@@ -8,10 +8,10 @@
 use egui::{Id, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use nikgob_core::streaming::{Account, LoginInput, Service};
 use nikgob_md3e::components::paint::{self, Radii};
-use nikgob_md3e::components::{Button, ConnectedGroup, LoadingIndicator, Size, Style, Switch, TextField, anim};
+use nikgob_md3e::components::{Button, ConnectedGroup, LoadingIndicator, Menu, MenuItem, Size, Style, Switch, TextField, anim};
 use nikgob_md3e::screens::phone;
 use nikgob_md3e::{Icon, Theme, TypeRole};
-use nikgob_view::{Command, LIKED_PLAYLIST, MeshPairing, Route, ThemeMode, ViewState, kind_label};
+use nikgob_view::{Command, LIKED_PLAYLIST, LangPref, Locale, MeshPairing, PrefPatch, Route, ThemeMode, ViewState, kind_label};
 
 use crate::parts::{self, PageOut};
 use crate::{PageFrame, detail, text};
@@ -99,9 +99,14 @@ impl Settings {
     fn look(&mut self, ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
         group_title(ui, "Вид");
         let p = &state.prefs;
+        let loc = p.resolved_locale();
+        let lang_label = nikgob_core::i18n::settings_in(loc).language_label;
+        if let Some(lang) = language_picker(ui, (0, 3), Icon::Tune, lang_label, p.language, loc) {
+            out.push(Command::SetPref(PrefPatch::Language(lang)));
+        }
         // The theme: a connected group as wide as its row (three chips did
         // not fit a 360 dp phone).
-        let (r, _) = group_row(ui, Id::new("set-theme-row"), 0, 2, Sense::hover());
+        let (r, _) = group_row(ui, Id::new("set-theme-row"), 1, 3, Sense::hover());
         let inner = r.shrink2(vec2(8.0, 8.0));
         let mut cui = ui.new_child(UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)));
         let modes = [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light];
@@ -112,7 +117,7 @@ impl Settings {
             next.theme = modes[i];
             out.push(Command::SetPrefs(Box::new(next)));
         }
-        if let Some(on) = switch(ui, "set-motion", (1, 2), Icon::AutoAwesome, "Меньше движения", p.reduced_motion) {
+        if let Some(on) = switch(ui, "set-motion", (2, 3), Icon::AutoAwesome, "Меньше движения", p.reduced_motion) {
             let mut next = p.clone();
             next.reduced_motion = on;
             out.push(Command::SetPrefs(Box::new(next)));
@@ -265,6 +270,31 @@ fn switch(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, pos: (usize
     }
 }
 
+/// A row of a group (`pos`: its place and the group's length) that opens a
+/// menu to pick a [`LangPref`], showing the current choice at its end.
+fn language_picker(ui: &mut Ui, pos: (usize, usize), icon: Icon, label: &str, current: LangPref, loc: Locale) -> Option<LangPref> {
+    let theme = Theme::get(ui.ctx());
+    let s = theme.scheme;
+    let id = Id::new("set-lang-row");
+    let (r, resp) = group_row(ui, id, pos.0, pos.1, Sense::click());
+    icon.widget(false, s.on_surface_variant, 24.0)
+        .paint_at(ui, Rect::from_center_size(pos2(r.left() + 16.0 + 12.0, r.center().y), vec2(24.0, 24.0)));
+    let ts = TypeRole::BodyLarge.style();
+    let chevron = Rect::from_center_size(pos2(r.right() - 16.0 - 9.0, r.center().y), vec2(18.0, 18.0));
+    Icon::ExpandMore.widget(false, s.on_surface_variant, 18.0).paint_at(ui, chevron);
+    let ls = TypeRole::LabelLarge.style();
+    let g = text::line(ui, current.label_in(loc), ls, s.primary, 140.0);
+    let val_x = chevron.left() - 6.0 - g.size().x;
+    ui.painter().galley(pos2(val_x, r.center().y - g.size().y * 0.5), g, s.primary);
+    let right = val_x - 12.0;
+    text::paint_line(ui, pos2(r.left() + 56.0, r.center().y - ts.line_height * 0.5), label, ts, s.on_surface, right - r.left() - 56.0);
+    let mut menu = Menu::new("set-lang-menu").align_right(true);
+    for &opt in &LangPref::ALL {
+        menu = menu.item(MenuItem::new(opt.label_in(loc)).selected(opt == current));
+    }
+    menu.attach(&resp).and_then(|i| LangPref::ALL.get(i).copied()).filter(|&lang| lang != current)
+}
+
 /// A row of a group that leads somewhere (or does something): its icon,
 /// its name, a value at its end. True when tapped.
 fn link(ui: &mut Ui, salt: &str, pos: (usize, usize), icon: Icon, label: &str, value: Option<&str>) -> bool {
@@ -292,9 +322,72 @@ mod tests {
 
     #[test]
     fn a_group_is_round_at_its_ends() {
+        assert_eq!(row_radii(0, 3).0, [GROUP_END, GROUP_END, GROUP_INNER, GROUP_INNER]);
+        assert_eq!(row_radii(1, 3).0, [GROUP_INNER; 4]);
+        assert_eq!(row_radii(2, 3).0, [GROUP_INNER, GROUP_INNER, GROUP_END, GROUP_END]);
         assert_eq!(row_radii(0, 2).0, [GROUP_END, GROUP_END, GROUP_INNER, GROUP_INNER]);
         assert_eq!(row_radii(1, 2).0, [GROUP_INNER, GROUP_INNER, GROUP_END, GROUP_END]);
         assert_eq!(row_radii(0, 1).0, [GROUP_END; 4]);
+    }
+
+    #[test]
+    fn language_picker_opens_menu_and_emits_patch() {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        nikgob_md3e::typography::install_fonts(&mut fonts);
+        ctx.set_fonts(fonts);
+        nikgob_md3e::icons::install(&ctx);
+        Theme::default().install(&ctx);
+
+        let mut settings = Settings::default();
+        let mut state = ViewState::default();
+        state.prefs.language = LangPref::Ru;
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 800.0));
+        let frame = PageFrame { rect: screen, top: 0.0, reset: false };
+        let mut t = 0.0;
+        let mut step = |events: Vec<egui::Event>, state: &ViewState| -> (Vec<Command>, Option<Vec<Rect>>) {
+            t += 0.1;
+            let mut out = Vec::new();
+            let mut rects = None;
+            let mut done = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(screen), time: Some(t), events, ..Default::default() },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        settings.show(ui, frame, state, &mut out);
+                    });
+                    rects = Menu::item_rects(root, "set-lang-menu");
+                },
+            );
+            done.textures_delta.clear();
+            (out, rects)
+        };
+
+        // Initial render.
+        step(Vec::new(), &state);
+        let row_rect = ctx.read_response(Id::new("set-lang-row")).expect("language row").rect;
+        let tap_row = row_rect.center();
+        let click = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // Tap row to open menu.
+        step(vec![egui::Event::PointerMoved(tap_row)], &state);
+        step(Vec::new(), &state);
+        step(vec![click(tap_row, true)], &state);
+        step(vec![click(tap_row, false)], &state);
+        let (_, rects) = step(Vec::new(), &state);
+        let item_rects = rects.expect("open language menu");
+        assert_eq!(item_rects.len(), LangPref::ALL.len());
+        let en_idx = LangPref::ALL.iter().position(|l| *l == LangPref::En).expect("En option");
+        let pick_pos = item_rects[en_idx].center();
+        step(vec![egui::Event::PointerMoved(pick_pos)], &state);
+        step(Vec::new(), &state);
+        let (mut out, _) = step(vec![click(pick_pos, true)], &state);
+        out.extend(step(vec![click(pick_pos, false)], &state).0);
+        out.extend(step(Vec::new(), &state).0);
+        assert!(out.contains(&Command::SetPref(PrefPatch::Language(LangPref::En))), "{out:?}");
     }
 
     #[test]

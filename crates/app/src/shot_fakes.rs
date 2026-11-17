@@ -327,7 +327,7 @@ impl Fakes {
             let text = format!("Оставить у себя «{}»?", t.title);
             s.toasts.push(nikgob_view::Toast {
                 id: u64::MAX,
-                kind: nikgob_view::ToastKind::guess(&text),
+                kind: nikgob_view::ToastKind::Info,
                 text,
                 action: Some((
                     "♡ Оставить".into(),
@@ -344,7 +344,7 @@ impl Fakes {
             let text = "В «Хочу скачать»: «Дай мне всё»".to_owned();
             s.toasts.push(nikgob_view::Toast {
                 id: u64::MAX - 1,
-                kind: nikgob_view::ToastKind::guess(&text),
+                kind: nikgob_view::ToastKind::Success,
                 text,
                 action: None,
                 open: Some(("Открыть".into(), nikgob_view::Link::Route(nikgob_view::Route::Downloads(nikgob_view::DownloadsTab::Wishlist)))),
@@ -1529,6 +1529,7 @@ fn bento(s: &mut ViewState, n: usize, daylist: bool) {
         id,
         kicker: kicker.into(),
         title: title.into(),
+        mix_title: None,
         subtitle: subtitle.into(),
         covers,
     };
@@ -1543,9 +1544,10 @@ fn bento(s: &mut ViewState, n: usize, daylist: bool) {
         tile(TileKind::SingAlong, "Со словами", "Кино, Аквариум и другие", 7),
         tile(TileKind::Soundtrack, "Made in Abyss", "Kevin Penkin и другие", 8),
     ];
+    let loc = s.prefs.resolved_locale();
     let tiles = tiles.map(|mut t| {
         if let MixId::Tile(k) = t.id {
-            t.kicker = nikgob_recs::TileKind::ALL[k as usize].kicker().into();
+            t.kicker = nikgob_recs::TileKind::ALL[k as usize].kicker_in(loc).into();
         }
         t
     });

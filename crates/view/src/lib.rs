@@ -24,6 +24,9 @@ mod storage;
 mod streams;
 mod transfer;
 
+pub use nikgob_core::i18n::{
+    LangPref, Locale, MixTitle, PerLocale, QueueOrigin, RadioOrigin, RadioTitle, SideMixFlavor,
+};
 pub use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource, LyricsSync};
 pub use nikgob_core::model::AlbumMode;
 pub use nikgob_core::model::{
@@ -359,6 +362,23 @@ pub struct PlaylistCard {
     pub service: Option<Service>,
 }
 
+impl PlaylistCard {
+    /// Display name for the playlist in `loc`: localizes the virtual
+    /// «Любимые» playlist while preserving user-defined playlist names.
+    pub fn display_name_in(&self, loc: Locale) -> &str {
+        if self.id == LIKED_PLAYLIST {
+            nikgob_core::i18n::nav_in(loc).liked
+        } else {
+            &self.name
+        }
+    }
+
+    /// Display name for the playlist in the active process locale.
+    pub fn display_name(&self) -> &str {
+        self.display_name_in(nikgob_core::i18n::locale())
+    }
+}
+
 /// How a playlist's cover is chosen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PlaylistCoverMode {
@@ -453,11 +473,15 @@ pub struct PlayerView {
     pub muted: bool,
     pub shuffle: bool,
     pub repeat: Repeat,
-    /// What the current queue was started from ("Играет из «…»").
-    pub context: Option<String>,
+    /// What the current queue was started from.
+    pub origin: QueueOrigin,
     /// The page of what the queue was started from, when it has one (an
     /// album, a playlist, an artist): the name in the header line opens it.
     pub context_page: Option<Route>,
+    /// Pre-rendered Now Playing header line in the active locale.
+    pub context_text: String,
+    /// Byte range of the clickable entity name inside [`Self::context_text`].
+    pub context_link_range: Option<std::ops::Range<usize>>,
     /// The service the current track's sound comes from (`None` for a local
     /// file): the "звук: YouTube" label, e.g. for a Spotify track played
     /// from YouTube Music because Spotify has no sound for this account.
@@ -498,8 +522,10 @@ impl Default for PlayerView {
             muted: false,
             shuffle: false,
             repeat: Repeat::Off,
-            context: None,
+            origin: QueueOrigin::None,
             context_page: None,
+            context_text: String::new(),
+            context_link_range: None,
             audio_service: None,
             soloist: false,
             audio_quality: None,
@@ -510,47 +536,41 @@ impl Default for PlayerView {
 }
 
 impl PlayerView {
-    /// The header line of Now Playing: "Играет из альбома «…»", "Играет
-    /// из поиска Spotify", "Играет из «Библиотека»" — never quotes in
-    /// quotes, never the typed query. A context that is a phrase ("альбома
-    /// «…»", "поиска") is used as it is, a bare name is quoted; a search
-    /// context saved with its query ("поиска: …", old "Поиск «…»",
-    /// "Spotify · «…»") reads without it.
-    pub fn context_line(&self) -> String {
-        let Some(c) = self.context.as_deref().map(str::trim).filter(|c| !c.is_empty()) else {
-            return "Сейчас играет".to_owned();
-        };
-        if let Some(rest) = c.strip_prefix("поиска") {
-            // "поиска", "поиска Spotify", "поиска Spotify: лёд", "поиска: лёд".
-            let service = rest.split(':').next().unwrap_or_default().trim();
-            return if service.is_empty() { "Играет из поиска".to_owned() } else { format!("Играет из поиска {service}") };
-        }
-        const PHRASES: [&str; 4] = ["альбома ", "плейлиста ", "исполнителя ", "микса "];
-        if PHRASES.iter().any(|p| c.starts_with(p)) || c == "библиотеки" {
-            return format!("Играет из {c}");
-        }
-        if c.starts_with("Поиск ") {
-            return "Играет из поиска".to_owned();
-        }
-        if let Some((service, q)) = c.split_once(" · ")
-            && q.trim_start().starts_with('«')
-        {
-            return format!("Играет из поиска {}", service.trim());
-        }
-        if c.contains('«') || c.contains('»') {
-            return format!("Играет из {c}");
-        }
-        format!("Играет из «{c}»")
+    /// Updates `origin`, `context_page`, and the pre-rendered header cache in `loc`.
+    pub fn set_context(&mut self, origin: QueueOrigin, page: Option<Route>, loc: Locale) {
+        self.origin = origin;
+        self.context_page = page;
+        self.sync_context(loc);
     }
 
-    /// Where the name is in `line` ([`Self::context_line`]: between « and
-    /// »), when the queue has a page to open ([`Self::context_page`]): the
-    /// link of the header line.
+    /// Recomputes [`Self::context_text`] and [`Self::context_link_range`] in `loc`.
+    pub fn sync_context(&mut self, loc: Locale) {
+        let (text, range) = self.origin.header_in(loc, self.context_page.is_some());
+        self.context_text = text;
+        self.context_link_range = range;
+    }
+
+    /// Zero-allocation access to the pre-rendered header line and optional link span.
+    pub fn cached_context(&self) -> (&str, Option<std::ops::Range<usize>>) {
+        (&self.context_text, self.context_link_range.clone())
+    }
+
+    /// The header line of Now Playing and the exact byte range of the
+    /// clickable entity name when [`Self::context_page`] is present.
+    pub fn context_header(&self, locale: Locale) -> (String, Option<std::ops::Range<usize>>) {
+        self.origin.header_in(locale, self.context_page.is_some())
+    }
+
+    /// The header line of Now Playing in the active process locale.
+    pub fn context_line(&self) -> String {
+        self.context_header(nikgob_core::i18n::locale()).0
+    }
+
+    /// Byte range of the clickable name in `line`, when the queue has a page
+    /// to open ([`Self::context_page`]).
     pub fn context_link(&self, line: &str) -> Option<std::ops::Range<usize>> {
-        self.context_page.as_ref()?;
-        let start = line.find('«')? + '«'.len_utf8();
-        let end = line.rfind('»')?;
-        (start < end).then_some(start..end)
+        let (expected, range) = self.context_header(nikgob_core::i18n::locale());
+        (line == expected).then_some(range).flatten()
     }
 
     /// Position now, extrapolated from the last update.
@@ -1489,62 +1509,6 @@ pub enum ToastKind {
     Error,
 }
 
-impl ToastKind {
-    /// Guesses the kind from the (Russian) message text, so call sites only
-    /// say what happened. The names in «…» (a song, an album: «Дай мне
-    /// всё») are the user's, not the message's: a failure is read from the
-    /// rest only, and its words count from the start of a word («мне всё»
-    /// is not «не всё»).
-    pub fn guess(text: &str) -> Self {
-        let t = text.to_lowercase();
-        let bare = without_quoted(&t);
-        let failed = |words: &[&str]| {
-            words.iter().any(|w| {
-                bare.match_indices(w).any(|(i, _)| bare[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric()))
-            })
-        };
-        let any = |words: &[&str]| words.iter().any(|w| t.contains(w));
-        if failed(&[
-            "ошибка", "не получилось", "не удалось", "недоступ", "не читается", "нельзя", "не запустил",
-            "некуда", "нечего", "нет файла", "нет локального", "это не ", "устарел", "не скачать", "не всё",
-            "не нашёл", "не нашел", "нужно войти", "не подключ", "нет связи",
-        ]) {
-            Self::Error
-        } else if bare.ends_with('…') || any(&["начался", "качается", "добавляю"]) {
-            Self::Working
-        } else if any(&["сохранен", "сохранён", "добавлено", "скачано", "восстановлено", "удалён", "удалено", "следующим", "в любимых", "убран", "в корзине", "объединено", "скопирован", "заменено", "вошёл", "вход выполнен", "подключён", "включён", "в «хочу скачать»", "в библиотеке"]) {
-            Self::Success
-        } else {
-            Self::Info
-        }
-    }
-}
-
-/// `text` less what stands in «…» (nested quotes too), the quotes kept.
-fn without_quoted(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut depth = 0usize;
-    for c in text.chars() {
-        match c {
-            '«' => {
-                if depth == 0 {
-                    out.push(c);
-                }
-                depth += 1;
-            }
-            '»' if depth > 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    out.push(c);
-                }
-            }
-            _ if depth == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out
-}
-
 /// The revision of the lyrics defaults: 1 turned word timing off for the
 /// playing song and for the library, recognition from scratch off, and
 /// line timing for plain texts on; 2 made «Окно» the look of the lyrics
@@ -1580,6 +1544,7 @@ pub const OLD_LYRICS_LEAD: f32 = 0.1;
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Prefs {
+    pub language: LangPref,
     pub design: Design,
     pub theme: ThemeMode,
     pub contrast: u8,
@@ -2548,6 +2513,8 @@ pub enum RadioKind {
 /// view held from before another change cannot undo that change.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PrefPatch {
+    /// Interface language (`Auto` follows the OS language).
+    Language(LangPref),
     /// «Миксы для тебя»: «С новым» (true) or «Только моё».
     MixesWithNew(bool),
     /// «Миксы только из скачанного» («Только скачанное» on Главная).
@@ -2647,6 +2614,7 @@ impl PrefPatch {
     /// The change made to `p`.
     pub fn apply(&self, p: &mut Prefs) {
         match self {
+            Self::Language(lang) => p.language = *lang,
             Self::MixesWithNew(on) => p.mixes_with_new = *on,
             Self::MixesDownloadedOnly(on) => p.mixes_downloaded_only = *on,
             Self::LibraryOnlyDownloaded(on) => p.library_only_downloaded = *on,
@@ -3394,10 +3362,10 @@ pub enum Command {
     PlayPlaylist { id: PlaylistId, start: Option<TrackId>, shuffle: bool },
     PlayArtist { id: ArtistId, shuffle: bool },
     /// These tracks from the one at `start` (the user picked it).
-    PlayTracks { tracks: Vec<TrackId>, start: usize, context: String },
+    PlayTracks { tracks: Vec<TrackId>, start: usize, context: QueueOrigin },
     /// A whole list with no track picked («Слушать всё»): from the first,
     /// or from a random one under shuffle.
-    PlayAll { tracks: Vec<TrackId>, context: String },
+    PlayAll { tracks: Vec<TrackId>, context: QueueOrigin },
     PlayNext(Vec<TrackId>),
     Enqueue(Vec<TrackId>),
     /// All tracks of an album / an artist to the end of the queue.
@@ -3661,14 +3629,14 @@ pub enum Command {
     PlayStreamTracks {
         tracks: Vec<RemoteId>,
         start: usize,
-        context: String,
+        context: QueueOrigin,
     },
     /// Play the merged tracks of the «Всё» search: library tracks and
     /// stream tracks in one queue ([`SearchAnswer::tracks`]).
     PlaySearch {
         tracks: Vec<SearchPick>,
         start: usize,
-        context: String,
+        context: QueueOrigin,
     },
     /// Like [`Command::PlayRelease`] for an album of a service.
     PlayStreamAlbum {
@@ -4027,6 +3995,7 @@ pub enum Command {
 impl Default for Prefs {
     fn default() -> Self {
         Self {
+            language: LangPref::Auto,
             design: Design::Md3e,
             theme: ThemeMode::Dark,
             contrast: 0,
@@ -4324,55 +4293,60 @@ impl Prefs {
             Service::Soundcloud => self.soundcloud_enabled,
         }
     }
+
+    /// Resolves [`Self::language`] against the active system locale.
+    pub fn resolved_locale(&self) -> Locale {
+        self.language.resolve_system()
+    }
 }
 
 #[cfg(test)]
 mod toast_tests {
-    use super::ToastKind;
+    use std::time::Instant;
+
+    use super::{LangPref, Locale, Prefs, Toast, ToastKind};
 
     #[test]
-    fn toast_kinds_are_guessed_from_the_text() {
-        for (text, kind) in [
-            ("Не получилось воспроизвести трек", ToastKind::Error),
-            ("Торренты недоступны", ToastKind::Error),
-            ("Это не magnet-ссылка", ToastKind::Error),
-            ("Восстановить удалось не всё", ToastKind::Error),
-            ("Добавляю раздачу…", ToastKind::Working),
-            ("Импорт начался · смотри «Загрузки»", ToastKind::Working),
-            ("Сохранено", ToastKind::Success),
-            ("Теги сохранены", ToastKind::Success),
-            ("Плейлист «Ночь» сохранён", ToastKind::Success),
-            ("Добавлено в очередь", ToastKind::Success),
-            ("Альбом в Любимых · 3 трека", ToastKind::Success),
-            ("Альбом в корзине (30 дней)", ToastKind::Success),
-            ("Удалено навсегда: 2", ToastKind::Success),
-            ("Импорт: 12 треков", ToastKind::Info),
-            ("Не нашёл раздачу: Кино — Война", ToastKind::Error),
-            ("Ссылка скопирована", ToastKind::Success),
-            ("Spotify подключён · звук пока с YouTube Music", ToastKind::Success),
-            ("Spotify не подключён", ToastKind::Error),
-            ("В «Хочу скачать»: «Война»", ToastKind::Success),
-            // A name with a failure's words in it is still a name.
-            ("В «Хочу скачать»: «Дай мне всё»", ToastKind::Success),
-            ("В «Хочу скачать»: «Не всё потеряно»", ToastKind::Success),
-            ("Плейлист «Ошибка» сохранён", ToastKind::Success),
-            ("Не получилось скачать «Дай мне всё»", ToastKind::Error),
-            ("Нет связи — проверь интернет", ToastKind::Error),
-            ("Заменено на «AIYOU»", ToastKind::Success),
-            ("Скоро", ToastKind::Info),
-        ] {
-            assert_eq!(ToastKind::guess(text), kind, "{text}");
+    fn toast_kind_defaults_to_info_and_variants_are_distinct() {
+        assert_eq!(ToastKind::default(), ToastKind::Info);
+        let kinds = [ToastKind::Info, ToastKind::Success, ToastKind::Working, ToastKind::Error];
+        for (i, a) in kinds.iter().enumerate() {
+            for (j, b) in kinds.iter().enumerate() {
+                assert_eq!(a == b, i == j);
+            }
         }
+        let toast = Toast {
+            id: 1,
+            text: "Saved".into(),
+            action: None,
+            open: None,
+            at: Instant::now(),
+            kind: ToastKind::Success,
+            long: false,
+            again: 0,
+        };
+        assert_eq!(toast.kind, ToastKind::Success);
+        assert!(!toast.long);
+    }
+
+    #[test]
+    fn prefs_resolved_locale_respects_explicit_language() {
+        let ru = Prefs { language: LangPref::Ru, ..Prefs::default() };
+        let en = Prefs { language: LangPref::En, ..Prefs::default() };
+        assert_eq!(ru.resolved_locale(), Locale::Ru);
+        assert_eq!(en.resolved_locale(), Locale::En);
     }
 }
 
 
 #[cfg(test)]
 mod context_tests {
-    use super::PlayerView;
+    use super::{Locale, PlayerView, QueueOrigin};
 
     fn line(c: Option<&str>) -> String {
-        PlayerView { context: c.map(str::to_owned), ..PlayerView::default() }.context_line()
+        PlayerView { origin: QueueOrigin::from_legacy(c), ..PlayerView::default() }
+            .context_header(Locale::Ru)
+            .0
     }
 
     #[test]
@@ -4384,7 +4358,7 @@ mod context_tests {
         assert_eq!(line(Some("плейлиста «Вечер»")), "Играет из плейлиста «Вечер»");
         assert_eq!(line(Some("поиска")), "Играет из поиска");
         assert_eq!(line(Some("поиска Spotify")), "Играет из поиска Spotify");
-        assert_eq!(line(Some("исполнителя «Кино»")), "Играет из исполнителя «Кино»");
+        assert_eq!(line(Some("Кино")), "Играет из «Кино»");
         // Saved with the typed query: the query never shows.
         assert_eq!(line(Some("поиска Spotify: лай мне все")), "Играет из поиска Spotify");
         assert_eq!(line(Some("поиска: лай мне все")), "Играет из поиска");
@@ -4393,22 +4367,30 @@ mod context_tests {
         for c in ["Spotify · «лёд»", "Поиск «лёд»", "альбома «X»", "Кино"] {
             assert!(line(Some(c)).matches('«').count() <= 1, "{c}");
         }
+        assert_eq!(
+            PlayerView { origin: QueueOrigin::Album("Blood Type".into()), ..PlayerView::default() }
+                .context_header(Locale::En)
+                .0,
+            "Playing from album “Blood Type”"
+        );
     }
 
     #[test]
     fn the_name_of_a_page_is_the_link_of_the_header() {
-        let with = |c: &str, page: Option<crate::Route>| {
-            let p = PlayerView { context: Some(c.to_owned()), context_page: page, ..PlayerView::default() };
-            let l = p.context_line();
-            p.context_link(&l).map(|r| l[r].to_owned())
+        let with = |origin: QueueOrigin, page: Option<crate::Route>, loc: Locale| {
+            let p = PlayerView { origin, context_page: page, ..PlayerView::default() };
+            let (l, r) = p.context_header(loc);
+            r.map(|r| l[r].to_owned())
         };
         let album = Some(crate::Route::Release(crate::ReleaseId::new()));
-        assert_eq!(with("альбома «Группа крови»", album.clone()).as_deref(), Some("Группа крови"));
-        assert_eq!(with("Кино", Some(crate::Route::Artist(crate::ArtistId::new()))).as_deref(), Some("Кино"));
+        assert_eq!(with(QueueOrigin::Album("Группа крови".into()), album.clone(), Locale::Ru).as_deref(), Some("Группа крови"));
+        assert_eq!(with(QueueOrigin::Album("A «B»".into()), album.clone(), Locale::En).as_deref(), Some("A «B»"));
+        assert_eq!(with(QueueOrigin::Artist("Кино".into()), Some(crate::Route::Artist(crate::ArtistId::new())), Locale::Ru).as_deref(), Some("Кино"));
+        assert_eq!(with(QueueOrigin::Liked, Some(crate::Route::Playlist(crate::LIKED_PLAYLIST)), Locale::En).as_deref(), Some("Liked Songs"));
         // No page (a search, a queue of picked songs), or nothing quoted.
-        assert_eq!(with("альбома «Группа крови»", None), None);
-        assert_eq!(with("поиска", album.clone()), None);
-        assert_eq!(with("библиотеки", album), None);
+        assert_eq!(with(QueueOrigin::Album("Группа крови".into()), None, Locale::Ru), None);
+        assert_eq!(with(QueueOrigin::Search { service: None }, album.clone(), Locale::Ru), None);
+        assert_eq!(with(QueueOrigin::Library, album, Locale::Ru), None);
     }
 }
 

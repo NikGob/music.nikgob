@@ -418,29 +418,30 @@ impl Streams {
     }
 }
 
-/// A service error as the user reads it.
-pub(crate) fn error_text(e: &StreamError) -> String {
+/// A service error as the user reads it, localized for `loc`.
+pub(crate) fn error_text_in(e: &StreamError, loc: nikgob_core::i18n::Locale) -> String {
+    use nikgob_core::i18n::{ErrorStrings, errors_in};
+    let err = errors_in(loc);
     match e {
-        StreamError::NotConfigured => "Сервис не настроен".into(),
-        StreamError::NotLoggedIn => "Нужно войти".into(),
-        StreamError::PremiumRequired => "Нужен Premium".into(),
+        StreamError::NotConfigured => err.stream_not_configured.into(),
+        StreamError::NotLoggedIn => err.stream_not_logged_in.into(),
+        StreamError::PremiumRequired => err.stream_need_premium.into(),
         // Said with its end when that is a while away.
-        StreamError::RateLimited { retry_after } => match retry_after
-            .filter(|d| *d > search::SHORT_WAIT)
-            .and_then(accounts::hm_after)
-        {
-            Some(hm) => format!("Сервис просит подождать до {hm}"),
-            None => "Сервис просит подождать".into(),
-        },
-        StreamError::Unavailable => "Недоступно".into(),
-        StreamError::Unsupported => "Сервис так не умеет".into(),
-        StreamError::AgeRestricted => "Только для 18+ — нужно войти".into(),
-        StreamError::RegionBlocked => "Недоступно в твоём регионе".into(),
-        StreamError::Drm => "Только в защищённом виде — сыграет с YouTube Music".into(),
-        StreamError::Http { status } => format!("Сервис ответил ошибкой (HTTP {status})"),
+        StreamError::RateLimited { retry_after } => {
+            let hm = retry_after
+                .filter(|d| *d > search::SHORT_WAIT)
+                .and_then(accounts::hm_after);
+            ErrorStrings::stream_rate_limited_in(loc, hm.as_deref())
+        }
+        StreamError::Unavailable => err.stream_unavailable.into(),
+        StreamError::Unsupported => err.stream_unsupported.into(),
+        StreamError::AgeRestricted => err.stream_age_restricted.into(),
+        StreamError::RegionBlocked => err.stream_region_blocked.into(),
+        StreamError::Drm => err.stream_drm.into(),
+        StreamError::Http { status } => ErrorStrings::stream_http_in(loc, *status),
         // The details go to the log at the call site.
-        StreamError::Network(_) => "Нет связи — проверь интернет".into(),
-        StreamError::Parse(_) => "Сервис ответил непонятно".into(),
+        StreamError::Network(_) => err.stream_network.into(),
+        StreamError::Parse(_) => err.stream_parse.into(),
     }
 }
 
@@ -470,10 +471,11 @@ impl Worker {
 
     /// Why [`Self::service`] has nothing, as the user reads it.
     pub(crate) fn off_text(&self, kind: Service) -> String {
+        let loc = self.locale();
         if self.state.read().prefs.service_enabled(kind) {
-            format!("{} не подключён", kind.display_name())
+            nikgob_core::i18n::ErrorStrings::service_not_connected_in(loc, kind.display_name())
         } else {
-            format!("{} выключен", kind.display_name())
+            nikgob_core::i18n::ErrorStrings::service_disabled_in(loc, kind.display_name())
         }
     }
 
@@ -740,7 +742,7 @@ impl Worker {
                     s.clear_cache();
                 }
                 self.publish_stream_cache();
-                self.toast("Кэш стриминга очищен", None);
+                self.toast_ok("Кэш стриминга очищен", None);
             }
             Command::SetPlaylistSync { playlist, mode } => self.set_playlist_sync(playlist, mode),
             Command::LoadDiscography(artist) => self.load_discography(artist, true),
@@ -864,5 +866,17 @@ mod tests {
         assert!(k.len() >= KNOWN_MAX * 3 / 4 - 1 && k.len() < KNOWN_MAX, "{}", k.len());
         assert!(k.contains_key(&RemoteId::new(Service::Spotify, format!("t{KNOWN_MAX}"))), "the newest stays");
         assert!(!k.contains_key(&RemoteId::new(Service::Spotify, "t0")), "the oldest went");
+    }
+
+    #[test]
+    fn error_text_in_localizes_all_variants() {
+        use nikgob_core::i18n::{Locale, errors_in};
+
+        assert_eq!(error_text_in(&StreamError::Unavailable, Locale::Ru), errors_in(Locale::Ru).stream_unavailable);
+        assert_eq!(error_text_in(&StreamError::Unavailable, Locale::En), "Unavailable");
+        assert_eq!(error_text_in(&StreamError::NotLoggedIn, Locale::En), "Sign in required");
+        assert_eq!(error_text_in(&StreamError::Http { status: 503 }, Locale::En), "Service returned an error (HTTP 503)");
+        assert_eq!(error_text_in(&StreamError::Network("dns".into()), Locale::En), "No connection — check your internet");
+        assert_eq!(error_text_in(&StreamError::RateLimited { retry_after: None }, Locale::En), "Service asks to wait");
     }
 }

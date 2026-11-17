@@ -505,7 +505,8 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
             )
             .clicked()
         {
-            chrome.ask_save_queue(state.player.context.as_deref().unwrap_or("Очередь"));
+            let name = state.player.origin.save_name();
+            chrome.ask_save_queue(name.as_deref().unwrap_or(nikgob_core::i18n::common_in(state.prefs.resolved_locale()).queue));
         }
     });
 }
@@ -815,17 +816,6 @@ fn source_pick(pick: usize, chosen: usize) -> SourcePick {
     }
 }
 
-/// What a radio queue is called above its list: «Радио · Кино» as the
-/// runtime names it; an endless mix («Спокойное», «Новое для тебя») says
-/// it is a mix.
-pub(super) fn radio_title(title: &str) -> String {
-    if title.starts_with("Радио") {
-        title.to_owned()
-    } else {
-        format!("Микс · {title}")
-    }
-}
-
 /// The radio line above the queue: its title (autoplay names what it
 /// continues), where it picks from, and autoplay's switch; returns whether
 /// it was switched off.
@@ -837,12 +827,12 @@ fn radio_header(
     out: &mut Vec<Command>,
 ) -> bool {
     let (title, hover) = if r.autoplay {
-        (r.title.clone(), "Автовоспроизведение: дописывается, пока играет")
+        (r.title_text.as_str(), "Автовоспроизведение: дописывается, пока играет")
     } else {
-        (radio_title(&r.title), "Дописывается сама, пока играет")
+        (r.header_text.as_str(), "Дописывается сама, пока играет")
     };
     let head = Header {
-        title: &title,
+        title,
         hover,
         switch: r.autoplay.then_some(true),
         source: Some(r.kind),
@@ -857,7 +847,7 @@ fn radio_header(
 /// rebuilds the tail, the track playing goes on.
 fn wave_header(ui: &mut Ui, r: &nikgob_view::RadioView, w: &nikgob_view::WaveView, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
     use nikgob_view::{WaveCharacter, WaveFilter, WaveNovelty, WaveScene};
-    let head = Header { title: &r.title, hover: "Подстраивается под тебя, пока играет", switch: None, source: None, salt: "q-wave", edge: true };
+    let head = Header { title: r.title_text.as_str(), hover: "Подстраивается под тебя, пока играет", switch: None, source: None, salt: "q-wave", edge: true };
     header(ui, head, state, chrome, out);
     let f = w.filter;
     let mut picked: Option<WaveFilter> = None;
@@ -1214,8 +1204,12 @@ mod tests {
     /// «В очередь».
     #[test]
     fn radio_queue_is_named_and_its_menu_is_the_track_menu() {
-        assert_eq!(radio_title("Радио · Кино"), "Радио · Кино");
-        assert_eq!(radio_title("Спокойное"), "Микс · Спокойное");
+        use nikgob_core::i18n::MoodKind;
+        use nikgob_view::{Locale, MixTitle, RadioTitle};
+        assert_eq!(RadioTitle::Seed("Кино".into()).queue_header_in(Locale::Ru), "Радио · Кино");
+        assert_eq!(RadioTitle::Seed("Кино".into()).queue_header_in(Locale::En), "Radio · Кино");
+        assert_eq!(RadioTitle::Mix(MixTitle::Mood(MoodKind::Calm)).queue_header_in(Locale::Ru), "Микс · Спокойное");
+        assert_eq!(RadioTitle::Mix(MixTitle::Mood(MoodKind::Calm)).queue_header_in(Locale::En), "Mix · Calm");
         let song = |title: &str| TrackRow {
             id: nikgob_view::TrackId::new(),
             title: title.into(),

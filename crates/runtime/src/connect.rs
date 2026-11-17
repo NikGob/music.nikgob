@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use nikgob_core::model::{Codec, EventContext, EventOrigin, Source, SourceId, SourceKind, TrackId};
 use nikgob_view::{
-    ApiReply, Command, ConnectFail, ConnectJob, ConnectReport, MeshKind, ParkedView, RemoteCommand, RemoteHow, RemoteLink, RemoteTarget, Repeat, Status,
-    Toast, ToastKind, ZoneEntry, ZoneLoaded, ZoneRepeat, ZoneSnapshot, ZoneState, ZoneStatus, ZoneTrack,
+    ApiReply, Command, ConnectFail, ConnectJob, ConnectReport, MeshKind, ParkedView, RadioTitle, RemoteCommand, RemoteHow, RemoteLink, RemoteTarget, Repeat, Status,
+    ToastKind, ZoneEntry, ZoneLoaded, ZoneRepeat, ZoneSnapshot, ZoneState, ZoneStatus, ZoneTrack,
 };
 
 use crate::Worker;
@@ -162,6 +162,7 @@ fn queue_snapshot(s: &ZoneSnapshot) -> queue::Snapshot {
             ZoneRepeat::One => 2,
         },
         context: s.context.clone(),
+        origin: s.origin.clone(),
         kind: s.kind,
     }
 }
@@ -212,7 +213,7 @@ impl Worker {
             return None;
         }
         if nikgob_view::starts_service_music(&c) {
-            self.toast(format!("На {name} играют только песни из библиотеки"), None);
+            self.toast_info(format!("На {name} играют только песни из библиотеки"), None);
             return None;
         }
         Some(c)
@@ -339,7 +340,7 @@ impl Worker {
                 };
                 if !online {
                     let m = format!("{name} не в сети");
-                    self.toast(m.clone(), None);
+                    self.toast_err(m.clone(), None);
                     answer(reply, Err(m));
                     return;
                 }
@@ -360,7 +361,7 @@ impl Worker {
         self.connect.seq += 1;
         let (seq, sess) = (self.connect.seq, self.connect.sess);
         if !self.connect_send(ConnectJob::Move { seq, sess, from: from.clone(), to }) {
-            self.toast("Межсеть не запущена", None);
+            self.toast_err("Межсеть не запущена", None);
             answer(reply, Err("Межсеть не запущена".to_owned()));
             return;
         }
@@ -375,7 +376,7 @@ impl Worker {
         let Some((name, kind, online)) = self.node_view(&node) else { return Err("Такого устройства нет".to_owned()) };
         if !online {
             let m = format!("{name} не в сети");
-            self.toast(m.clone(), None);
+            self.toast_err(m.clone(), None);
             return Err(m);
         }
         self.connect_target(node, name, kind, RemoteHow::Attached);
@@ -386,7 +387,8 @@ impl Worker {
     fn parked_now(&mut self) -> ParkedView {
         let shown = self.playing.or_else(|| self.resume_at.and(self.queue.current()));
         let row = shown.and_then(|e| self.lib.get_track_row(e.track).ok().flatten());
-        let current = row.map(|r| self.res.track(&r));
+        let loc = self.locale();
+        let current = row.map(|r| self.res.track_in(&r, loc));
         ParkedView { current, position: self.position_now() }
     }
 
@@ -612,13 +614,13 @@ impl Worker {
             Err(ConnectFail::Stale) => Err("Устройство сменилось".to_owned()),
             Err(ConnectFail::NothingDone(why)) => {
                 log::warn!("connect: {failed}: {why}");
-                self.toast(failed.clone(), None);
+                self.toast_err(failed.clone(), None);
                 Err(failed)
             }
             Err(ConnectFail::NotLoaded(why)) => {
                 // The source is paused and stays so: the owner chooses.
                 log::warn!("connect: {failed}: {why}");
-                self.connect_toast_long(failed.clone(), Some(("Продолжить здесь".to_owned(), Command::OutputContinueHere)));
+                self.connect_toast_long(ToastKind::Error, failed.clone(), Some(("Продолжить здесь".to_owned(), Command::OutputContinueHere)));
                 Err(failed)
             }
         };
@@ -637,7 +639,8 @@ impl Worker {
         self.connect_target(node.clone(), name.clone(), kind, RemoteHow::Transferred);
         if let Some(previous) = loaded.previous.filter(|prev| !prev.paused && prev.index.is_some()) {
             self.connect.undo = Some(Undo { sess: self.connect.sess, node, previous, until: Instant::now() + UNDO_FOR, before: from });
-            self.connect_toast_long(format!("Очередь перенесена на {name}"), Some(("Отменить".to_owned(), Command::OutputUndoTransfer)));
+            let undo = self.undo_action(Command::OutputUndoTransfer);
+            self.connect_toast_long(ToastKind::Info, format!("Очередь перенесена на {name}"), Some(undo));
         }
     }
 
@@ -657,7 +660,7 @@ impl Worker {
                 Err(ConnectFail::Stale) => {}
                 Err(ConnectFail::NothingDone(why) | ConnectFail::NotLoaded(why)) => {
                     log::warn!("connect: the undo failed: {why}");
-                    self.toast("Не удалось отменить", None);
+                    self.toast_err("Не удалось отменить", None);
                 }
             }
         }
@@ -678,19 +681,15 @@ impl Worker {
             Err(ConnectFail::Stale) => {}
             Err(ConnectFail::NothingDone(why) | ConnectFail::NotLoaded(why)) => {
                 log::warn!("connect: «Продолжить здесь» failed: {why}");
-                self.toast(format!("Не удалось продолжить здесь: {why}"), None);
+                self.toast_err(format!("Не удалось продолжить здесь: {why}"), None);
             }
         }
         self.connect_next();
     }
 
     /// A toast that stays 8 s; its id.
-    fn connect_toast_long(&mut self, text: String, action: Option<(String, Command)>) -> u64 {
-        self.toast_id += 1;
-        let id = self.toast_id;
-        let t = Toast { id, kind: ToastKind::guess(&text), text, action, open: None, at: Instant::now(), long: true, again: 0 };
-        self.publish(move |s| s.toasts.push(t));
-        id
+    fn connect_toast_long(&mut self, kind: ToastKind, text: String, action: Option<(String, Command)>) -> u64 {
+        self.push_toast(kind, text, action, None, true)
     }
 
     fn connect_drop_lost_toast(&mut self) {
@@ -712,12 +711,13 @@ impl Worker {
         let ids = state.track_ids();
         if ids != self.connect.row_ids {
             let found = self.lib.get_track_rows(&ids).unwrap_or_default();
+            let loc = self.locale();
             let mut rows = HashMap::new();
             for id in &ids {
                 if let Some(r) = found.get(id)
                     && !rows.contains_key(id)
                 {
-                    rows.insert(*id, self.res.track(r));
+                    rows.insert(*id, self.res.track_in(r, loc));
                 }
             }
             self.connect.rows = rows;
@@ -742,7 +742,7 @@ impl Worker {
             RemoteLink::Reconnecting => {}
             RemoteLink::Lost => {
                 if self.connect.lost_toast.is_none() {
-                    let id = self.connect_toast_long(format!("Нет связи с {name}"), Some(("Продолжить здесь".to_owned(), Command::OutputContinueHere)));
+                    let id = self.connect_toast_long(ToastKind::Error, format!("Нет связи с {name}"), Some(("Продолжить здесь".to_owned(), Command::OutputContinueHere)));
                     self.connect.lost_toast = Some(id);
                 }
             }
@@ -788,14 +788,18 @@ impl Worker {
         let speed = if st.speed > 0.0 { st.speed } else { 1.0 };
         let (volume, muted) = (st.volume.clamp(0.0, 1.0), st.muted);
         let (shuffle, repeat): (bool, Repeat) = (st.shuffle, st.repeat.into());
-        let context = st.context.clone();
+        let origin = st.origin.clone().unwrap_or_else(|| nikgob_view::QueueOrigin::from_legacy(st.context.as_deref()));
         let page = st.page.as_deref().and_then(nikgob_view::page_route);
         let duck = st.duck;
-        let radio = st.radio.as_ref().map(|r| nikgob_view::RadioView {
-            title: r.title.clone(),
-            extending: r.extending,
-            autoplay: r.autoplay,
-            ..Default::default()
+        let loc = self.locale();
+        let radio = st.radio.as_ref().map(|r| {
+            nikgob_view::RadioView {
+                title: r.kind.clone().unwrap_or_else(|| RadioTitle::from_legacy(&r.title)),
+                extending: r.extending,
+                autoplay: r.autoplay,
+                ..Default::default()
+            }
+            .with_locale(loc)
         });
         let current_entry = st.current_entry;
         let current_id = current.as_ref().map(|c| c.id);
@@ -819,8 +823,7 @@ impl Worker {
             }
             p.shuffle = shuffle;
             p.repeat = repeat;
-            p.context = context;
-            p.context_page = page;
+            p.set_context(origin, page, loc);
             p.audio_service = None;
             p.audio_quality = None;
             p.soloist = false;
@@ -854,7 +857,8 @@ impl Worker {
         match (track, row) {
             (Some(t), Some(row)) => {
                 let src = self.lib.active_source(t).ok().flatten();
-                let info = self.res.info(Some(&row), src.as_ref());
+                let loc = self.locale();
+                let info = self.res.info_in(Some(&row), src.as_ref(), loc);
                 self.publish(move |s| s.info = info);
                 self.track_details(t);
             }
@@ -894,6 +898,7 @@ impl Worker {
                 _ => ZoneRepeat::Off,
             },
             context: q.context,
+            origin: q.origin,
             page,
             kind: q.kind,
             radio,

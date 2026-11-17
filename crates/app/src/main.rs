@@ -863,6 +863,7 @@ fn main() -> eframe::Result {
     stage("library");
     let settings = paths.settings.as_ref().and_then(|s| nikgob_core::settings::Settings::load(s).ok());
     let mut prefs = load_prefs(&paths, settings.as_ref(), devices);
+    nikgob_core::i18n::apply_pref(prefs.language);
     stage("prefs");
     // The system says whether autostart is on (Task Manager may have turned
     // it off), and a wished-for line that is gone is written again; demo

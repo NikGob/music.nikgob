@@ -245,7 +245,7 @@ impl Worker {
         self.replica.due = None;
         if matches!(self.replica.busy, Some(Busy::Rechecking { .. })) {
             self.replica.busy = None;
-            self.toast("Устройства или выбор изменились — оригиналы остались на компьютере", None);
+            self.toast_info("Устройства или выбор изменились — оригиналы остались на компьютере", None);
         }
     }
 
@@ -258,7 +258,7 @@ impl Worker {
             && since.elapsed() > RECHECK_WAIT
         {
             self.replica.busy = None;
-            self.toast("Устройства не ответили — оригиналы остались на компьютере", None);
+            self.toast_err("Устройства не ответили — оригиналы остались на компьютере", None);
         }
         let Some(need) = self.state.read().mesh.keep_masters.copies() else {
             if self.replica.card.take().is_some() {
@@ -359,7 +359,7 @@ impl Worker {
             self.replica.card = None;
             self.replica.due = None;
             self.replica_publish();
-            self.toast("Межсеть не запущена — оригиналы остались на компьютере", None);
+            self.toast_err("Межсеть не запущена — оригиналы остались на компьютере", None);
             return;
         };
         self.replica_follow();
@@ -384,12 +384,12 @@ impl Worker {
         };
         let Some(need) = self.state.read().mesh.keep_masters.copies() else {
             self.replica.busy = None;
-            self.toast("Выбор изменился — оригиналы остались на компьютере", None);
+            self.toast_info("Выбор изменился — оригиналы остались на компьютере", None);
             return;
         };
         if self.replica.gate.lock().era != era {
             self.replica.busy = None;
-            self.toast("Устройства или выбор изменились — оригиналы остались на компьютере", None);
+            self.toast_info("Устройства или выбор изменились — оригиналы остались на компьютере", None);
             return;
         }
         let asked: HashSet<String> = items.iter().map(|o| o.hash.clone()).collect();
@@ -402,15 +402,15 @@ impl Worker {
             self.replica.due = None;
             if let Some(why) = failed {
                 log::warn!("replica: the copies were not read again: {why}");
-                self.toast("Копии не проверены — оригиналы остались на компьютере", None);
+                self.toast_err("Копии не проверены — оригиналы остались на компьютере", None);
             } else {
-                self.toast("Копий меньше нужного — оригиналы остались на компьютере", None);
+                self.toast_info("Копий меньше нужного — оригиналы остались на компьютере", None);
             }
             return;
         }
         let Some(svc) = &self.import else {
             self.replica.busy = None;
-            self.toast("Импорт недоступен — оригиналы остались на компьютере", None);
+            self.toast_err("Импорт недоступен — оригиналы остались на компьютере", None);
             return;
         };
         let (trash, masters) = (svc.config().trash_dir.clone(), svc.config().masters_dir());
@@ -449,7 +449,7 @@ impl Worker {
         self.replica.busy = None;
         self.replica.due = None;
         if ids.is_empty() {
-            self.toast("Оригиналы остались на компьютере", None);
+            self.toast_info("Оригиналы остались на компьютере", None);
             return;
         }
         let n = ids.len();
@@ -459,7 +459,8 @@ impl Worker {
         } else {
             format!("Оригиналы FLAC в Корзине: {n}")
         };
-        self.toast(text, Some(("Отменить".to_owned(), Command::ReplicaUndoTrash { ids })));
+        let undo = self.undo_action(Command::ReplicaUndoTrash { ids });
+        self.toast_ok(text, Some(undo));
     }
 
     /// «Отменить»: the master files go back where they were (never over a
@@ -491,12 +492,11 @@ impl Worker {
         let n = back.len();
         self.replica.kept.extend(back);
         self.replica.due = None;
-        let text = match (n, failed) {
-            (_, 0) => "Оригиналы вернулись".to_owned(),
-            (0, _) => "Оригиналы не вернулись: их место занято или их нет в Корзине".to_owned(),
-            (n, f) => format!("Вернулись: {n}, не вернулись: {f}"),
-        };
-        self.toast(text, None);
+        match (n, failed) {
+            (_, 0) => self.toast_ok("Оригиналы вернулись", None),
+            (0, _) => self.toast_err("Оригиналы не вернулись: их место занято или их нет в Корзине", None),
+            (n, f) => self.toast_err(format!("Вернулись: {n}, не вернулись: {f}"), None),
+        }
     }
 }
 

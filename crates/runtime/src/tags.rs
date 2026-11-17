@@ -103,7 +103,7 @@ impl Worker {
             }
             Err(e) => {
                 log::warn!("tags of {track}: {e}");
-                self.toast("У трека нет локального файла", None);
+                self.toast_err("У трека нет локального файла", None);
             }
         }
     }
@@ -178,7 +178,7 @@ impl Worker {
                         s.tag_editor = v::TagEditor::default();
                     }
                 });
-                self.toast("Теги сохранены", None);
+                self.toast_ok("Теги сохранены", None);
                 self.reload_after_import();
                 self.retagged_playing(&[track]);
             }
@@ -204,8 +204,9 @@ impl Worker {
         }
         let current = self.lib.get_track_row(track).ok().flatten();
         let src = self.lib.active_source(track).ok().flatten();
-        let row = current.as_ref().map(|r| self.res.track(r));
-        let info = self.res.info(current.as_ref(), src.as_ref());
+        let loc = self.locale();
+        let row = current.as_ref().map(|r| self.res.track_in(r, loc));
+        let info = self.res.info_in(current.as_ref(), src.as_ref(), loc);
         self.publish(|s| {
             s.player.current = row.clone();
             s.queue.current = row;
@@ -288,10 +289,10 @@ impl Worker {
     pub(crate) fn api_retagged(&mut self, done: &[TrackId], failed: usize) {
         match (done.len(), failed) {
             (0, 0) => return,
-            (0, _) => self.toast("Не удалось сохранить теги", None),
-            (1, 0) => self.toast("Теги сохранены", None),
-            (n, 0) => self.toast(format!("Теги сохранены: {n}"), None),
-            (n, f) => self.toast(format!("Теги сохранены: {n}, не удалось: {f}"), None),
+            (0, _) => self.toast_err("Не удалось сохранить теги", None),
+            (1, 0) => self.toast_ok("Теги сохранены", None),
+            (n, 0) => self.toast_ok(format!("Теги сохранены: {n}"), None),
+            (n, f) => self.toast_err(format!("Теги сохранены: {n}, не удалось: {f}"), None),
         }
         self.reload_after_import();
         self.retagged_playing(done);

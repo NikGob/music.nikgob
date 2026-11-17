@@ -163,7 +163,7 @@ impl QueueSheet {
             }
             // The head.
             let head = Rect::from_min_size(pos2(rect.left() + 16.0, strip.bottom()), vec2(rect.width() - 24.0, HEAD_H));
-            let title = state.queue.radio.as_ref().map_or_else(|| state.player.context_line(), |r| r.title.clone());
+            let title = state.queue.radio.as_ref().map_or_else(|| state.player.cached_context().0, |r| r.header_text.as_str());
             let clear = Rect::from_min_size(pos2(head.right() - 48.0, head.top()), vec2(48.0, 48.0));
             let save = clear.translate(vec2(-48.0, 0.0));
             let style = TypeRole::TitleMedium.style();

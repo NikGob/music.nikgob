@@ -229,7 +229,7 @@ impl Worker {
             .filter_map(|a| a.as_ref().and_then(|r| r.as_ref().err()))
             .collect();
         let error = (!loading && results.is_empty() && !failed.is_empty() && failed.len() == r.asked.len())
-            .then(|| super::error_text(failed[0]));
+            .then(|| super::error_text_in(failed[0], self.locale()));
         self.publish(|s| {
             if let Some(f) = s.find_song.as_mut().filter(|f| f.track == view.track) {
                 f.results = results;
@@ -246,7 +246,7 @@ impl Worker {
             self.save_prefs();
         }
         let Some(pick) = self.streaming.known.get(&with).cloned() else {
-            self.toast("Песня устарела — найди её заново", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).song_stale, None);
             return;
         };
         if pick.id.service != Service::Deezer {
@@ -357,7 +357,8 @@ impl Worker {
         self.streaming.replace.undo.insert(id, Undo { snapshot, remote });
         self.publish(|s| s.find_song = None);
         self.track_replaced(track);
-        self.toast(text, Some(("Отменить".into(), Command::UndoReplace(id))));
+        let undo = self.undo_action(Command::UndoReplace(id));
+        self.toast_ok(text, Some(undo));
     }
 
     /// The like of `track` on YouTube Music goes from `from` to `to`
@@ -400,7 +401,7 @@ impl Worker {
             }
         }
         self.track_replaced(track);
-        self.toast("Замена отменена", None);
+        self.toast_info("Замена отменена", None);
     }
 
     /// The track's metadata and audio changed by hand: what shows or plays

@@ -183,7 +183,7 @@ impl Library {
     fn playlist_items(&mut self, ui: &mut Ui, state: &ViewState, page: &mut PageOut) {
         for p in state.library.playlists.iter().filter(|p| p.id == LIKED_PLAYLIST || !p.pinned || p.track_count > 0) {
             let uri = p.cover.as_ref().map(|c| c.uri());
-            if parts::media_row(ui, Id::new(("lib-pl", p.id)), uri.as_deref(), &p.name, &text::tracks(u64::from(p.track_count)), Picture::Square).clicked() {
+            if parts::media_row(ui, Id::new(("lib-pl", p.id)), uri.as_deref(), p.display_name(), &text::tracks(u64::from(p.track_count)), Picture::Square).clicked() {
                 page.nav = Some(Route::Playlist(p.id));
             }
         }
@@ -198,7 +198,7 @@ impl Library {
         parts::grid2(ui, "lib-pl", pls.len(), |ui, i, r| {
             let p = &pls[i];
             let uri = p.cover.as_ref().map(|c| c.uri());
-            if parts::grid_card(ui, r, Id::new(("lib-pl-card", p.id)), uri.as_deref(), &p.name, &text::tracks(u64::from(p.track_count)), Picture::Square).clicked() {
+            if parts::grid_card(ui, r, Id::new(("lib-pl-card", p.id)), uri.as_deref(), p.display_name(), &text::tracks(u64::from(p.track_count)), Picture::Square).clicked() {
                 page.nav = Some(Route::Playlist(p.id));
             }
         });

@@ -169,7 +169,10 @@ fn only_here_the_like_stays_the_clips_and_undo_brings_the_clip_back() {
         let s = rt.state();
         let toast = s.toasts.last().unwrap();
         assert_eq!(toast.text, "Заменено на «Закрой за мной дверь, я ухожу»");
-        assert_eq!(toast.action.as_ref().unwrap().0, "Отменить");
+        assert_eq!(
+            toast.action.as_ref().unwrap().0,
+            nikgob_core::i18n::common_in(s.prefs.resolved_locale()).undo
+        );
     }
     // A like check changes nothing; nothing went to YouTube.
     let checks = yt.calls("liked_head") + yt.calls("liked");
