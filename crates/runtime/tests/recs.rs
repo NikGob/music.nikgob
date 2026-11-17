@@ -951,8 +951,10 @@ fn the_radio_tail_follows_skips_and_removals() {
     s.rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
     s.rt.playback_sender().send(PlaybackEvent::Ended { id }).unwrap();
     // At once, the extension it starts still on its way.
+    let waited = Instant::now();
     while s.asked.lock().unwrap().len() == mark {
-        std::hint::spin_loop();
+        assert!(waited.elapsed() < Duration::from_secs(60), "timed out waiting for the next request");
+        std::thread::yield_now();
     }
     s.rt.send(Command::Next);
     s.rt.send(Command::Next);
@@ -1620,8 +1622,10 @@ fn autoplay_of_a_lone_stream_before_the_first_build_keeps_to_its_artist() {
     let s = start(&l.lib, vec![yt.clone()], prefs, None);
     s.rt.send(Command::PlayTracks { tracks: vec![seed], start: 0, context: "Трек".into() });
     // Its first ten picks, three at a time as they play.
+    let deadline = Instant::now();
     let mut seen: Vec<String> = Vec::new();
     while seen.len() < 10 {
+        assert!(deadline.elapsed() < Duration::from_secs(120), "timed out collecting autoplay picks: {seen:?}");
         wait_for(&s.rt, "autoplay", |st| st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() >= 3);
         for e in s.rt.state().queue.next.iter() {
             if !seen.contains(&e.track.title) {
@@ -1985,12 +1989,13 @@ fn a_radio_that_ran_out_during_a_pause_plays_on_by_itself_after_it() {
     wait_until("the seed plays", || !s.asked.lock().unwrap().is_empty());
     // YouTube's bot check: the queued songs still play (on disk), but a
     // top-up finds nothing that plays now (no files).
-    let pause = Duration::from_secs(8);
+    let pause = Duration::from_secs(10);
     yt.rate_limit_next_paused("open_audio", 1, pause);
     assert!(yt.open_audio("yt-gruppa-1").is_err());
     let paused_at = Instant::now();
     // Everything queued plays to its end: the radio runs out.
     while !s.rt.state().queue.next.is_empty() {
+        assert!(paused_at.elapsed() < pause, "ran out within the pause (the test is too slow)");
         end_current(&s);
     }
     let last = s.asked.lock().unwrap().last().unwrap().id;
