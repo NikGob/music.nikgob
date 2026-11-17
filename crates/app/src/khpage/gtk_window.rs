@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use gtk::glib;
 use gtk::prelude::*;
+use wry::{NewWindowResponse, PageLoadEvent, WebContext, WebViewBuilder, WebViewBuilderExtUnix as _};
 
 use super::{ChildArgs, EXIT_ERROR, EXIT_NO_WEBVIEW, EXIT_OK, EXIT_TIMEOUT, READ_HTML, html_is_check, title_cleared};
 
