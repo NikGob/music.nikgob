@@ -415,3 +415,79 @@ fn a_deezer_track_plays_from_a_connected_spotify_before_youtube_music() {
     assert_eq!(spotify.calls("find_isrc"), 1);
     assert_eq!(youtube.calls("find_isrc") + youtube.calls("search_kind"), 0, "YouTube Music not asked");
 }
+
+#[test]
+fn liking_and_unliking_from_search_updates_mixed_answer_and_stream_rows() {
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("Eve")).unwrap();
+    let rel = lib.upsert_release(&Release::new("Kaizin", ArtistCredit::single("Eve", Some(artist.id)))).unwrap();
+    let mut track = Track::new("Avant", ArtistCredit::single("Eve", Some(artist.id)));
+    track.release_id = Some(rel.id);
+    track.duration_ms = Some(204_000);
+    let track = lib.upsert_track(&track).unwrap();
+    lib.add_source(&Source::new(track.id, SourceKind::LocalFile, "/music/eve/avant.flac", Codec::Flac).with_quality(false))
+        .unwrap();
+    let mut second = Track::new("Avant Deux", ArtistCredit::single("Eve", Some(artist.id)));
+    second.release_id = Some(rel.id);
+    second.duration_ms = Some(198_000);
+    let second = lib.upsert_track(&second).unwrap();
+    lib.add_source(&Source::new(second.id, SourceKind::LocalFile, "/music/eve/avant-deux.flac", Codec::Flac).with_quality(false))
+        .unwrap();
+
+    let youtube = Arc::new(FakeService::youtube().logged_out());
+    let deezer = Arc::new(
+        FakeService::deezer()
+            .with_track("avant-alt", "Avant Garde", "Patxi", 144),
+    );
+    let r = rig(&lib, vec![youtube, deezer]);
+    let answer = search_all(&r, "avant");
+    assert!(matches!(&answer.top, Some(TopResult::Track(SearchTrack::Library(row))) if row.id == track.id && !row.liked));
+    assert!(answer.tracks.iter().any(|t| matches!(t, SearchTrack::Library(row) if row.id == second.id && !row.liked)));
+
+    r.rt.send(Command::Like(nikgob_core::model::LikeTarget::Track(track.id), true));
+    r.rt.send(Command::Like(nikgob_core::model::LikeTarget::Track(second.id), true));
+    wait_for(&r.rt, "library search rows liked everywhere", |s| {
+        s.search.tracks.iter().any(|t| t.id == track.id && t.liked)
+            && s.search.tracks.iter().any(|t| t.id == second.id && t.liked)
+            && matches!(&s.search.answer.top, Some(TopResult::Track(SearchTrack::Library(row))) if row.id == track.id && row.liked)
+            && s.search.answer.tracks.iter().any(|t| matches!(t, SearchTrack::Library(row) if row.id == second.id && row.liked))
+    });
+
+    r.rt.send(Command::Like(nikgob_core::model::LikeTarget::Track(track.id), false));
+    r.rt.send(Command::Like(nikgob_core::model::LikeTarget::Track(second.id), false));
+    wait_for(&r.rt, "library search rows unliked everywhere", |s| {
+        s.search.tracks.iter().any(|t| t.id == track.id && !t.liked)
+            && s.search.tracks.iter().any(|t| t.id == second.id && !t.liked)
+            && matches!(&s.search.answer.top, Some(TopResult::Track(SearchTrack::Library(row))) if row.id == track.id && !row.liked)
+            && s.search.answer.tracks.iter().any(|t| matches!(t, SearchTrack::Library(row) if row.id == second.id && !row.liked))
+    });
+
+    // Unliking a linked streaming search row (e.g. via the toast undo button)
+    // updates the row inside the unified answer without calling LikeStream again.
+    let remote = RemoteId::new(Service::Deezer, "dz-x-avant-alt");
+    r.rt.send(Command::LikeStream { track: remote.clone(), on: true });
+    wait_for(&r.rt, "stream search row liked in answer", |s| {
+        s.search.answer.tracks.iter().any(|t| {
+            matches!(t, SearchTrack::Stream(row) if row.remote == remote && row.track.is_some() && row.liked && row.in_library)
+        })
+    });
+    let linked_id = r
+        .rt
+        .state()
+        .search
+        .answer
+        .tracks
+        .iter()
+        .find_map(|t| match t {
+            SearchTrack::Stream(row) if row.remote == remote => row.track,
+            _ => None,
+        })
+        .expect("linked library track id");
+
+    r.rt.send(Command::Like(nikgob_core::model::LikeTarget::Track(linked_id), false));
+    wait_for(&r.rt, "stream search row unliked via Like undo", |s| {
+        s.search.answer.tracks.iter().any(|t| {
+            matches!(t, SearchTrack::Stream(row) if row.remote == remote && !row.liked && !row.in_library)
+        })
+    });
+}

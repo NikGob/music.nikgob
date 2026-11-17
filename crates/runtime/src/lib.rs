@@ -1940,13 +1940,18 @@ impl Worker {
                 let (mut added, mut already) = (0, 0);
                 if id == LIKED_PLAYLIST {
                     let mut seen = std::collections::HashSet::new();
+                    let mut liked_ids = Vec::new();
                     for t in tracks.iter().filter(|t| seen.insert(**t)) {
                         if self.lib.is_liked(*t).unwrap_or(false) {
                             already += 1;
                         } else if self.lib.like(*t).is_ok() {
                             added += 1;
                             self.track_liked(*t, true);
+                            liked_ids.push(*t);
                         }
+                    }
+                    if !liked_ids.is_empty() {
+                        self.publish_liked_state(&liked_ids, None, None, true);
                     }
                 } else if let Some(n) = self.log_err("плейлист", self.lib.playlist_add_missing(id, &tracks)) {
                     (added, already) = n;
@@ -1976,6 +1981,7 @@ impl Worker {
                 let mut undo = None;
                 if id == LIKED_PLAYLIST {
                     if self.log_err("лайк", self.lib.unlike(track)).is_some() {
+                        self.publish_liked_state(&[track], None, None, false);
                         undo = Some(("Убрано из Любимых".to_owned(), Command::Like(LikeTarget::Track(track), true)));
                     }
                 } else if let Ok(entries) = self.lib.playlist_entries(id, 0, u32::MAX)
@@ -4101,23 +4107,7 @@ impl Worker {
         } else {
             self.toast_info(text, undo);
         }
-        self.publish(|s| {
-            let fix = |t: &mut nikgob_view::TrackRow| {
-                if tracks.contains(&t.id) {
-                    t.liked = on;
-                }
-            };
-            if let Some(c) = s.player.current.as_mut() {
-                fix(c);
-            }
-            if let Some(c) = s.queue.current.as_mut() {
-                fix(c);
-            }
-            s.queue.next.iter_mut().for_each(|e| fix(&mut e.track));
-            s.library.tracks.iter_mut().for_each(fix);
-            s.search.tracks.iter_mut().for_each(fix);
-            s.search.releases.iter_mut().filter(|c| c.id == id).for_each(|c| c.liked = on);
-        });
+        self.publish_liked_state(&tracks, Some(id), None, on);
         self.patch_home(move |home| release_liked_on_home(home, id, on));
         self.after_like_change(before, vec![id]);
     }
@@ -4151,9 +4141,7 @@ impl Worker {
         } else {
             self.toast_info(text, undo);
         }
-        self.publish(|s| {
-            s.search.releases.iter_mut().filter(|c| c.id == id).for_each(|c| c.liked = on);
-        });
+        self.publish_liked_state(&[], Some(id), None, on);
         self.patch_home(move |home| release_liked_on_home(home, id, on));
         self.after_like_change(before, vec![id]);
     }
@@ -4291,6 +4279,8 @@ impl Worker {
         {
             return;
         }
+        let in_lib = self.lib.track_in_library(track).ok().flatten().unwrap_or(false);
+        self.publish_track_in_library(track, in_lib);
         let release = self.lib.get_track(track).ok().flatten().and_then(|t| t.release_id);
         self.library_edited(before, release.into_iter().collect());
         if let Some(r) = release {
@@ -4460,17 +4450,53 @@ impl Worker {
         }
     }
 
-    /// Updates `liked` flags already shown without reloading everything.
-    fn refresh_liked(&mut self, target: LikeTarget, on: bool, before: Held) {
-        // The same song on other albums: one ♡ for the recording.
-        let twins = match target {
-            LikeTarget::Track(t) => self.lib.recording_twins(t).unwrap_or_default(),
-            _ => Vec::new(),
+    /// Updates `liked` flags already shown across player, queue, library, detail pages, and search without reloading everything.
+    fn publish_liked_state(
+        &mut self,
+        tracks: &[TrackId],
+        release: Option<nikgob_core::model::ReleaseId>,
+        artist: Option<nikgob_core::model::ArtistId>,
+        on: bool,
+    ) {
+        let mut track_ids: Vec<TrackId> = tracks.to_vec();
+        for &t in tracks {
+            if let Ok(twins) = self.lib.recording_twins(t) {
+                track_ids.extend(twins);
+            }
+        }
+        track_ids.sort_unstable();
+        track_ids.dedup();
+        let stream_in_lib: std::collections::HashMap<TrackId, bool> = if !on && !track_ids.is_empty() {
+            track_ids
+                .iter()
+                .map(|&id| (id, self.lib.track_in_library(id).ok().flatten().unwrap_or(false)))
+                .collect()
+        } else {
+            std::collections::HashMap::new()
         };
         self.publish(|s| {
+            let match_track = |id: TrackId| track_ids.binary_search(&id).is_ok();
             let fix = |t: &mut nikgob_view::TrackRow| {
-                if LikeTarget::Track(t.id) == target || twins.contains(&t.id) {
+                if match_track(t.id) {
                     t.liked = on;
+                }
+            };
+            let fix_stream = |t: &mut nikgob_view::StreamTrackRow| {
+                if let Some(id) = t.track
+                    && match_track(id)
+                {
+                    t.liked = on;
+                    t.in_library = if on { true } else { *stream_in_lib.get(&id).unwrap_or(&false) };
+                }
+            };
+            let fix_release = |r: &mut nikgob_view::ReleaseCard| {
+                if release == Some(r.id) {
+                    r.liked = on;
+                }
+            };
+            let fix_artist = |a: &mut nikgob_view::ArtistCard| {
+                if artist == Some(a.id) {
+                    a.liked = on;
                 }
             };
             if let Some(c) = s.player.current.as_mut() {
@@ -4482,41 +4508,58 @@ impl Worker {
             s.queue.next.iter_mut().for_each(|e| fix(&mut e.track));
             s.queue.prev.iter_mut().for_each(|e| fix(&mut e.track));
             s.library.tracks.iter_mut().for_each(fix);
-            s.search.tracks.iter_mut().for_each(fix);
             if let Some(r) = s.release.as_mut() {
                 r.tracks.iter_mut().for_each(fix);
-                if LikeTarget::Release(r.card.id) == target {
+                if release == Some(r.card.id) {
                     r.liked = on;
                 }
+                fix_release(&mut r.card);
             }
             if let Some(p) = s.playlist.as_mut() {
                 p.tracks.iter_mut().for_each(fix);
             }
             if let Some(a) = s.artist.as_mut() {
                 a.top_tracks.iter_mut().for_each(fix);
-                if LikeTarget::Artist(a.card.id) == target {
+                if artist == Some(a.card.id) {
                     a.liked = on;
                     a.card.liked = on;
                 }
             }
-            let fix_release = |r: &mut nikgob_view::ReleaseCard| {
-                if LikeTarget::Release(r.id) == target {
-                    r.liked = on;
-                }
-            };
-            let fix_artist = |a: &mut nikgob_view::ArtistCard| {
-                if LikeTarget::Artist(a.id) == target {
-                    a.liked = on;
-                }
-            };
             s.library.releases.iter_mut().for_each(fix_release);
-            s.search.releases.iter_mut().for_each(fix_release);
-            if let Some(r) = s.release.as_mut() {
-                fix_release(&mut r.card);
-            }
             s.library.artists.iter_mut().for_each(fix_artist);
-            s.search.artists.iter_mut().for_each(fix_artist);
+            patch_search_liked(&mut s.search, &fix, &fix_stream, &fix_release, &fix_artist);
         });
+    }
+
+    fn publish_track_in_library(&mut self, track: TrackId, in_library: bool) {
+        self.publish(|s| {
+            let fix = |t: &mut nikgob_view::StreamTrackRow| {
+                if t.track == Some(track) {
+                    t.in_library = in_library;
+                }
+            };
+            for sec in &mut s.search.streams {
+                sec.tracks.iter_mut().for_each(&fix);
+            }
+            for t in &mut s.search.answer.tracks {
+                if let nikgob_view::SearchTrack::Stream(r) = t {
+                    fix(r);
+                }
+            }
+            if let Some(nikgob_view::TopResult::Track(nikgob_view::SearchTrack::Stream(r))) = s.search.answer.top.as_mut() {
+                fix(r);
+            }
+        });
+    }
+
+    /// Updates `liked` flags already shown without reloading everything.
+    fn refresh_liked(&mut self, target: LikeTarget, on: bool, before: Held) {
+        let (tracks, release, artist) = match target {
+            LikeTarget::Track(t) => (vec![t], None, None),
+            LikeTarget::Release(id) => (Vec::new(), Some(id), None),
+            LikeTarget::Artist(id) => (Vec::new(), None, Some(id)),
+        };
+        self.publish_liked_state(&tracks, release, artist, on);
         // The home's cards: kept for a page on its way too.
         match target {
             LikeTarget::Release(id) => self.patch_home(move |home| release_liked_on_home(home, id, on)),
@@ -4535,6 +4578,45 @@ impl Worker {
     }
 }
 
+fn patch_search_liked(
+    search: &mut nikgob_view::SearchView,
+    fix: &impl Fn(&mut nikgob_view::TrackRow),
+    fix_stream: &impl Fn(&mut nikgob_view::StreamTrackRow),
+    fix_release: &impl Fn(&mut nikgob_view::ReleaseCard),
+    fix_artist: &impl Fn(&mut nikgob_view::ArtistCard),
+) {
+    search.tracks.iter_mut().for_each(fix);
+    search.releases.iter_mut().for_each(fix_release);
+    search.artists.iter_mut().for_each(fix_artist);
+    for sec in &mut search.streams {
+        sec.tracks.iter_mut().for_each(fix_stream);
+    }
+    for t in &mut search.answer.tracks {
+        match t {
+            nikgob_view::SearchTrack::Library(r) => fix(r),
+            nikgob_view::SearchTrack::Stream(r) => fix_stream(r),
+        }
+    }
+    for a in &mut search.answer.albums {
+        if let nikgob_view::SearchAlbum::Library(r) = a {
+            fix_release(r);
+        }
+    }
+    for a in &mut search.answer.artists {
+        if let nikgob_view::SearchArtist::Library(c) = a {
+            fix_artist(c);
+        }
+    }
+    if let Some(top) = search.answer.top.as_mut() {
+        match top {
+            nikgob_view::TopResult::Track(nikgob_view::SearchTrack::Library(r)) => fix(r),
+            nikgob_view::TopResult::Track(nikgob_view::SearchTrack::Stream(r)) => fix_stream(r),
+            nikgob_view::TopResult::Album(nikgob_view::SearchAlbum::Library(r)) => fix_release(r),
+            nikgob_view::TopResult::Artist(nikgob_view::SearchArtist::Library(c)) => fix_artist(c),
+            _ => {}
+        }
+    }
+}
 
 impl Worker {
     fn sources_file(&self) -> Option<std::path::PathBuf> {
