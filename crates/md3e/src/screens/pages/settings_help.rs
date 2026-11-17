@@ -3185,8 +3185,8 @@ mod tests {
         assert_eq!(id.label_in(Locale::En), "Language");
         let ru_labels: Vec<&str> = id.choices_in(Locale::Ru).iter().map(|c| c.label).collect();
         let en_labels: Vec<&str> = id.choices_in(Locale::En).iter().map(|c| c.label).collect();
-        assert_eq!(ru_labels, ["Системный", "Русский", "English"]);
-        assert_eq!(en_labels, ["System", "Русский", "English"]);
+        assert_eq!(ru_labels, ["Системный", "Русский", "English (beta)"]);
+        assert_eq!(en_labels, ["System", "Русский", "English (beta)"]);
 
         let before_global = nikgob_core::i18n::locale();
         for (i, pref) in LangPref::ALL.iter().enumerate() {
