@@ -4,6 +4,8 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+use nikgob_core::i18n::activity::fmt_merged_into_in;
+use nikgob_core::i18n::activity_in;
 use nikgob_view::EditionOffer;
 
 use crate::Worker;
@@ -43,7 +45,7 @@ impl Worker {
             .collect();
         self.publish(|s| s.editions = offers);
         if fresh {
-            self.toast_info("Похоже, некоторые альбомы повторяются — посмотри в Библиотеке", None);
+            self.toast_info(activity_in(self.locale()).editions_repeat, None);
         }
     }
 
@@ -51,14 +53,15 @@ impl Worker {
         let Some(g) = self.editions.iter().find(|g| offer_id(&g.group) == id).cloned() else {
             return;
         };
+        let loc = self.locale();
         match nikgob_import::fold_editions(&self.lib, &g) {
             Ok(()) => {
-                self.toast_ok(format!("Объединено в «{}»", g.keep.release.title), None);
+                self.toast_ok(fmt_merged_into_in(loc, &g.keep.release.title), None);
                 self.load_library();
             }
             Err(e) => {
                 log::error!("merging editions: {e}");
-                self.toast_err("Не получилось объединить альбомы", None);
+                self.toast_err(activity_in(loc).editions_merge_failed, None);
             }
         }
         self.offer_editions();

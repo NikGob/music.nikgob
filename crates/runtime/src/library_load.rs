@@ -22,6 +22,7 @@
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
+use nikgob_core::i18n::activity_in;
 use nikgob_library::{Library, ReleaseSortKey, Sort, TrackSortKey};
 use nikgob_view as v;
 
@@ -155,11 +156,11 @@ fn read(res: &mut Resolver, job: &Job) -> Loaded {
         v::ReleaseSort::Year => Sort::desc(ReleaseSortKey::Year),
         v::ReleaseSort::Added => Sort::desc(ReleaseSortKey::Added),
     };
-    let releases = kept(&mut errors, "библиотека", lib.releases(0, 20_000, key));
+    let releases = kept(&mut errors, activity_in(job.locale).lib_library, lib.releases(0, 20_000, key));
     let (playlists, liked_albums) = shelf(&lib, res, only_local, &mut errors);
     let artists = kept(
         &mut errors,
-        "исполнители",
+        activity_in(job.locale).lib_artists,
         lib.artists(0, 20_000, Sort::asc(nikgob_library::ArtistSortKey::Name)),
     );
     // The inconspicuous "только скачанное": what has a file.
@@ -211,7 +212,7 @@ fn read(res: &mut Resolver, job: &Job) -> Loaded {
     };
     let rows = kept(
         &mut errors,
-        "треки",
+        activity_in(job.locale).lib_tracks,
         lib.tracks_filtered(0, FIRST_TRACKS as u32, track_key, crate::track_filter(only_local)),
     );
     let track_rows = rows.iter().map(|r| res.track_in(r, job.locale)).collect();

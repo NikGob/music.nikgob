@@ -23,6 +23,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::Sender;
+use nikgob_core::i18n::activity::fmt_quoted_in;
+use nikgob_core::i18n::{Locale, activity_in, plural_forms};
 use nikgob_core::model::{Source, SourceId, SourceOrigin, TrackId, quality_score, score};
 use nikgob_core::quality::{QualityCheck, Verdict, clear_fake, fake_score};
 use nikgob_import::quality::{CheckError, Mp3Encoder, check_file_paced, convert_fake, file_stamp, is_fake, restore_conversion};
@@ -324,7 +326,9 @@ pub(crate) fn check_fresh(path: &Path, c: &QualityCheck) -> bool {
 }
 
 /// What a click on a conversion says while another one runs.
-const BUSY: &str = "Ещё не закончил с прошлым файлом";
+fn busy_text(loc: Locale) -> &'static str {
+    activity_in(loc).quality_busy
+}
 
 /// Absolute path of a source locator (relative ones are under the library).
 fn file_path(root: &Path, locator: &str) -> PathBuf {
@@ -348,14 +352,14 @@ pub(crate) struct QualityJob {
 
 /// The fakes offered as MP3s, one card per album: `(album key, title,
 /// offers)`, in the order the library lists them.
-pub(crate) fn fake_cards(offers: Vec<FakeOffer>) -> Vec<(String, String, Vec<FakeOffer>)> {
+pub(crate) fn fake_cards(offers: Vec<FakeOffer>, loc: Locale) -> Vec<(String, String, Vec<FakeOffer>)> {
     let mut out: Vec<(String, String, Vec<FakeOffer>)> = Vec::new();
     for o in offers {
         let key = o.release.map_or_else(|| "-".to_owned(), |r| r.to_string());
         match out.iter_mut().find(|(k, ..)| *k == key) {
             Some((.., list)) => list.push(o),
             None => {
-                let title = if o.album.is_empty() { "Отдельные треки".to_owned() } else { o.album.clone() };
+                let title = if o.album.is_empty() { activity_in(loc).separate_tracks.to_owned() } else { o.album.clone() };
                 out.push((key, title, vec![o]));
             }
         }
@@ -366,11 +370,12 @@ pub(crate) fn fake_cards(offers: Vec<FakeOffer>) -> Vec<(String, String, Vec<Fak
 /// A song's row on its card: its title, and what the file likely is (only
 /// a clear cliff below 19.8 kHz is offered, but the bitrate is an estimate
 /// from the cut, never a fact).
-pub(crate) fn fake_option(o: &FakeOffer) -> v::ConfirmOption {
-    let from = o.origin.lossy_kbps().map_or_else(|| "из сжатого".to_owned(), |k| format!("из MP3 ~{k}"));
+pub(crate) fn fake_option(o: &FakeOffer, loc: Locale) -> v::ConfirmOption {
+    let s = activity_in(loc);
+    let from = o.origin.lossy_kbps().map_or_else(|| s.from_lossy.to_owned(), |k| format!("{} ~{k}", s.from_mp3));
     v::ConfirmOption {
         label: o.title.clone(),
-        detail: format!("Вероятно, {from} · срез {}", nikgob_core::quality::khz(o.cutoff_hz)),
+        detail: format!("{}, {from} · {} {}", s.probably, s.cutoff, nikgob_core::quality::khz_in(o.cutoff_hz, loc)),
         recommended: false,
     }
 }
@@ -378,30 +383,22 @@ pub(crate) fn fake_option(o: &FakeOffer) -> v::ConfirmOption {
 /// The «Подтверди» card of an album's fakes (`id`, the album's `title`):
 /// a row per song to tick, nothing ticked; the buttons act on the ticked
 /// songs only.
-pub(crate) fn fake_card(id: u64, title: String, offers: &[FakeOffer]) -> v::Confirm {
+pub(crate) fn fake_card(id: u64, title: String, offers: &[FakeOffer], loc: Locale) -> v::Confirm {
+    let s = activity_in(loc);
     let n = offers.len();
     v::Confirm {
         yes_no: false,
         id,
         title,
-        origin: format!(
-            "Ненастоящий FLAC · {n} {}",
-            if n % 10 == 1 && n % 100 != 11 {
-                "файл"
-            } else if (2..5).contains(&(n % 10)) && !(12..15).contains(&(n % 100)) {
-                "файла"
-            } else {
-                "файлов"
-            }
-        ),
-        options: offers.iter().map(fake_option).collect(),
-        skip_label: "Оставить FLAC".into(),
-        question: "Отметь, какие превратить в MP3: FLAC уйдут в Корзину, «Вернуть FLAC» в настройках вернёт их".into(),
-        accept_label: "Превратить в MP3".into(),
+        origin: format!("{} · {n} {}", s.fake_flac, plural_forms(loc, n as u64, &s.files)),
+        options: offers.iter().map(|o| fake_option(o, loc)).collect(),
+        skip_label: s.keep_flac.into(),
+        question: s.fake_question.into(),
+        accept_label: s.convert_to_mp3.into(),
         pick: Some(v::ConfirmPick {
             sources: offers.iter().map(|o| o.source_id).collect(),
-            accept: ("Превратить".into(), "в MP3".into()),
-            skip: ("Оставить".into(), "FLAC".into()),
+            accept: (s.convert.into(), s.to_mp3.into()),
+            skip: (s.keep.into(), s.flac.into()),
         }),
     }
 }
@@ -565,9 +562,10 @@ impl Worker {
         } else {
             Vec::new()
         };
+        let loc = self.locale();
         let q = &mut self.quality;
         let mut confirms = Vec::new();
-        for (key, title, list) in fake_cards(offers) {
+        for (key, title, list) in fake_cards(offers, loc) {
             let id = match q.card_ids.get(&key) {
                 Some(id) => *id,
                 None => {
@@ -577,7 +575,7 @@ impl Worker {
                     id
                 }
             };
-            confirms.push(fake_card(id, title, &list));
+            confirms.push(fake_card(id, title, &list, loc));
         }
         self.publish(|s| {
             s.downloads.confirm.retain(|c| c.id & QUALITY_ID == 0);
@@ -616,7 +614,7 @@ impl Worker {
         }
         let Some(svc) = &self.import else { return };
         let Some(enc) = Mp3Encoder::find() else {
-            self.toast_err("Нужен ffmpeg, чтобы сделать MP3", None);
+            self.toast_err(activity_in(self.locale()).need_ffmpeg, None);
             return;
         };
         let (lib, trash, tx) = (self.lib.clone(), svc.config().trash_dir.clone(), svc.internal());
@@ -659,7 +657,7 @@ impl Worker {
     pub(crate) fn fake_to_mp3(&mut self, track: TrackId) {
         if self.quality.busy {
             log::info!("quality: a conversion runs, {track} waits for the next click");
-            self.toast_info(BUSY, None);
+            self.toast_info(busy_text(self.locale()), None);
             return;
         }
         let src = self
@@ -680,17 +678,17 @@ impl Worker {
         if !check_fresh(&file_path(self.res.root(), &src.locator), &check) {
             log::warn!("quality: {} changed since its check, left as it is", src.locator);
             self.quality.kick();
-            self.toast_info("Файл изменился после проверки — проверю его заново", None);
+            self.toast_info(activity_in(self.locale()).file_changed, None);
             return;
         }
         let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
         let codec = nikgob_core::quality::codec_name(&src.codec);
         let Some(svc) = &self.import else {
-            self.toast_err("Импорт недоступен", None);
+            self.toast_err(activity_in(self.locale()).import_unavailable, None);
             return;
         };
         let Some(enc) = Mp3Encoder::find() else {
-            self.toast_err("Нужен ffmpeg, чтобы сделать MP3", None);
+            self.toast_err(activity_in(self.locale()).need_ffmpeg, None);
             return;
         };
         let (lib, trash, tx) = (self.lib.clone(), svc.config().trash_dir.clone(), svc.internal());
@@ -712,7 +710,7 @@ impl Worker {
     pub(crate) fn undo_fake_to_mp3(&mut self, pairs: Vec<(SourceId, SourceId)>) {
         if self.quality.busy {
             log::info!("quality: a conversion runs, the undo of {} files waits for the next click", pairs.len());
-            self.toast_info(BUSY, None);
+            self.toast_info(busy_text(self.locale()), None);
             return;
         }
         let Some(svc) = &self.import else { return };
@@ -766,13 +764,15 @@ impl Worker {
     }
 
     pub(crate) fn quality_msg(&mut self, m: Msg) {
+        let loc = self.locale();
+        let s = activity_in(loc);
         match m {
             Msg::Restored { done, failed } => {
                 self.quality.busy = false;
                 match (done, failed) {
-                    (0, 0) => self.toast_info("Возвращать нечего: все FLAC на месте", None),
-                    (d, 0) => self.toast_ok(format!("Вернул FLAC: {d}"), None),
-                    (d, f) => self.toast_err(format!("Вернул FLAC: {d}, не получилось: {f}"), None),
+                    (0, 0) => self.toast_info(s.nothing_to_restore, None),
+                    (d, 0) => self.toast_ok(format!("{}: {d}", s.restored_flac), None),
+                    (d, f) => self.toast_err(format!("{}: {d}, {}: {f}", s.restored_flac, s.failed), None),
                 }
                 self.reload_after_import();
                 self.publish_fake_offers();
@@ -783,9 +783,9 @@ impl Worker {
                 // What this answer made, taken back in one step.
                 let undo = (!done.is_empty()).then(|| self.undo_action(v::Command::UndoFakeToMp3(done)));
                 if failed == 0 {
-                    self.toast_ok(format!("Сделал MP3: {d} · FLAC в Корзине"), undo);
+                    self.toast_ok(format!("{}: {d} · {}", s.made_mp3, s.flac_in_trash), undo);
                 } else {
-                    self.toast_err(format!("Сделал MP3: {d}, не получилось: {f}", f = failed), undo);
+                    self.toast_err(format!("{}: {d}, {}: {f}", s.made_mp3, s.failed, f = failed), undo);
                 }
                 self.reload_after_import();
                 self.publish_fake_offers();
@@ -796,11 +796,17 @@ impl Worker {
                     Ok(pair) => {
                         log::info!("quality: {track} plays its MP3 now, the {codec} is in the Trash");
                         let undo = self.undo_action(v::Command::UndoFakeToMp3(vec![pair]));
-                        self.toast_ok(format!("«{title}»: сделал MP3 · {codec} в Корзине"), Some(undo));
+                        let text = format!(
+                            "{}: {} · {codec} {}",
+                            fmt_quoted_in(loc, &title),
+                            s.made_mp3_lc,
+                            s.in_trash
+                        );
+                        self.toast_ok(text, Some(undo));
                     }
                     Err(e) => {
                         log::warn!("quality: turning {track} into an MP3: {e}");
-                        self.toast_err(format!("Не получилось сделать MP3 из «{title}»"), None);
+                        self.toast_err(format!("{} {}", s.could_not_make_mp3, fmt_quoted_in(loc, &title)), None);
                     }
                 }
                 self.reload_after_import();
@@ -940,11 +946,11 @@ mod tests {
     #[test]
     fn fakes_are_offered_album_by_album_and_song_by_song() {
         let r = nikgob_core::model::ReleaseId::new();
-        let cards = fake_cards(vec![offer("Молли", Some(r)), offer("Lin Ansty", Some(r)), offer("Супермаркет", None)]);
+        let cards = fake_cards(vec![offer("Молли", Some(r)), offer("Lin Ansty", Some(r)), offer("Супермаркет", None)], Locale::Ru);
         assert_eq!(cards.len(), 2);
         assert_eq!((cards[0].1.as_str(), cards[0].2.len()), ("8 способов как бросить...", 2));
         assert_eq!(cards[1].1, "Отдельные треки");
-        let card = fake_card(QUALITY_ID | 1, cards[0].1.clone(), &cards[0].2);
+        let card = fake_card(QUALITY_ID | 1, cards[0].1.clone(), &cards[0].2, Locale::Ru);
         assert_eq!(card.origin, "Ненастоящий FLAC · 2 файла");
         assert_eq!(card.options.len(), 2, "a row per song");
         assert_eq!((card.options[0].label.as_str(), card.options[0].detail.as_str()), ("Молли", "Вероятно, из MP3 ~128 · срез 16,1 кГц"));
@@ -954,12 +960,13 @@ mod tests {
         assert_eq!(v::ConfirmPick::words(&pick.accept, 3), "Превратить 3 в MP3");
         assert_eq!(v::ConfirmPick::words(&pick.accept, 0), "Превратить в MP3");
         assert_eq!(v::ConfirmPick::words(&pick.skip, 1), "Оставить 1 FLAC");
-        let one = fake_card(QUALITY_ID | 2, cards[1].1.clone(), &cards[1].2);
+        let one = fake_card(QUALITY_ID | 2, cards[1].1.clone(), &cards[1].2, Locale::Ru);
         assert_eq!(one.origin, "Ненастоящий FLAC · 1 файл");
         let many: Vec<FakeOffer> = (0..21).map(|i| offer(&i.to_string(), Some(r))).collect();
-        assert_eq!(fake_card(QUALITY_ID | 3, String::new(), &many).origin, "Ненастоящий FLAC · 21 файл");
-        assert_eq!(fake_card(QUALITY_ID | 3, String::new(), &many[..11]).origin, "Ненастоящий FLAC · 11 файлов");
-        assert_eq!(fake_card(QUALITY_ID | 3, String::new(), &many[..7]).origin, "Ненастоящий FLAC · 7 файлов");
+        assert_eq!(fake_card(QUALITY_ID | 3, String::new(), &many, Locale::Ru).origin, "Ненастоящий FLAC · 21 файл");
+        assert_eq!(fake_card(QUALITY_ID | 3, String::new(), &many[..11], Locale::Ru).origin, "Ненастоящий FLAC · 11 файлов");
+        assert_eq!(fake_card(QUALITY_ID | 3, String::new(), &many[..7], Locale::Ru).origin, "Ненастоящий FLAC · 7 файлов");
+        assert_eq!(fake_card(QUALITY_ID | 3, String::new(), &many[..7], Locale::En).origin, "Fake FLAC · 7 files");
     }
 
     /// The OMORI card: one song ticked of seven turns only that one; a

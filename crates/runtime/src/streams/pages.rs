@@ -270,7 +270,7 @@ impl Worker {
     /// the new cover showing is its answer.
     pub(crate) fn refresh_stream_album_cover(&mut self, id: RemoteId) {
         if !album_fetching(&self.streaming.pages.inflight, &id) {
-            self.toast_work(crate::cover_refresh::LOOKING, None);
+            self.toast_work(crate::cover_refresh::looking(self.locale()), None);
         }
         let mut covers: Vec<String> = self.streaming.pages.album(&id).and_then(|a| a.cover_url.clone()).into_iter().collect();
         self.streaming.pages.stale_album(&id);
@@ -742,8 +742,7 @@ impl Worker {
             }
             Then::Radio => {
                 let ids = self.upsert_streams(&playable);
-                let of = if album.is_some() { "альбому" } else { "плейлисту" };
-                self.start_list_radio(&ids, &playable, of, &name);
+                self.start_list_radio(&ids, &playable, album.is_some(), &name);
             }
             Then::Play { start, shuffle } => {
                 let ids = self.upsert_streams(&playable);
@@ -799,17 +798,21 @@ impl Worker {
     /// followed), its tracks in the library (waiting in «Хочу скачать» like
     /// an imported playlist's).
     fn follow_playlist(&mut self, p: &StreamPlaylist) {
+        let loc = self.locale();
         let open = |id| v::Link::Route(v::Route::Playlist(id));
+        let open_label = nikgob_core::i18n::common_in(loc).open;
         if let Some(link) = self.lib.playlist_by_remote(&p.id).ok().flatten()
             && self.lib.get_playlist(link.playlist_id).ok().flatten().is_some()
         {
-            self.toast_open(v::ToastKind::Info, format!("«{}» уже в библиотеке", p.name), "Открыть", open(link.playlist_id));
+            let text = nikgob_core::i18n::activity::fmt_playlist_already_in_library_in(loc, &p.name);
+            self.toast_open(v::ToastKind::Info, text, open_label, open(link.playlist_id));
             return;
         }
-        let Some(created) = self.log_err("плейлист", self.lib.create_playlist(&p.name)) else { return };
+        let what = nikgob_core::i18n::activity_in(loc).playlist_err;
+        let Some(created) = self.log_err(what, self.lib.create_playlist(&p.name)) else { return };
         let pid = created.id;
         let ids = self.upsert_streams(&p.tracks);
-        let _ = self.log_err("плейлист", self.lib.playlist_add_many(pid, &ids));
+        let _ = self.log_err(what, self.lib.playlist_add_many(pid, &ids));
         self.wish_for_likes(&ids, nikgob_core::model::WishlistOrigin::Import);
         // A catalogue (Deezer) is not synced with: its playlist is a
         // snapshot.
@@ -824,7 +827,7 @@ impl Worker {
         let base: Vec<String> = p.tracks.iter().map(|t| t.id.id.clone()).collect();
         let synced = self.sync_stamp(pid);
         let _ = self.log_err(
-            "плейлист",
+            what,
             self.lib.put_playlist_remote(&nikgob_library::PlaylistRemote {
                 playlist_id: pid,
                 remote: p.id.clone(),
@@ -837,7 +840,8 @@ impl Worker {
         self.load_library();
         self.publish_wishlist();
         self.refresh_stream_page();
-        self.toast_open(v::ToastKind::Success, format!("«{}» в библиотеке", p.name), "Открыть", open(pid));
+        let text = nikgob_core::i18n::activity::fmt_playlist_in_library_in(loc, &p.name);
+        self.toast_open(v::ToastKind::Success, text, open_label, open(pid));
     }
 
     /// «В библиотеку» of a song of a service: its track is made, then put

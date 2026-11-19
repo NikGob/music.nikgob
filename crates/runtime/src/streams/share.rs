@@ -15,6 +15,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use nikgob_core::i18n::activity::{fmt_link_copied_after_in, fmt_link_copied_for_in, fmt_service_no_answer_in};
+use nikgob_core::i18n::{Locale, activity_in};
 use nikgob_core::streaming::{EntityKind, RemoteId, Service, StreamService};
 use nikgob_metadata::text::{album_key, artist_key};
 use nikgob_metadata::{Deezer, DeezerAlbum, Http, MetadataConfig, MetadataError, MusicLink, Odesli};
@@ -116,6 +118,20 @@ enum Outcome {
     Nothing,
 }
 
+impl Failure {
+    /// Who did not answer, in `loc`'s words.
+    fn text(&self, loc: Locale) -> String {
+        let s = activity_in(loc);
+        match self {
+            Self::MusicLink => s.musiclink_no_answer.to_owned(),
+            Self::MusicLinkKey => s.musiclink_key_refused.to_owned(),
+            Self::Deezer => s.deezer_no_answer.to_owned(),
+            Self::SongLink => s.songlink_no_answer.to_owned(),
+            Self::Album(svc) => fmt_service_no_answer_in(loc, svc.display_name()),
+        }
+    }
+}
+
 impl Outcome {
     fn link(&self) -> Option<String> {
         match self {
@@ -126,22 +142,19 @@ impl Outcome {
     }
 
     /// The toast after the copy.
-    fn toast(&self) -> String {
+    fn toast(&self, loc: Locale) -> String {
+        let s = activity_in(loc);
         match self {
-            Self::Everywhere { key_refused: false, .. } => "Ссылка скопирована".into(),
-            Self::Everywhere { key_refused: true, .. } => "Ключ MusicLink не подошёл — скопирована ссылка song.link".into(),
+            Self::Everywhere { key_refused: false, .. } => s.link_copied.to_owned(),
+            Self::Everywhere { key_refused: true, .. } => s.musiclink_key_refused_songlink.to_owned(),
             Self::Service { page, failed } => {
                 let name = page.service.display_name();
                 match failed {
-                    None => format!("Скопирована ссылка на {name}"),
-                    Some(Failure::MusicLink) => format!("MusicLink не ответил — скопирована ссылка на {name}"),
-                    Some(Failure::MusicLinkKey) => format!("Ключ MusicLink не подошёл — скопирована ссылка на {name}"),
-                    Some(Failure::Deezer) => format!("Deezer не ответил — скопирована ссылка на {name}"),
-                    Some(Failure::SongLink) => format!("song.link не ответил — скопирована ссылка на {name}"),
-                    Some(Failure::Album(s)) => format!("{} не ответил — скопирована ссылка на {name}", s.display_name()),
+                    None => fmt_link_copied_for_in(loc, name),
+                    Some(f) => fmt_link_copied_after_in(loc, &f.text(loc), name),
                 }
             }
-            Self::Nothing => "Нет в сервисах — скопировано название".into(),
+            Self::Nothing => s.not_in_services.to_owned(),
         }
     }
 
@@ -483,7 +496,8 @@ impl Worker {
         // The lookup can take a few seconds: say it started (the result
         // replaces this toast).
         self.drop_share_toast();
-        let id = self.push_toast(v::ToastKind::Working, "Ищу ссылку…".into(), None, None, false);
+        let loc = self.locale();
+        let id = self.push_toast(v::ToastKind::Working, activity_in(loc).share_searching.into(), None, None, false);
         self.streaming.share_toast = Some(id);
         self.streaming.spawn(async move {
             let (outcome, text) = run(job).await;
@@ -493,7 +507,7 @@ impl Worker {
                 result: Shared {
                     link: outcome.link(),
                     text,
-                    toast: outcome.toast(),
+                    toast: outcome.toast(loc),
                     kind: outcome.toast_kind(),
                 },
             }
@@ -505,7 +519,7 @@ impl Worker {
     /// toast and nothing copied.
     pub(crate) fn share_for_api(&mut self, target: v::ShareTarget, reply: v::ApiReply) {
         let Some(job) = self.share_job(&target) else {
-            reply.send(Err("Ничего не нашлось".to_owned()));
+            reply.send(Err(activity_in(self.locale()).nothing_found.to_owned()));
             return;
         };
         self.streaming.spawn_reporting(move |_| async move {
@@ -674,27 +688,28 @@ mod tests {
 
     #[test]
     fn toasts_say_what_was_copied() {
+        let ru = Locale::Ru;
         let yt = page(Service::Youtube, "https://music.youtube.com/watch?v=x");
         let everywhere = |key_refused| Outcome::Everywhere {
             url: "https://musiclink.one/song/a/b".into(),
             key_refused,
         };
-        assert_eq!(everywhere(false).toast(), "Ссылка скопирована");
+        assert_eq!(everywhere(false).toast(ru), "Ссылка скопирована");
         assert_eq!(everywhere(false).link().as_deref(), Some("https://musiclink.one/song/a/b"));
-        assert!(everywhere(true).toast().starts_with("Ключ MusicLink не подошёл"));
+        assert!(everywhere(true).toast(ru).starts_with("Ключ MusicLink не подошёл"));
         let service = |failed| Outcome::Service { page: yt.clone(), failed };
-        assert_eq!(service(None).toast(), "Скопирована ссылка на YouTube Music");
+        assert_eq!(service(None).toast(ru), "Скопирована ссылка на YouTube Music");
         assert_eq!(service(None).link().as_deref(), Some("https://music.youtube.com/watch?v=x"));
         assert_eq!(
-            service(Some(Failure::MusicLink)).toast(),
+            service(Some(Failure::MusicLink)).toast(ru),
             "MusicLink не ответил — скопирована ссылка на YouTube Music"
         );
-        assert!(service(Some(Failure::MusicLinkKey)).toast().starts_with("Ключ MusicLink не подошёл"));
-        assert!(service(Some(Failure::Deezer)).toast().starts_with("Deezer не ответил"));
-        assert!(service(Some(Failure::SongLink)).toast().starts_with("song.link не ответил"));
-        assert!(service(Some(Failure::Album(Service::Youtube))).toast().starts_with("YouTube Music не ответил"));
+        assert!(service(Some(Failure::MusicLinkKey)).toast(ru).starts_with("Ключ MusicLink не подошёл"));
+        assert!(service(Some(Failure::Deezer)).toast(ru).starts_with("Deezer не ответил"));
+        assert!(service(Some(Failure::SongLink)).toast(ru).starts_with("song.link не ответил"));
+        assert!(service(Some(Failure::Album(Service::Youtube))).toast(ru).starts_with("YouTube Music не ответил"));
         assert_eq!(Outcome::Nothing.link(), None);
-        assert_eq!(Outcome::Nothing.toast(), "Нет в сервисах — скопировано название");
+        assert_eq!(Outcome::Nothing.toast(ru), "Нет в сервисах — скопировано название");
     }
 
     #[test]

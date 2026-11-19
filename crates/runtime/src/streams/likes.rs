@@ -33,6 +33,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use nikgob_core::i18n::activity::{fmt_first_likes_in, fmt_like_failed_in};
+use nikgob_core::i18n::{activity_in, common_in};
 use nikgob_core::model::{TrackId, WishlistOrigin};
 use nikgob_core::streaming::{LikedHead, RemoteId, Service, StreamError, StreamTrack};
 use nikgob_library::RemoteLike;
@@ -381,7 +383,7 @@ impl Worker {
         let (new, unliked) = if adds.is_empty() && gone.is_empty() {
             (Vec::new(), Vec::new())
         } else {
-            self.log_err("лайки", self.lib.take_remote_likes_with(&adds, songs, &gone, now))
+            self.log_err(activity_in(self.locale()).likes_err, self.lib.take_remote_likes_with(&adds, songs, &gone, now))
                 .unwrap_or_default()
         };
         if !import {
@@ -415,19 +417,14 @@ impl Worker {
     /// «Spotify: 312 лайков теперь в Любимых · ждут скачивания» with the way
     /// to «Хочу скачать».
     fn first_likes_toast(&mut self, service: Service, n: usize) {
-        let likes = if n % 10 == 1 && n % 100 != 11 {
-            "лайк"
-        } else if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) {
-            "лайка"
-        } else {
-            "лайков"
-        };
-        let head = format!("{}: {n} {likes} теперь в Любимых", service.display_name());
+        let loc = self.locale();
+        let head = fmt_first_likes_in(loc, service.display_name(), n);
         if self.state.read().prefs.like_downloads {
+            let text = format!("{head}{}", activity_in(loc).waiting_download);
             self.toast_open(
                 nikgob_view::ToastKind::Success,
-                format!("{head} · ждут скачивания"),
-                "Открыть",
+                text,
+                common_in(loc).open,
                 nikgob_view::Link::Route(nikgob_view::Route::Downloads(nikgob_view::DownloadsTab::Wishlist)),
             );
         } else {
@@ -569,14 +566,8 @@ impl Worker {
                     let _ = self.lib.delete_remote_like(remote);
                 }
             }
-            self.toast_err(
-                format!(
-                    "Не получилось {} лайк в {}",
-                    if on { "поставить" } else { "снять" },
-                    service.display_name()
-                ),
-                None,
-            );
+            let text = fmt_like_failed_in(self.locale(), on, service.display_name());
+            self.toast_err(text, None);
         }
     }
 }

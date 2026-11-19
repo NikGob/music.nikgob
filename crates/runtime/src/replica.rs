@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
+use nikgob_core::i18n::activity::fmt_size_in;
+use nikgob_core::i18n::{Locale, activity_in, plural_forms};
 use nikgob_library::Library;
 use nikgob_view::{Command, Confirm, ConfirmOption};
 
@@ -112,41 +114,24 @@ pub(crate) struct ReplicaKeep {
     gate: Arc<Mutex<MoveWatch>>,
 }
 
-/// «файл», «файла», «файлов» for `n`.
-fn files_word(n: usize) -> &'static str {
-    if n % 10 == 1 && n % 100 != 11 {
-        "файл"
-    } else if (2..5).contains(&(n % 10)) && !(12..15).contains(&(n % 100)) {
-        "файла"
-    } else {
-        "файлов"
-    }
-}
-
-/// A size in words: «820 МБ», «1,4 ГБ».
-fn size_words(bytes: u64) -> String {
-    const MB: f64 = (1u64 << 20) as f64;
-    const GB: f64 = (1u64 << 30) as f64;
-    let b = bytes as f64;
-    if b >= GB {
-        format!("{:.1} ГБ", b / GB).replace('.', ",")
-    } else {
-        format!("{} МБ", (b / MB).round().max(1.0) as u64)
-    }
+/// «Устройства не ответили — оригиналы остались на компьютере».
+fn stay_text(loc: Locale, reason: &str) -> String {
+    format!("{reason} — {}", activity_in(loc).masters_stay)
 }
 
 /// The card of master files that may go (`id`): each file listed; yes
 /// moves exactly those to the Trash, no keeps them.
-pub(crate) fn keep_card(id: u64, items: &[Offered]) -> Confirm {
+pub(crate) fn keep_card(id: u64, items: &[Offered], loc: Locale) -> Confirm {
+    let s = activity_in(loc);
     let n = items.len();
     Confirm {
         id,
-        title: "Оригиналы FLAC".to_owned(),
-        origin: format!("Копии есть на других устройствах · {n} {}", files_word(n)),
-        question: "Убрать их с компьютера в Корзину? Копии на устройствах останутся".to_owned(),
+        title: s.masters_title.to_owned(),
+        origin: format!("{} · {n} {}", s.masters_origin, plural_forms(loc, n as u64, &s.files)),
+        question: s.masters_question.to_owned(),
         options: items.iter().map(|o| ConfirmOption { label: o.label.clone(), detail: o.detail.clone(), recommended: false }).collect(),
-        skip_label: "Оставить".to_owned(),
-        accept_label: "Убрать в Корзину".to_owned(),
+        skip_label: s.masters_skip.to_owned(),
+        accept_label: s.masters_accept.to_owned(),
         pick: None,
         yes_no: true,
     }
@@ -157,7 +142,7 @@ pub(crate) fn keep_card(id: u64, items: &[Offered]) -> Confirm {
 /// trusted devices (none of `leaving`) hold verified copies of, not
 /// `kept`; one line each, with where it is. Reads the library and the
 /// masters folder: never on the loop.
-pub(crate) fn offer_list(lib: &Library, need: u32, leaving: &[String], masters_dir: &Path, kept: &HashSet<String>) -> Result<Vec<Offered>, String> {
+pub(crate) fn offer_list(lib: &Library, need: u32, leaving: &[String], masters_dir: &Path, kept: &HashSet<String>, loc: Locale) -> Result<Vec<Offered>, String> {
     let all = lib.masters_to_let_go(need, leaving).map_err(|e| e.to_string())?;
     if all.is_empty() {
         return Ok(Vec::new());
@@ -182,14 +167,14 @@ pub(crate) fn offer_list(lib: &Library, need: u32, leaving: &[String], masters_d
             .tracks
             .first()
             .and_then(|t| lib.get_track_row(*t).ok().flatten())
-            .map_or_else(|| "Без названия".to_owned(), |r| if r.artist.trim().is_empty() { r.title } else { format!("{} — {}", r.title, r.artist) });
+            .map_or_else(|| activity_in(loc).untitled.to_owned(), |r| if r.artist.trim().is_empty() { r.title } else { format!("{} — {}", r.title, r.artist) });
         let on: Vec<String> = g.holders.iter().map(|h| names.get(h).cloned().unwrap_or_else(|| h.chars().take(8).collect())).collect();
         for path in files {
             let shown = path.strip_prefix(masters_dir).unwrap_or(&path).display().to_string();
             out.push(Offered {
                 hash: g.file_hash.clone(),
                 label: label.clone(),
-                detail: format!("{} · {} · {shown}", on.join(", "), size_words(g.size)),
+                detail: format!("{} · {} · {shown}", on.join(", "), fmt_size_in(loc, g.size)),
                 path,
             });
         }
@@ -245,7 +230,7 @@ impl Worker {
         self.replica.due = None;
         if matches!(self.replica.busy, Some(Busy::Rechecking { .. })) {
             self.replica.busy = None;
-            self.toast_info("Устройства или выбор изменились — оригиналы остались на компьютере", None);
+            self.toast_info(stay_text(self.locale(), activity_in(self.locale()).masters_devices_changed), None);
         }
     }
 
@@ -258,7 +243,7 @@ impl Worker {
             && since.elapsed() > RECHECK_WAIT
         {
             self.replica.busy = None;
-            self.toast_err("Устройства не ответили — оригиналы остались на компьютере", None);
+            self.toast_err(stay_text(self.locale(), activity_in(self.locale()).masters_no_answer), None);
         }
         let Some(need) = self.state.read().mesh.keep_masters.copies() else {
             if self.replica.card.take().is_some() {
@@ -273,10 +258,11 @@ impl Worker {
         let masters_dir = svc.config().masters_dir();
         let (lib, later) = (self.lib.clone(), self.later_tx.clone());
         let (leaving, kept) = (self.mesh.leaving(), self.replica.kept.clone());
+        let loc = self.locale();
         self.replica.planning = true;
         let spawned = std::thread::Builder::new().name("nikgob-masters-plan".into()).spawn(move || {
             crate::quiet::lower_priority();
-            let out = offer_list(&lib, need, &leaving, &masters_dir, &kept);
+            let out = offer_list(&lib, need, &leaving, &masters_dir, &kept, loc);
             let _ = later.send(Later::new("the masters that may go", move |w| w.replica_planned(out)));
         });
         if let Err(e) = spawned {
@@ -359,7 +345,7 @@ impl Worker {
             self.replica.card = None;
             self.replica.due = None;
             self.replica_publish();
-            self.toast_err("Межсеть не запущена — оригиналы остались на компьютере", None);
+            self.toast_err(stay_text(self.locale(), activity_in(self.locale()).mesh_off), None);
             return;
         };
         self.replica_follow();
@@ -384,12 +370,12 @@ impl Worker {
         };
         let Some(need) = self.state.read().mesh.keep_masters.copies() else {
             self.replica.busy = None;
-            self.toast_info("Выбор изменился — оригиналы остались на компьютере", None);
+            self.toast_info(stay_text(self.locale(), activity_in(self.locale()).masters_choice_changed), None);
             return;
         };
         if self.replica.gate.lock().era != era {
             self.replica.busy = None;
-            self.toast_info("Устройства или выбор изменились — оригиналы остались на компьютере", None);
+            self.toast_info(stay_text(self.locale(), activity_in(self.locale()).masters_devices_changed), None);
             return;
         }
         let asked: HashSet<String> = items.iter().map(|o| o.hash.clone()).collect();
@@ -402,15 +388,15 @@ impl Worker {
             self.replica.due = None;
             if let Some(why) = failed {
                 log::warn!("replica: the copies were not read again: {why}");
-                self.toast_err("Копии не проверены — оригиналы остались на компьютере", None);
+                self.toast_err(stay_text(self.locale(), activity_in(self.locale()).masters_unverified), None);
             } else {
-                self.toast_info("Копий меньше нужного — оригиналы остались на компьютере", None);
+                self.toast_info(stay_text(self.locale(), activity_in(self.locale()).masters_too_few), None);
             }
             return;
         }
         let Some(svc) = &self.import else {
             self.replica.busy = None;
-            self.toast_err("Импорт недоступен — оригиналы остались на компьютере", None);
+            self.toast_err(stay_text(self.locale(), activity_in(self.locale()).masters_import_unavailable), None);
             return;
         };
         let (trash, masters) = (svc.config().trash_dir.clone(), svc.config().masters_dir());
@@ -448,16 +434,18 @@ impl Worker {
     fn replica_trashed(&mut self, ids: Vec<i64>, stayed: usize) {
         self.replica.busy = None;
         self.replica.due = None;
+        let loc = self.locale();
+        let s = activity_in(loc);
         if ids.is_empty() {
-            self.toast_info("Оригиналы остались на компьютере", None);
+            self.toast_info(s.masters_stayed, None);
             return;
         }
         let n = ids.len();
         log::info!("replica: {n} master files moved to the Trash, {stayed} masters stay");
         let text = if stayed > 0 {
-            format!("Оригиналы FLAC в Корзине: {n}, остались на компьютере: {stayed}")
+            format!("{}: {n}, {}: {stayed}", s.masters_trashed, s.masters_stayed_count)
         } else {
-            format!("Оригиналы FLAC в Корзине: {n}")
+            format!("{}: {n}", s.masters_trashed)
         };
         let undo = self.undo_action(Command::ReplicaUndoTrash { ids });
         self.toast_ok(text, Some(undo));
@@ -492,10 +480,11 @@ impl Worker {
         let n = back.len();
         self.replica.kept.extend(back);
         self.replica.due = None;
+        let s = activity_in(self.locale());
         match (n, failed) {
-            (_, 0) => self.toast_ok("Оригиналы вернулись", None),
-            (0, _) => self.toast_err("Оригиналы не вернулись: их место занято или их нет в Корзине", None),
-            (n, f) => self.toast_err(format!("Вернулись: {n}, не вернулись: {f}"), None),
+            (_, 0) => self.toast_ok(s.masters_back, None),
+            (0, _) => self.toast_err(s.masters_not_back, None),
+            (n, f) => self.toast_err(format!("{}: {n}, {}: {f}", s.masters_back_n, s.masters_not_back_n), None),
         }
     }
 }
@@ -514,16 +503,18 @@ mod tests {
             Offered { hash: "h1".into(), path: "/m/A/01.flac".into(), label: "A — B".into(), detail: "Raspberry Pi · 30 МБ · A/01.flac".into() },
             Offered { hash: "h2".into(), path: "/m/h2.flac".into(), label: "C — D".into(), detail: "Raspberry Pi · 1,2 ГБ · h2.flac".into() },
         ];
-        let c = keep_card(REPLICA_ID | 1, &items);
+        let c = keep_card(REPLICA_ID | 1, &items, Locale::Ru);
         assert!(c.yes_no && c.answerable());
         assert_eq!(c.options.len(), 2);
         assert_eq!(c.options[1].label, "C — D");
         assert_eq!(c.origin, "Копии есть на других устройствах · 2 файла");
         assert_eq!(c.accept_label, "Убрать в Корзину");
-        assert_eq!(size_words(30 << 20), "30 МБ");
-        assert_eq!(size_words((12 << 30) / 10), "1,2 ГБ");
-        assert_eq!(files_word(21), "файл");
-        assert_eq!(files_word(11), "файлов");
+        assert_eq!(fmt_size_in(Locale::Ru, 30 << 20), "30 МБ");
+        assert_eq!(fmt_size_in(Locale::Ru, (12 << 30) / 10), "1,2 ГБ");
+        assert_eq!(fmt_size_in(Locale::En, (12 << 30) / 10), "1.2 GB");
+        assert_eq!(plural_forms(Locale::Ru, 21, &activity_in(Locale::Ru).files), "файл");
+        assert_eq!(plural_forms(Locale::Ru, 11, &activity_in(Locale::Ru).files), "файлов");
+        assert_eq!(plural_forms(Locale::En, 2, &activity_in(Locale::En).files), "files");
     }
 
     /// Only a master with enough verified copies on trusted devices that
@@ -554,15 +545,15 @@ mod tests {
         let held: Vec<Held> = all.iter().map(|h| Held { hash: h.clone(), verified_ms: 1 }).collect();
         lib.set_node_replicas("pi", &all, &held).unwrap();
 
-        let out = offer_list(&lib, 1, &[], dir.path(), &HashSet::new()).unwrap();
+        let out = offer_list(&lib, 1, &[], dir.path(), &HashSet::new(), Locale::Ru).unwrap();
         assert_eq!(out.iter().map(|o| o.hash.as_str()).collect::<Vec<_>>(), ["hflat", "hnamed"], "not one gone from here, not one without copies");
         assert_eq!(out[1].label, "Группа крови — Кино");
         assert_eq!(out[1].path, named, "the very file that would move");
         assert_eq!(out[1].detail, format!("Raspberry Pi · 30 МБ · {}", Path::new("Кино").join("01.flac").display()));
         assert_eq!(out[0].path, dir.path().join("hflat.flac"));
-        assert!(offer_list(&lib, 2, &[], dir.path(), &HashSet::new()).unwrap().is_empty(), "two copies wanted");
-        assert!(offer_list(&lib, 1, &["pi".into()], dir.path(), &HashSet::new()).unwrap().is_empty(), "the device is being forgotten");
+        assert!(offer_list(&lib, 2, &[], dir.path(), &HashSet::new(), Locale::Ru).unwrap().is_empty(), "two copies wanted");
+        assert!(offer_list(&lib, 1, &["pi".into()], dir.path(), &HashSet::new(), Locale::Ru).unwrap().is_empty(), "the device is being forgotten");
         let kept: HashSet<String> = ["hflat".to_owned()].into();
-        assert_eq!(offer_list(&lib, 1, &[], dir.path(), &kept).unwrap().len(), 1);
+        assert_eq!(offer_list(&lib, 1, &[], dir.path(), &kept, Locale::Ru).unwrap().len(), 1);
     }
 }

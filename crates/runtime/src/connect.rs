@@ -29,6 +29,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nikgob_core::i18n::activity::fmt_library_only_in;
+use nikgob_core::i18n::activity_in;
 use nikgob_core::model::{Codec, EventContext, EventOrigin, Source, SourceId, SourceKind, TrackId};
 use nikgob_view::{
     ApiReply, Command, ConnectFail, ConnectJob, ConnectReport, MeshKind, ParkedView, RadioTitle, RemoteCommand, RemoteHow, RemoteLink, RemoteTarget, Repeat, Status,
@@ -213,7 +215,7 @@ impl Worker {
             return None;
         }
         if nikgob_view::starts_service_music(&c) {
-            self.toast_info(format!("На {name} играют только песни из библиотеки"), None);
+            self.toast_info(fmt_library_only_in(self.locale(), &name), None);
             return None;
         }
         Some(c)
@@ -257,7 +259,7 @@ impl Worker {
                 } else {
                     log::warn!("connect: too many target changes waiting, one dropped");
                     if let Command::ApiTransfer { reply, .. } = c {
-                        answer(Some(reply), Err("Слишком много переносов подряд".to_owned()));
+                        answer(Some(reply), Err(activity_in(self.locale()).too_many_moves.to_owned()));
                     }
                 }
             }
@@ -335,11 +337,11 @@ impl Worker {
                     return;
                 }
                 let Some((name, _, online)) = self.node_view(&node) else {
-                    answer(reply, Err("Такого устройства нет".to_owned()));
+                    answer(reply, Err(activity_in(self.locale()).no_such_device.to_owned()));
                     return;
                 };
                 if !online {
-                    let m = format!("{name} не в сети");
+                    let m = format!("{name} {}", activity_in(self.locale()).offline);
                     self.toast_err(m.clone(), None);
                     answer(reply, Err(m));
                     return;
@@ -361,8 +363,9 @@ impl Worker {
         self.connect.seq += 1;
         let (seq, sess) = (self.connect.seq, self.connect.sess);
         if !self.connect_send(ConnectJob::Move { seq, sess, from: from.clone(), to }) {
-            self.toast_err("Межсеть не запущена", None);
-            answer(reply, Err("Межсеть не запущена".to_owned()));
+            let off = activity_in(self.locale()).mesh_off;
+            self.toast_err(off, None);
+            answer(reply, Err(off.to_owned()));
             return;
         }
         self.connect.busy = Some(Busy { seq, sess, doing: Doing::Move { from }, reply });
@@ -373,9 +376,9 @@ impl Worker {
         if self.connect.target.as_ref().is_some_and(|t| t.node == node) {
             return Ok(());
         }
-        let Some((name, kind, online)) = self.node_view(&node) else { return Err("Такого устройства нет".to_owned()) };
+        let Some((name, kind, online)) = self.node_view(&node) else { return Err(activity_in(self.locale()).no_such_device.to_owned()) };
         if !online {
-            let m = format!("{name} не в сети");
+            let m = format!("{name} {}", activity_in(self.locale()).offline);
             self.toast_err(m.clone(), None);
             return Err(m);
         }
@@ -589,9 +592,11 @@ impl Worker {
         };
         let same = b.sess == self.connect.sess;
         let name = to.as_deref().and_then(|n| self.node_view(n)).map(|v| v.0).unwrap_or_default();
+        let loc = self.locale();
+        let s = activity_in(loc);
         let failed = match &to {
-            Some(_) => format!("Не удалось перенести на {name}"),
-            None => "Не удалось вернуть музыку сюда".to_owned(),
+            Some(_) => format!("{} {name}", s.move_failed),
+            None => s.move_back_failed.to_owned(),
         };
         let outcome = match result {
             Ok(_) if !same => {
@@ -611,7 +616,7 @@ impl Worker {
                 }
                 Ok(())
             }
-            Err(ConnectFail::Stale) => Err("Устройство сменилось".to_owned()),
+            Err(ConnectFail::Stale) => Err(s.device_changed.to_owned()),
             Err(ConnectFail::NothingDone(why)) => {
                 log::warn!("connect: {failed}: {why}");
                 self.toast_err(failed.clone(), None);
@@ -620,7 +625,7 @@ impl Worker {
             Err(ConnectFail::NotLoaded(why)) => {
                 // The source is paused and stays so: the owner chooses.
                 log::warn!("connect: {failed}: {why}");
-                self.connect_toast_long(ToastKind::Error, failed.clone(), Some(("Продолжить здесь".to_owned(), Command::OutputContinueHere)));
+                self.connect_toast_long(ToastKind::Error, failed.clone(), Some((s.continue_here.to_owned(), Command::OutputContinueHere)));
                 Err(failed)
             }
         };
@@ -640,7 +645,7 @@ impl Worker {
         if let Some(previous) = loaded.previous.filter(|prev| !prev.paused && prev.index.is_some()) {
             self.connect.undo = Some(Undo { sess: self.connect.sess, node, previous, until: Instant::now() + UNDO_FOR, before: from });
             let undo = self.undo_action(Command::OutputUndoTransfer);
-            self.connect_toast_long(ToastKind::Info, format!("Очередь перенесена на {name}"), Some(undo));
+            self.connect_toast_long(ToastKind::Info, format!("{} {name}", activity_in(self.locale()).queue_moved), Some(undo));
         }
     }
 
@@ -660,7 +665,7 @@ impl Worker {
                 Err(ConnectFail::Stale) => {}
                 Err(ConnectFail::NothingDone(why) | ConnectFail::NotLoaded(why)) => {
                     log::warn!("connect: the undo failed: {why}");
-                    self.toast_err("Не удалось отменить", None);
+                    self.toast_err(activity_in(self.locale()).undo_failed, None);
                 }
             }
         }
@@ -681,7 +686,8 @@ impl Worker {
             Err(ConnectFail::Stale) => {}
             Err(ConnectFail::NothingDone(why) | ConnectFail::NotLoaded(why)) => {
                 log::warn!("connect: «Продолжить здесь» failed: {why}");
-                self.toast_err(format!("Не удалось продолжить здесь: {why}"), None);
+                let text = format!("{}: {why}", activity_in(self.locale()).continue_here_failed);
+                self.toast_err(text, None);
             }
         }
         self.connect_next();
@@ -742,7 +748,9 @@ impl Worker {
             RemoteLink::Reconnecting => {}
             RemoteLink::Lost => {
                 if self.connect.lost_toast.is_none() {
-                    let id = self.connect_toast_long(ToastKind::Error, format!("Нет связи с {name}"), Some(("Продолжить здесь".to_owned(), Command::OutputContinueHere)));
+                    let s = activity_in(self.locale());
+                    let text = format!("{} {name}", s.no_link);
+                    let id = self.connect_toast_long(ToastKind::Error, text, Some((s.continue_here.to_owned(), Command::OutputContinueHere)));
                     self.connect.lost_toast = Some(id);
                 }
             }

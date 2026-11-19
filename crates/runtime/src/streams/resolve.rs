@@ -498,9 +498,11 @@ pub(crate) fn failure_text_in(
     service: Option<Service>,
     loc: nikgob_core::i18n::Locale,
 ) -> (String, Option<nikgob_view::SettingLink>) {
-    use nikgob_core::i18n::{Locale, errors_in};
+    use nikgob_core::i18n::activity::{fmt_no_connection_in, fmt_rate_limited_in};
+    use nikgob_core::i18n::{activity_in, errors_in};
     use nikgob_view::SettingLink;
     let err = errors_in(loc);
+    let s = activity_in(loc);
     let m = message.to_lowercase();
     if message.contains(SPOTIFY_TAG_PREMIUM_REQUIRED) {
         (err.spotify_need_premium.into(), None)
@@ -511,98 +513,38 @@ pub(crate) fn failure_text_in(
         (err.spotify_unavailable.into(), None)
     } else if m.contains("age-restricted") {
         if youtube_signed_in {
-            (
-                match loc {
-                    Locale::Ru => "на YouTube только для 18+, и со входом не открылся",
-                    Locale::En => "YouTube marked this 18+, and it did not open even signed in",
-                }
-                .into(),
-                None,
-            )
+            (s.yt_age_signed_in.into(), None)
         } else {
-            (
-                match loc {
-                    Locale::Ru => "на YouTube только для 18+ — нужен вход в YouTube Music",
-                    Locale::En => "YouTube marked this 18+ — sign in to YouTube Music",
-                }
-                .into(),
-                Some(SettingLink::Youtube),
-            )
+            (s.yt_age_sign_in.into(), Some(SettingLink::Youtube))
         }
     } else if m.contains("drm") {
-        (
-            match loc {
-                Locale::Ru => "в SoundCloud только в защищённом виде",
-                Locale::En => "only DRM-protected on SoundCloud",
-            }
-            .into(),
-            None,
-        )
+        (s.sc_drm.into(), None)
     } else if m.contains("blocked in this region") {
-        (
-            match loc {
-                Locale::Ru => "недоступно в твоём регионе",
-                Locale::En => "unavailable in your region",
-            }
-            .into(),
-            None,
-        )
+        (s.region_blocked.into(), None)
     } else if m.contains("premium") {
         (err.spotify_need_premium.into(), None)
     } else if m.contains("rate limited") {
         // Playback goes on with the next track; this one waits for the user.
-        let who = service.map_or(
-            match loc {
-                Locale::Ru => "сервис",
-                Locale::En => "the service",
-            },
-            Service::display_name,
-        );
-        (
-            match loc {
-                Locale::Ru => format!("{who} просит подождать — включи трек чуть позже"),
-                Locale::En => format!("{who} asks to wait — try playing this track later"),
-            },
-            None,
-        )
+        let who = service.map_or(s.the_service, Service::display_name);
+        (fmt_rate_limited_in(loc, who), None)
     } else if m.contains("not available") || m.contains("недоступ") {
         (err.spotify_unavailable.into(), None)
     } else if service == Some(Service::Youtube) && (m.contains("refused") || m.contains("http 403")) {
         // Every client of the player was asked (see nikgob_youtube::player):
         // YouTube's, not the video's.
-        (
-            match loc {
-                Locale::Ru => "YouTube сейчас не отдаёт звук — попробуй чуть позже",
-                Locale::En => "YouTube is refusing audio right now — try again later",
-            }
-            .into(),
-            None,
-        )
-    } else if let Some(s) = service
+        (s.yt_refusing_audio.into(), None)
+    } else if let Some(svc) = service
         && (m.contains("network") || m.contains("stalled") || m.contains("timed out"))
     {
         // Any service's outage says so (a SoundCloud read that waited too
         // long, Spotify's fetch).
-        let who = if s == Service::Youtube { "YouTube" } else { s.display_name() };
-        (
-            match loc {
-                Locale::Ru => format!("нет связи с {who} — проверь интернет"),
-                Locale::En => format!("cannot reach {who} — check your internet"),
-            },
-            None,
-        )
+        let who = if svc == Service::Youtube { "YouTube" } else { svc.display_name() };
+        (fmt_no_connection_in(loc, who), None)
     } else if service == Some(Service::Spotify) && (m.contains("включи воспроизведение") || m.contains("not logged in")) {
         // Spotify's sound needs its playback login.
         (err.spotify_enable_playback.into(), Some(SettingLink::SpotifyPlayback))
     } else {
-        (
-            match loc {
-                Locale::Ru => "не получилось воспроизвести",
-                Locale::En => "could not play",
-            }
-            .into(),
-            None,
-        )
+        (s.could_not_play.into(), None)
     }
 }
 

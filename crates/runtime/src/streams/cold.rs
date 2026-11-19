@@ -62,6 +62,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
+use nikgob_core::i18n::activity::{
+    fmt_import_counts_in, fmt_import_skipped_in, fmt_quoted_in, group_in,
+};
+use nikgob_core::i18n::{Locale, activity_in};
 use nikgob_core::model::{
     DeviceId, Event, EventContext, EventOrigin, EventType, LikeTarget, PlaylistId, TrackId, UnixMs, Uuid,
 };
@@ -253,19 +257,6 @@ pub(crate) struct ColdState {
     enrich: HashMap<Service, Enrich>,
 }
 
-/// `1 240`: thousands grouped with a no-break space.
-pub(crate) fn group(n: usize) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            out.push('\u{a0}');
-        }
-        out.push(c);
-    }
-    out
-}
-
 /// Russian plural: 1 лайк, 2 лайка, 5 лайков.
 pub(crate) fn plural(n: usize, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
     let (d, h) = (n % 10, n % 100);
@@ -278,53 +269,30 @@ pub(crate) fn plural(n: usize, one: &'static str, few: &'static str, many: &'sta
     }
 }
 
-/// "3 прослушивания, 2 плейлиста": the counts that are not zero.
-fn count_line(plays: usize, likes: usize, saved: usize, playlists: usize) -> String {
-    let parts: Vec<String> = [
-        (plays, ["прослушивание", "прослушивания", "прослушиваний"]),
-        (likes, ["лайк", "лайка", "лайков"]),
-        (saved, ["песня медиатеки", "песни медиатеки", "песен медиатеки"]),
-        (playlists, ["плейлист", "плейлиста", "плейлистов"]),
-    ]
-    .into_iter()
-    .filter(|(n, _)| *n > 0)
-    .map(|(n, [one, few, many])| format!("{} {}", group(n), plural(n, one, few, many)))
-    .collect();
-    if parts.is_empty() { "ничего".into() } else { parts.join(", ") }
-}
-
-/// " · пропущено 2 плейлиста не с музыкой", or nothing.
-fn skipped_note(n: usize) -> String {
-    if n == 0 {
-        return String::new();
-    }
-    format!(
-        " · {} {} {} не с музыкой",
-        plural(n, "пропущен", "пропущено", "пропущено"),
-        group(n),
-        plural(n, "плейлист", "плейлиста", "плейлистов")
-    )
-}
-
 /// The final toast: what is new ("Импорт: 1 240 прослушиваний, 312 лайков,
 /// 9 плейлистов"), or that nothing was; and the playlists left out as not
 /// music.
-pub(crate) fn summary(c: &Counts) -> String {
+pub(crate) fn summary_in(loc: Locale, c: &Counts) -> String {
+    let s = activity_in(loc);
     let mut text = if c.new_plays + c.new_likes + c.new_saved + c.new_playlists == 0 {
         if c.plays + c.likes + c.saved + c.playlists == 0 {
-            "Импорт: ничего не нашлось".to_owned()
+            s.import_nothing_found.to_owned()
         } else {
-            "Импорт: ничего нового — всё уже было".to_owned()
+            s.import_nothing_new.to_owned()
         }
     } else {
-        let mut text = format!("Импорт: {}", count_line(c.new_plays, c.new_likes, c.new_saved, c.new_playlists));
+        let mut text = format!(
+            "{}: {}",
+            s.import,
+            fmt_import_counts_in(loc, c.new_plays, c.new_likes, c.new_saved, c.new_playlists)
+        );
         // The likes came with the login already (its first pull).
         if c.new_likes == 0 && c.likes > 0 {
-            text.push_str(&format!(" · лайки уже здесь ({})", group(c.likes)));
+            text.push_str(&format!(" · {} ({})", s.import_likes_here, group_in(loc, c.likes)));
         }
         text
     };
-    text.push_str(&skipped_note(c.skipped_playlists));
+    text.push_str(&fmt_import_skipped_in(loc, c.skipped_playlists));
     text
 }
 
@@ -627,11 +595,13 @@ fn store_saved(
 /// wait is not asked again this time.
 async fn catalogue_songs(
     job: u64,
+    loc: Locale,
     lib: &Library,
     services: &[Arc<dyn StreamService>],
     ask: &[(RemoteId, Probe)],
     tx: &Sender<Internal>,
 ) -> Vec<(RemoteId, StreamTrack)> {
+    let s = activity_in(loc);
     let mut out = Vec::new();
     let mut waiting = vec![false; services.len()];
     let mut asked = 0;
@@ -651,7 +621,13 @@ async fn catalogue_songs(
             if k % 10 == 0 {
                 send(tx, ColdMsg::Progress {
                     job,
-                    subtitle: format!("Ищу песни плейлистов: {} из {}", group(k + 1), group(ask.len())),
+                    subtitle: format!(
+                        "{}: {} {} {}",
+                        s.playlist_songs,
+                        group_in(loc, k + 1),
+                        s.of,
+                        group_in(loc, ask.len())
+                    ),
                     progress: Some(k as f32 / ask.len().max(1) as f32),
                 });
             }
@@ -706,6 +682,7 @@ fn send(tx: &Sender<Internal>, m: ColdMsg) {
 /// the music library are read).
 async fn read_export(
     job: u64,
+    loc: Locale,
     path: PathBuf,
     lib: Library,
     youtube: Option<Arc<dyn StreamService>>,
@@ -713,14 +690,15 @@ async fn read_export(
     saved: bool,
     tx: Sender<Internal>,
 ) -> Result<Box<Parsed>, String> {
+    let s = activity_in(loc);
     let mut data: ExportData = tokio::task::spawn_blocking(move || export::read_export(&path, saved))
         .await
         .map_err(|e| e.to_string())??;
     if data.is_empty() {
         return Err(if data.problems.is_empty() {
-            "Не нашёл файлов выгрузки Spotify или Google Takeout".into()
+            s.export_not_found.into()
         } else {
-            format!("Не получилось прочитать: {}", data.problems.join("; "))
+            format!("{}: {}", s.export_read_failed, data.problems.join("; "))
         });
     }
     // How a watch history's plays ended: by the gaps between its entries,
@@ -802,7 +780,7 @@ async fn read_export(
         if !blank.is_empty() {
             send(&tx, ColdMsg::Progress {
                 job,
-                subtitle: format!("Узнаю названия в YouTube Music: {}", group(blank.len())),
+                subtitle: format!("{}: {}", s.yt_titles, group_in(loc, blank.len())),
                 progress: None,
             });
             full = youtube_lookups(yt, blank).await;
@@ -924,7 +902,13 @@ async fn read_export(
             let done = done.min(plays);
             send(&progress_tx, ColdMsg::Progress {
                 job,
-                subtitle: format!("История: {} из {}", group(done), group(plays)),
+                subtitle: format!(
+                    "{}: {} {} {}",
+                    s.history,
+                    group_in(loc, done),
+                    s.of,
+                    group_in(loc, plays)
+                ),
                 progress: Some(done as f32 / plays.max(1) as f32),
             });
         };
@@ -948,13 +932,14 @@ async fn read_export(
 }
 
 /// The API part: likes, the user's playlists with their tracks, recent plays.
-async fn fetch_service(job: u64, svc: Arc<dyn StreamService>, tx: Sender<Internal>) -> Fetched {
+async fn fetch_service(job: u64, loc: Locale, svc: Arc<dyn StreamService>, tx: Sender<Internal>) -> Fetched {
+    let s = activity_in(loc);
     let progress = |subtitle: String, progress: Option<f32>| {
         send(&tx, ColdMsg::Progress { job, subtitle, progress });
     };
-    progress("Лайки…".into(), None);
+    progress(s.likes_progress.into(), None);
     let liked = svc.liked().await;
-    progress("Плейлисты…".into(), None);
+    progress(s.playlists_progress.into(), None);
     let mut mine = svc.my_playlists().await.unwrap_or_else(|e| {
         log::warn!("{}: my_playlists: {e}", svc.service());
         Vec::new()
@@ -965,7 +950,7 @@ async fn fetch_service(job: u64, svc: Arc<dyn StreamService>, tx: Sender<Interna
     let mut missed = 0;
     for (i, p) in mine.iter().enumerate() {
         progress(
-            format!("Плейлисты: {} из {}", i + 1, mine.len()),
+            format!("{}: {} {} {}", s.playlists, i + 1, s.of, mine.len()),
             Some(i as f32 / mine.len().max(1) as f32),
         );
         let mut r = svc.playlist(&p.id.id).await;
@@ -981,7 +966,7 @@ async fn fetch_service(job: u64, svc: Arc<dyn StreamService>, tx: Sender<Interna
             }
         }
     }
-    progress("Недавние прослушивания…".into(), None);
+    progress(s.recent_plays.into(), None);
     let recent = svc.recent().await;
     Fetched {
         liked,
@@ -993,8 +978,9 @@ async fn fetch_service(job: u64, svc: Arc<dyn StreamService>, tx: Sender<Interna
 
 impl Worker {
     fn cold_job(&mut self, origin: Origin, title: String) -> Option<u64> {
+        let s = activity_in(self.locale());
         if self.streaming.cold.jobs.values().any(|j| j.origin == origin) {
-            self.toast_info("Этот импорт уже идёт · смотри «Загрузки»", None);
+            self.toast_info(s.import_running, None);
             return None;
         }
         self.streaming.cold.next += 1;
@@ -1004,7 +990,7 @@ impl Worker {
             ColdJob {
                 origin,
                 title,
-                subtitle: "Подготовка…".into(),
+                subtitle: s.preparing.into(),
                 progress: None,
                 counts: Counts::default(),
                 likes: VecDeque::new(),
@@ -1014,7 +1000,7 @@ impl Worker {
             },
         );
         self.publish_cold_jobs();
-        self.toast_work("Импорт начался · смотри «Загрузки»", None);
+        self.toast_work(s.import_started, None);
         Some(id)
     }
 
@@ -1029,13 +1015,14 @@ impl Worker {
             self.toast_err(msg, None);
             return;
         }
-        let Some(job) = self.cold_job(Origin::Service(service), format!("Импорт из {}", service.display_name()))
-        else {
+        let loc = self.locale();
+        let title = format!("{} {}", activity_in(loc).import_from, service.display_name());
+        let Some(job) = self.cold_job(Origin::Service(service), title) else {
             return;
         };
         let tx = self.streaming.internal.clone();
         self.streaming.spawn(async move {
-            let fetched = Box::new(fetch_service(job, svc, tx).await);
+            let fetched = Box::new(fetch_service(job, loc, svc, tx).await);
             Msg::Cold(ColdMsg::Fetched { job, service, fetched })
         });
     }
@@ -1045,7 +1032,9 @@ impl Worker {
         let name = path
             .file_name()
             .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-        let Some(job) = self.cold_job(Origin::Files(path.clone()), format!("Импорт выгрузки «{name}»")) else {
+        let loc = self.locale();
+        let title = format!("{} {}", activity_in(loc).import_export, fmt_quoted_in(loc, &name));
+        let Some(job) = self.cold_job(Origin::Files(path.clone()), title) else {
             return;
         };
         let lib = self.lib.clone();
@@ -1054,7 +1043,7 @@ impl Worker {
         let saved = self.state.read().prefs.import_saved_songs;
         let tx = self.streaming.internal.clone();
         self.streaming.spawn(async move {
-            let result = read_export(job, path, lib, youtube, deezer, saved, tx).await;
+            let result = read_export(job, loc, path, lib, youtube, deezer, saved, tx).await;
             Msg::Cold(ColdMsg::Parsed { job, result })
         });
     }
@@ -1132,7 +1121,7 @@ impl Worker {
             )),
         }
         if f.missed > 0 {
-            problems.push(format!("не открылись плейлисты: {}", f.missed));
+            problems.push(format!("{}: {}", activity_in(self.locale()).playlists_not_opened, f.missed));
         }
         let playlists: Vec<PendingPlaylist> = f
             .playlists
@@ -1163,7 +1152,7 @@ impl Worker {
     fn store_recent(&mut self, recent: &[Played]) -> usize {
         let tracks: Vec<StreamTrack> = recent.iter().map(|p| p.track.clone()).collect();
         self.streaming.learn(&tracks);
-        let Some(ids) = self.log_err("история", self.lib.ensure_stream_tracks(&tracks)) else {
+        let Some(ids) = self.log_err(activity_in(self.locale()).history_err, self.lib.ensure_stream_tracks(&tracks)) else {
             return 0;
         };
         let device = DeviceId::from(IMPORT_DEVICE);
@@ -1204,13 +1193,14 @@ impl Worker {
         }
         let (starts, ends): (Vec<Event>, Vec<Event>) =
             events.into_iter().partition(|e| e.event_type == EventType::Start);
-        let new = self.log_err("история", self.lib.import_events(&starts)).unwrap_or(0);
-        let _ = self.log_err("история", self.lib.import_events(&ends));
+        let new = self.log_err(activity_in(self.locale()).history_err, self.lib.import_events(&starts)).unwrap_or(0);
+        let _ = self.log_err(activity_in(self.locale()).history_err, self.lib.import_events(&ends));
         new
     }
 
     /// One step of a job's worker part: a batch of likes, or one playlist.
     fn cold_step(&mut self, job: u64) {
+        let loc = self.locale();
         let Some(j) = self.streaming.cold.jobs.get_mut(&job) else { return };
         if !j.likes.is_empty() {
             let n = j.likes.len().min(LIKES_PER_STEP);
@@ -1231,8 +1221,9 @@ impl Worker {
         let Some(j) = self.streaming.cold.jobs.get_mut(&job) else { return };
         let left = j.likes.len().div_ceil(LIKES_PER_STEP) + j.playlists.len();
         j.subtitle = format!(
-            "Импорт: {}",
-            count_line(j.counts.plays, j.counts.likes, j.counts.saved, j.counts.playlists)
+            "{}: {}",
+            activity_in(loc).import,
+            fmt_import_counts_in(loc, j.counts.plays, j.counts.likes, j.counts.saved, j.counts.playlists)
         );
         j.progress = Some(1.0 - left as f32 / j.steps.max(1) as f32);
         self.publish_cold_jobs();
@@ -1253,8 +1244,9 @@ impl Worker {
             })
             .collect();
         self.streaming.learn(&streams);
+        let what = activity_in(self.locale()).import_err;
         let mut ids = self
-            .log_err("импорт", self.lib.ensure_stream_tracks(&streams))
+            .log_err(what, self.lib.ensure_stream_tracks(&streams))
             .unwrap_or_default()
             .into_iter();
         wanted
@@ -1333,15 +1325,16 @@ impl Worker {
             }
             return false;
         }
-        let Some(created) = self.log_err("плейлист", self.lib.create_playlist(&p.name)) else {
+        let what = activity_in(self.locale()).playlist_err;
+        let Some(created) = self.log_err(what, self.lib.create_playlist(&p.name)) else {
             return false;
         };
         let pid = created.id;
         let tracks: Vec<TrackId> = self.resolve_wanted(&p.tracks).into_iter().flatten().collect();
-        let _ = self.log_err("плейлист", self.lib.playlist_add_many(pid, &tracks));
+        let _ = self.log_err(what, self.lib.playlist_add_many(pid, &tracks));
         // A playlist of an album's songs in its order: its streams between
         // two files are the files between them.
-        let _ = self.log_err("плейлист", self.lib.fold_playlist_gaps(pid));
+        let _ = self.log_err(what, self.lib.fold_playlist_gaps(pid));
         let now = self.sync_stamp(pid);
         match (&p.remote, &p.fetched) {
             (Some(remote), Some(fetched)) => {
@@ -1389,22 +1382,32 @@ impl Worker {
     }
 
     fn cold_finish(&mut self, job: u64, error: Option<String>) {
+        let loc = self.locale();
+        let s = activity_in(loc);
         let Some(j) = self.streaming.cold.jobs.remove(&job) else { return };
         let text = match &error {
-            Some(e) => format!("Импорт не удался: {e}"),
-            None => summary(&j.counts),
+            Some(e) => format!("{}: {e}", s.import_failed),
+            None => summary_in(loc, &j.counts),
         };
         let mut subtitle = if error.is_some() {
             text.clone()
         } else {
             format!(
-                "Найдено: {} · новых: {}",
-                count_line(j.counts.plays, j.counts.likes, j.counts.saved, j.counts.playlists),
-                count_line(j.counts.new_plays, j.counts.new_likes, j.counts.new_saved, j.counts.new_playlists)
-            ) + &skipped_note(j.counts.skipped_playlists)
+                "{}: {} · {}: {}",
+                s.import_found,
+                fmt_import_counts_in(loc, j.counts.plays, j.counts.likes, j.counts.saved, j.counts.playlists),
+                s.import_new,
+                fmt_import_counts_in(
+                    loc,
+                    j.counts.new_plays,
+                    j.counts.new_likes,
+                    j.counts.new_saved,
+                    j.counts.new_playlists
+                )
+            ) + &fmt_import_skipped_in(loc, j.counts.skipped_playlists)
         };
         if !j.problems.is_empty() && error.is_none() {
-            subtitle.push_str(&format!(" · не всё: {}", j.problems.join("; ")));
+            subtitle.push_str(&format!(" · {}: {}", s.import_not_all, j.problems.join("; ")));
         }
         let has_new = j.counts.new_plays + j.counts.new_likes + j.counts.new_saved + j.counts.new_playlists > 0;
         let _ = self.lib.log_job("import", &j.title, &subtitle, error.as_deref());
@@ -1605,9 +1608,9 @@ mod tests {
 
     #[test]
     fn russian_counts() {
-        assert_eq!(group(1240), "1\u{a0}240");
-        assert_eq!(group(999), "999");
-        assert_eq!(group(1_000_000), "1\u{a0}000\u{a0}000");
+        assert_eq!(group_in(Locale::Ru, 1240), "1\u{a0}240");
+        assert_eq!(group_in(Locale::Ru, 999), "999");
+        assert_eq!(group_in(Locale::Ru, 1_000_000), "1\u{a0}000\u{a0}000");
         assert_eq!(plural(1, "a", "b", "c"), "a");
         assert_eq!(plural(3, "a", "b", "c"), "b");
         assert_eq!(plural(11, "a", "b", "c"), "c");
@@ -1619,10 +1622,17 @@ mod tests {
             ..Counts::default()
         };
         assert_eq!(
-            summary(&c),
+            summary_in(Locale::Ru, &c),
             "Импорт: 1\u{a0}240 прослушиваний, 312 лайков, 9 плейлистов"
         );
-        assert_eq!(summary(&Counts { likes: 3, ..Counts::default() }), "Импорт: ничего нового — всё уже было");
+        assert_eq!(
+            summary_in(Locale::En, &c),
+            "Import: 1,240 plays, 312 likes, 9 playlists"
+        );
+        assert_eq!(
+            summary_in(Locale::Ru, &Counts { likes: 3, ..Counts::default() }),
+            "Импорт: ничего нового — всё уже было"
+        );
         let after_login = Counts {
             plays: 3,
             new_plays: 3,
@@ -1632,16 +1642,28 @@ mod tests {
             new_playlists: 2,
             ..Counts::default()
         };
-        assert_eq!(summary(&after_login), "Импорт: 3 прослушивания, 2 плейлиста · лайки уже здесь (3)");
-        assert_eq!(count_line(0, 0, 0, 0), "ничего");
+        assert_eq!(
+            summary_in(Locale::Ru, &after_login),
+            "Импорт: 3 прослушивания, 2 плейлиста · лайки уже здесь (3)"
+        );
+        assert_eq!(fmt_import_counts_in(Locale::Ru, 0, 0, 0, 0), "ничего");
         let saved = Counts { plays: 9, new_plays: 9, saved: 21, new_saved: 21, ..Counts::default() };
-        assert_eq!(summary(&saved), "Импорт: 9 прослушиваний, 21 песня медиатеки");
+        assert_eq!(summary_in(Locale::Ru, &saved), "Импорт: 9 прослушиваний, 21 песня медиатеки");
         let skipped = Counts { new_plays: 5, plays: 5, skipped_playlists: 2, ..Counts::default() };
-        assert_eq!(summary(&skipped), "Импорт: 5 прослушиваний · пропущено 2 плейлиста не с музыкой");
+        assert_eq!(
+            summary_in(Locale::Ru, &skipped),
+            "Импорт: 5 прослушиваний · пропущено 2 плейлиста не с музыкой"
+        );
         let one = Counts { plays: 5, skipped_playlists: 1, ..Counts::default() };
-        assert_eq!(summary(&one), "Импорт: ничего нового — всё уже было · пропущен 1 плейлист не с музыкой");
+        assert_eq!(
+            summary_in(Locale::Ru, &one),
+            "Импорт: ничего нового — всё уже было · пропущен 1 плейлист не с музыкой"
+        );
         let only = Counts { skipped_playlists: 5, ..Counts::default() };
-        assert_eq!(summary(&only), "Импорт: ничего не нашлось · пропущено 5 плейлистов не с музыкой");
+        assert_eq!(
+            summary_in(Locale::Ru, &only),
+            "Импорт: ничего не нашлось · пропущено 5 плейлистов не с музыкой"
+        );
     }
 
     #[test]

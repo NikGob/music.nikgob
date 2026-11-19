@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use nikgob_core::i18n::{Locale, activity_in};
 use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource};
 use nikgob_core::model::{SourceKind, Track, TrackId};
 use nikgob_core::streaming::Service;
@@ -29,14 +30,16 @@ use crate::lyrics::{Place, Text};
 
 /// Why a stream's timing is not made: the track has no artist or no
 /// title to keep its text under.
-pub(crate) const UNNAMED: &str = "Подсветку не сделать: неясно, чья это песня";
+pub(crate) fn unnamed(loc: Locale) -> &'static str {
+    activity_in(loc).unnamed_highlight
+}
 
 /// Where a stream's timing can come from: any stream with an artist and a
 /// title (`named`): a song YouTube Music has as a record, a cover like any
 /// song, and a music video that stays one (no song was found for it): its
 /// own audio is what plays, intro and all, so timing made from it fits it.
-pub(crate) fn stream_place(named: bool) -> Place {
-    if named { Place::Stream } else { Place::Unclear(UNNAMED.into()) }
+pub(crate) fn stream_place(named: bool, loc: Locale) -> Place {
+    if named { Place::Stream } else { Place::Unclear(unnamed(loc).into()) }
 }
 
 /// The artist whose folder keeps a track's text: the first credited.
@@ -113,18 +116,18 @@ impl Keep {
 
 /// Writes the `.ttml` at `path` (its folder made when missing) and gives
 /// the text as the player reads it back.
-pub(crate) fn write_ttml(path: &Path, keep: &Keep) -> Result<Text, String> {
-    write_xml(path, &keep.ttml())
+pub(crate) fn write_ttml(path: &Path, keep: &Keep, loc: Locale) -> Result<Text, String> {
+    write_xml(path, &keep.ttml(), loc)
 }
 
 /// [`write_ttml`] of the user's own text: marked as theirs.
-pub(crate) fn write_own_ttml(path: &Path, keep: &Keep) -> Result<Text, String> {
-    write_xml(path, &nikgob_metadata::mark_ttml_own(&keep.ttml()))
+pub(crate) fn write_own_ttml(path: &Path, keep: &Keep, loc: Locale) -> Result<Text, String> {
+    write_xml(path, &nikgob_metadata::mark_ttml_own(&keep.ttml()), loc)
 }
 
 /// `xml` at `path` (nothing written for an empty text).
-fn write_xml(path: &Path, xml: &str) -> Result<Text, String> {
-    let text = Text::from_ttml(xml).ok_or_else(|| "пустой текст".to_owned())?;
+fn write_xml(path: &Path, xml: &str, loc: Locale) -> Result<Text, String> {
+    let text = Text::from_ttml(xml).ok_or_else(|| activity_in(loc).empty_text.to_owned())?;
     let long = nikgob_import::sanitize::long_path(path);
     if let Some(dir) = long.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -136,15 +139,15 @@ fn write_xml(path: &Path, xml: &str) -> Result<Text, String> {
 /// The user's own text at `path` ([`write_own_ttml`]), whatever lay there
 /// before going to the Trash in `trash` first (a text «Сохранить текст»
 /// put there: kept, not overwritten).
-pub(crate) fn keep_own_at(path: &Path, trash: &Path, keep: &Keep) -> Result<Text, String> {
+pub(crate) fn keep_own_at(path: &Path, trash: &Path, keep: &Keep, loc: Locale) -> Result<Text, String> {
     if keep.is_empty() {
-        return Err("пустой текст".to_owned());
+        return Err(activity_in(loc).empty_text.to_owned());
     }
     let there = nikgob_import::sanitize::long_path(path).is_file();
     if there && !crate::lyrics::read_ttml(path).is_some_and(|(_, own)| own) {
         nikgob_import::trash_file(trash, path).map_err(|e| e.to_string())?;
     }
-    write_own_ttml(path, keep)
+    write_own_ttml(path, keep, loc)
 }
 
 /// The user's own text at `path` goes to the Trash in `trash`; where it
@@ -158,15 +161,15 @@ pub(crate) fn drop_own_at(path: &Path, trash: &Path) -> Result<Option<PathBuf>, 
 
 /// Brings the user's own text back from the Trash (`at`) to `to`, unless
 /// something lies there now.
-pub(crate) fn restore_own_at(at: &Path, to: &Path) -> Result<Text, String> {
+pub(crate) fn restore_own_at(at: &Path, to: &Path, loc: Locale) -> Result<Text, String> {
     if nikgob_import::sanitize::long_path(to).exists() {
-        return Err("на его месте уже другой текст".to_owned());
+        return Err(activity_in(loc).other_text_there.to_owned());
     }
     if let Some(dir) = nikgob_import::sanitize::long_path(to).parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     nikgob_import::fsutil::move_file(at, to).map_err(|e| e.to_string())?;
-    crate::lyrics::read_ttml(to).map(|(t, _)| t).ok_or_else(|| "пустой текст".to_owned())
+    crate::lyrics::read_ttml(to).map(|(t, _)| t).ok_or_else(|| activity_in(loc).empty_text.to_owned())
 }
 
 /// The lyrics tag of `file` as enhanced LRC (word stamps where the timing
@@ -206,7 +209,7 @@ impl Worker {
         }
         let t = self.lib.get_track(track).ok().flatten();
         let named = t.as_ref().is_some_and(|t| !t.title.trim().is_empty() && !artist_of(t).trim().is_empty());
-        stream_place(named)
+        stream_place(named, self.locale())
     }
 
     /// The text of `track` can be kept in its artist's folder of the
@@ -274,16 +277,17 @@ impl Worker {
     }
 
     fn keep_own(&mut self, track: TrackId, keep: Keep) {
+        let loc = self.locale();
         let Some(path) = self.own_path(track) else {
             // A song without a file and without an artist or a title to
             // keep its text under.
-            self.toast_err("Не получилось сохранить текст: неясно, чья это песня", None);
+            self.toast_err(activity_in(loc).save_text_unnamed, None);
             return;
         };
         let Some(svc) = self.import.as_ref() else { return };
         let (trash, tx) = (svc.config().trash_dir.clone(), svc.internal());
         svc.spawn_blocking(move || {
-            let result = keep_own_at(&path, &trash, &keep);
+            let result = keep_own_at(&path, &trash, &keep, loc);
             let _ = tx.send(Internal::Align(Msg::KeptOwn { track, result }));
         });
     }
@@ -295,7 +299,8 @@ impl Worker {
             Ok(t) => t,
             Err(e) => {
                 log::warn!("saving the own lyrics: {e}");
-                self.toast_err(format!("Не получилось сохранить текст: {e}"), None);
+                let text = format!("{}: {e}", activity_in(self.locale()).save_text_failed);
+                self.toast_err(text, None);
                 return;
             }
         };
@@ -332,7 +337,8 @@ impl Worker {
             Ok(None) => false,
             Err(e) => {
                 log::warn!("removing the own lyrics of {track}: {e}");
-                self.toast_err(format!("Не получилось убрать свой текст: {e}"), None);
+                let text = format!("{}: {e}", activity_in(self.locale()).remove_own_failed);
+                self.toast_err(text, None);
                 return;
             }
         };
@@ -352,7 +358,7 @@ impl Worker {
         }
         if undo {
             let act = self.undo_action(nikgob_view::Command::RestoreOwnLyrics(track));
-            self.toast_ok("Свой текст в корзине", Some(act));
+            self.toast_ok(activity_in(self.locale()).own_in_trash, Some(act));
         }
     }
 
@@ -360,11 +366,13 @@ impl Worker {
     /// Trash and is shown again.
     pub(crate) fn restore_own_lyrics(&mut self, track: TrackId) {
         let Some((at, to)) = self.align.own_trashed.remove(&track) else { return };
-        match restore_own_at(&at, &to) {
+        let loc = self.locale();
+        match restore_own_at(&at, &to, loc) {
             Ok(text) => self.own_lyrics_kept(track, Ok(text)),
             Err(e) => {
                 log::warn!("bringing back the own lyrics of {track}: {e}");
-                self.toast_err(format!("Не получилось вернуть свой текст: {e}"), None);
+                let text = format!("{}: {e}", activity_in(loc).restore_own_failed);
+                self.toast_err(text, None);
             }
         }
     }
@@ -410,8 +418,9 @@ impl Worker {
     /// track's file (as «Сохранить с YouTube» does), then the text goes
     /// next to it ([`Self::lyrics_imported`]).
     fn keep_with_song(&mut self, track: TrackId, keep: Keep) {
+        let loc = self.locale();
         let Some(yt) = self.service(Service::Youtube) else {
-            self.toast_err("YouTube Music выключен", None);
+            self.toast_err(activity_in(loc).yt_music_off, None);
             return;
         };
         let Some(src) = self.timing_stream(track).filter(|s| s.kind == SourceKind::Youtube) else { return };
@@ -422,15 +431,16 @@ impl Worker {
             let result = yt.save_audio(&locator, &dir).await.map_err(|e| e.to_string());
             Internal::Align(Msg::SongSaved { track, result })
         });
-        self.toast_work("Сохраняю песню с YouTube…", None);
+        self.toast_work(activity_in(loc).saving_song_yt, None);
     }
 
     pub(crate) fn song_saved(&mut self, track: TrackId, result: Result<PathBuf, String>) {
+        let loc = self.locale();
         match result {
             Ok(path) => {
                 self.align.saved_audio.insert(path.clone(), track);
                 let targets = nikgob_import::ImportTargets { tracks: vec![track], force: true, ..Default::default() };
-                if !self.import_for(vec![path.clone()], "Сохранение с YouTube".into(), nikgob_core::model::SourceOrigin::Stream, targets) {
+                if !self.import_for(vec![path.clone()], activity_in(loc).save_from_yt.into(), nikgob_core::model::SourceOrigin::Stream, targets) {
                     self.align.saved_audio.remove(&path);
                     self.align.after_import.remove(&track);
                     let _ = std::fs::remove_file(&path);
@@ -439,7 +449,8 @@ impl Worker {
             Err(e) => {
                 log::warn!("saving a song for its lyrics: {e}");
                 self.align.after_import.remove(&track);
-                self.toast_err(format!("Не получилось сохранить песню: {e}"), None);
+                let text = format!("{}: {e}", activity_in(loc).save_song_failed);
+                self.toast_err(text, None);
             }
         }
     }
@@ -490,7 +501,7 @@ impl Worker {
         let Some(track) = self.align.saved_audio.remove(path) else { return };
         let _ = std::fs::remove_file(path);
         if self.align.after_import.remove(&track).is_some() {
-            self.toast_err("Не получилось сохранить песню", None);
+            self.toast_err(activity_in(self.locale()).save_song_failed, None);
         }
     }
 
@@ -501,7 +512,8 @@ impl Worker {
             Ok(t) => t,
             Err(e) => {
                 log::warn!("saving lyrics: {e}");
-                self.toast_err(format!("Не получилось сохранить текст: {e}"), None);
+                let text = format!("{}: {e}", activity_in(self.locale()).save_text_failed);
+                self.toast_err(text, None);
                 return;
             }
         };
@@ -526,8 +538,8 @@ mod tests {
 
     #[test]
     fn a_stream_is_timed_when_it_is_named() {
-        assert_eq!(stream_place(true), Place::Stream, "a song, a cover, a named clip: what plays is timed");
-        assert_eq!(stream_place(false), Place::Unclear(UNNAMED.into()), "no artist or title to keep it under");
+        assert_eq!(stream_place(true, Locale::Ru), Place::Stream, "a song, a cover, a named clip: what plays is timed");
+        assert_eq!(stream_place(false, Locale::Ru), Place::Unclear(unnamed(Locale::Ru).into()), "no artist or title to keep it under");
     }
 
     fn opus(path: &Path) {

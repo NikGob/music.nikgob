@@ -667,8 +667,8 @@ impl Worker {
     /// list `ids` ([`list_seed`]; `streams` are a service list's songs).
     /// The list is only the seed: the radio's picks, filtered as any
     /// radio's, play first.
-    pub(crate) fn start_list_radio(&mut self, ids: &[TrackId], streams: &[StreamTrack], of: &str, name: &str) {
-        let title = if of == "альбому" {
+    pub(crate) fn start_list_radio(&mut self, ids: &[TrackId], streams: &[StreamTrack], album: bool, name: &str) {
+        let title = if album {
             v::RadioTitle::Album(name.to_owned())
         } else {
             v::RadioTitle::Playlist { name: name.to_owned(), liked: false }
