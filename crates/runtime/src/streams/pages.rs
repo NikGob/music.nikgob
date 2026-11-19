@@ -297,11 +297,6 @@ impl Worker {
             self.load_stream(page);
         }
         if let Some((artist, _)) = artist {
-            for remote in self.lib.external_ids(EntityKind::Artist, *artist.as_uuid()).unwrap_or_default() {
-                if let Some(svc) = self.service(remote.service) {
-                    svc.forget(EntityKind::Artist, &remote.id);
-                }
-            }
             let _ = self.lib.cache_drop(&super::discography::cache_key(artist));
             self.load_discography(artist, false);
         }

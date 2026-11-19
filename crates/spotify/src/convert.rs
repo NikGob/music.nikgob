@@ -71,6 +71,9 @@ fn album_ref(album: &models::Album) -> Option<AlbumRef> {
     let mut r = AlbumRef::new(album.id.as_deref().map(rid), album.name.clone());
     r.artists = artists(&album.artists);
     r.year = year(album.release_date.as_deref());
+    if album.album_group.is_some() || album.album_type.is_some() {
+        r.release_type = Some(release_type(album.album_type.as_deref(), album.album_group.as_deref()));
+    }
     Some(r)
 }
 

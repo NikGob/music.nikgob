@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 
 use nikgob_core::indexer::BoxFuture;
 use nikgob_core::model::{
-    Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track, TrackId,
-    WishlistStatus,
+    Artist, ArtistCredit, ArtistId, Codec, Release, ReleaseType, Source, SourceKind, Track,
+    TrackId, WishlistStatus,
 };
 use nikgob_core::streaming::{
-    FakeService, PlaylistSyncMode, RemoteId, Service, StreamService, StreamTrack,
+    FakeService, PlaylistSyncMode, RemoteId, Service, StreamAlbum, StreamService, StreamTrack,
 };
 use nikgob_library::{Library, TrackFilter};
 use nikgob_runtime::{NullPlayback, Runtime, RuntimeConfig};
@@ -528,6 +528,118 @@ fn discography_shows_the_albums_the_library_lacks() {
     assert!(ids.contains(&RemoteId::new(Service::Spotify, "sp-art-utada")), "{ids:?}");
     assert!(ids.contains(&RemoteId::new(Service::Youtube, "yt-art-utada")), "{ids:?}");
     assert!(lib.cache_get(&format!("discography.{}", artist.id)).unwrap().is_some());
+}
+
+/// The library's kept discography of `artist`, written as the lookup would
+/// have left it: `albums` looked up at `at` (unix ms).
+fn put_kept_discography(lib: &Library, artist: ArtistId, albums: Vec<StreamAlbum>, at: i64) {
+    let json = serde_json::json!({ "albums": albums, "error": null, "partial": false }).to_string();
+    lib.cache_put(&format!("discography.{artist}"), at, &json).unwrap();
+}
+
+fn stream_album(title: &str) -> StreamAlbum {
+    StreamAlbum {
+        id: RemoteId::new(Service::Spotify, format!("sp-alb-{title}")),
+        title: title.into(),
+        artists: Vec::new(),
+        year: Some(2026),
+        release_date: None,
+        release_type: ReleaseType::Single,
+        cover_url: None,
+        total_tracks: None,
+        tracks: Vec::new(),
+    }
+}
+
+/// Until when a kept discography is shown without the services asked.
+const REFRESH_MS: i64 = 60 * 60 * 1000;
+
+/// A kept discography of the last ten minutes: the page shows it and the
+/// services are not asked at all.
+#[test]
+fn a_kept_discography_younger_than_an_hour_asks_nothing() {
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("宇多田ヒカル")).unwrap();
+    let spotify = Arc::new(FakeService::spotify());
+    let youtube = Arc::new(FakeService::youtube().logged_out());
+    let rt = start(&lib, vec![spotify.clone(), youtube.clone()]);
+    rt.send(Command::LoadArtist(artist.id));
+    wait_for(&rt, "the discography", |s| {
+        s.artist.as_ref().is_some_and(|a| !a.discography.loading && !a.discography.albums.is_empty())
+    });
+    spotify.reset_calls();
+    youtube.reset_calls();
+    rt.send(Command::LoadArtist(artist.id));
+    std::thread::sleep(Duration::from_millis(300));
+    let s = rt.state();
+    let d = &s.artist.as_ref().unwrap().discography;
+    assert!(!d.loading, "nothing is being asked");
+    assert!(!d.albums.is_empty(), "the kept list is shown");
+    assert_eq!(spotify.calls("artist") + spotify.calls("search_kind"), 0);
+    assert_eq!(youtube.calls("artist") + youtube.calls("search_kind"), 0);
+}
+
+/// A kept discography of two hours: shown at once, then asked again once
+/// per service and replaced by what they give now (a release that went
+/// live since).
+#[test]
+fn a_discography_older_than_an_hour_is_shown_then_asked_again() {
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("宇多田ヒカル")).unwrap();
+    let credit = ArtistCredit::single("宇多田ヒカル", Some(artist.id));
+    lib.upsert_release(&Release::new("First Love", credit)).unwrap();
+    let key = format!("discography.{}", artist.id);
+    let at = nikgob_library::now_ms() - 2 * REFRESH_MS;
+    put_kept_discography(&lib, artist.id, vec![stream_album("Kept")], at);
+    let spotify = Arc::new(FakeService::spotify());
+    // Long enough to see the kept list while the lookup runs.
+    spotify.delay("artist", Duration::from_millis(1500));
+    let youtube = Arc::new(FakeService::youtube().logged_out());
+    let rt = start(&lib, vec![spotify.clone(), youtube.clone()]);
+    rt.send(Command::LoadArtist(artist.id));
+    // The kept list at once, the lookup still running.
+    wait_for(&rt, "the kept list", |s| {
+        s.artist.as_ref().is_some_and(|a| a.discography.loading && a.discography.albums.iter().any(|c| c.title == "Kept"))
+    });
+    // Then the services' answer replaces it.
+    wait_for(&rt, "the new list", |s| {
+        s.artist.as_ref().is_some_and(|a| !a.discography.loading && a.discography.albums.iter().any(|c| c.title == "道"))
+    });
+    let s = rt.state();
+    let titles: Vec<&str> = s.artist.as_ref().unwrap().discography.albums.iter().map(|a| a.title.as_str()).collect();
+    assert_eq!(titles, ["道"], "the kept list is gone");
+    drop(s);
+    assert_eq!(spotify.calls("artist"), 1, "one re-ask: {:?}", spotify.all_calls());
+    assert_eq!(youtube.calls("artist"), 1, "{:?}", youtube.all_calls());
+    assert!(lib.cache_get(&key).unwrap().unwrap().0 > at, "at the new lookup's time");
+}
+
+/// A re-ask that fails keeps the list the page has instead of an error,
+/// and the answer is asked again in an hour, not on every visit.
+#[test]
+fn a_failed_refresh_keeps_the_kept_discography() {
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("Кино")).unwrap();
+    let key = format!("discography.{}", artist.id);
+    let old = nikgob_library::now_ms() - 2 * REFRESH_MS;
+    put_kept_discography(&lib, artist.id, vec![stream_album("Kept")], old);
+    let deezer = Arc::new(FakeService::deezer());
+    deezer.fail_next("search_kind", 1);
+    let rt = start(&lib, vec![deezer.clone()]);
+    rt.send(Command::LoadArtist(artist.id));
+    wait_until("the failed refresh", || lib.cache_get(&key).unwrap().is_some_and(|(at, _)| at > old));
+    wait_for(&rt, "the answer", |s| s.artist.as_ref().is_some_and(|a| !a.discography.loading));
+    let s = rt.state();
+    let d = &s.artist.as_ref().unwrap().discography;
+    let titles: Vec<&str> = d.albums.iter().map(|a| a.title.as_str()).collect();
+    assert_eq!(titles, ["Kept"], "the kept list stays");
+    assert_eq!(d.error, None, "no error over it");
+    drop(s);
+    // The kept answer is good for an hour: the next visit asks nothing.
+    deezer.reset_calls();
+    rt.send(Command::LoadArtist(artist.id));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(deezer.calls("search_kind"), 0, "{:?}", deezer.all_calls());
 }
 
 /// A library track with a file, on its album.

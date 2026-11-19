@@ -246,6 +246,7 @@ pub(crate) fn track(t: &Track, album: Option<&Album>) -> StreamTrack {
         let mut r = AlbumRef::new((a.id > 0).then(|| rid(a.id)), a.title.clone());
         r.artists = a.artists();
         r.year = year(a.release_date.as_ref()).or_else(|| year(t.release_date.as_ref()));
+        r.release_type = a.record_type.as_deref().map(|k| release_type(Some(k)));
         out.album = Some(r);
         out.cover_url = a.cover();
     }

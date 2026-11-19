@@ -305,6 +305,10 @@ pub struct AlbumRef {
     pub artists: Vec<ArtistRef>,
     #[serde(default)]
     pub year: Option<i32>,
+    /// What the service says it is, when the listing says: a track of a
+    /// search result tells a single from an album.
+    #[serde(default)]
+    pub release_type: Option<ReleaseType>,
 }
 
 impl AlbumRef {
@@ -314,6 +318,7 @@ impl AlbumRef {
             title: title.into(),
             artists: Vec::new(),
             year: None,
+            release_type: None,
         }
     }
 }
