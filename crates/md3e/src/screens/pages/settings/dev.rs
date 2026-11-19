@@ -5,6 +5,7 @@
 //! separate profile for videos and UI tests, and the first run shown again.
 
 use egui::Ui;
+use nikgob_core::i18n;
 use nikgob_view::{Command, Prefs, ViewState};
 
 use super::super::PageState;
@@ -16,12 +17,13 @@ use crate::{
 };
 
 pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
-    group(ui, "Для разработчика");
+    let st = i18n::settings_tabs();
+    group(ui, st.g_dev);
     segments(ui, Id::LyricsUi, p);
     // The GPU is DirectML's, Windows' own: elsewhere the CPU is the only
     // choice, so there is none to show. A GPU that cannot run says so.
     if cfg!(windows) {
-        let fallback = (state.align.on_gpu == Some(false) && p.lyrics_gpu).then_some(Note::Error("Видеокарта недоступна"));
+        let fallback = (state.align.on_gpu == Some(false) && p.lyrics_gpu).then_some(Note::Error(st.gpu_unavailable));
         row_note(ui, Id::LyricsGpu, fallback, |ui| super::rows::choice(ui, Id::LyricsGpu, p));
     }
     switch(ui, Id::LyricsModelsAuto, &mut p.lyrics_models_auto);
@@ -43,7 +45,7 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
     }
     // «Показать»: the first run over the whole window, as on a new install.
     row(ui, Id::FirstRun, |ui| {
-        if ui.add(Button::new("Показать").style(Style::Tonal).id_salt("set-dev-first-run")).clicked() {
+        if ui.add(Button::new(st.show).style(Style::Tonal).id_salt("set-dev-first-run")).clicked() {
             out.push(Command::SetPref(nikgob_view::PrefPatch::FirstRun(true)));
         }
     });
@@ -51,13 +53,14 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
 
 /// «Контакт MusicBrainz» and «Ключ AcoustID», saved together.
 fn metadata(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+    let st = i18n::settings_tabs();
     if !pages.metadata_synced {
         pages.metadata_contact = p.metadata_contact.clone();
         pages.metadata_synced = true;
     }
     block(ui, Id::MusicBrainz, |ui| {
         TextField::new(&mut pages.metadata_contact, Id::MusicBrainz.label())
-            .placeholder("почта или адрес сайта")
+            .placeholder(st.contact_placeholder)
             .leading_icon(Icon::Person)
             .width(480.0)
             .id_salt("set-mb-contact")
@@ -66,7 +69,7 @@ fn metadata(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command
     block(ui, Id::AcoustId, |ui| {
         let mut field = TextField::new(&mut pages.acoustid_key, Id::AcoustId.label()).password(true);
         if p.acoustid_configured {
-            field = field.placeholder("Сохранён");
+            field = field.placeholder(st.saved);
         }
         field.width(480.0).id_salt("set-acoustid").show(ui);
         ui.add_space(8.0);
@@ -75,7 +78,7 @@ fn metadata(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command
             ui.spacing_mut().item_spacing.x = 8.0;
             if ui
                 .add(
-                    Button::new("Сохранить")
+                    Button::new(i18n::common().save)
                         .style(Style::Tonal)
                         .enabled(contact_changed || !pages.acoustid_key.trim().is_empty())
                         .id_salt("set-metadata-save"),
@@ -87,7 +90,7 @@ fn metadata(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command
             }
             // An empty key leaves the saved one; this takes it away (the
             // runtime clears it on an empty key), the contact as saved.
-            if p.acoustid_configured && ui.add(Button::new("Убрать ключ").style(Style::Text).id_salt("set-acoustid-clear")).clicked() {
+            if p.acoustid_configured && ui.add(Button::new(st.remove_key).style(Style::Text).id_salt("set-acoustid-clear")).clicked() {
                 pages.acoustid_key.clear();
                 out.push(Command::SetMetadata { contact: p.metadata_contact.trim().to_owned(), acoustid_key: Some(String::new()) });
             }
@@ -98,19 +101,20 @@ fn metadata(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command
 /// «Ключ Last.fm» and «Токен ListenBrainz», each saved or taken away on
 /// its own (kept in settings.toml).
 fn keys(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+    let st = i18n::settings_tabs();
     block(ui, Id::LastfmKey, |ui| {
         let mut field = TextField::new(&mut pages.lastfm_key, Id::LastfmKey.label()).password(true);
         if p.lastfm_configured {
-            field = field.placeholder("Сохранён");
+            field = field.placeholder(st.saved);
         }
         field.width(480.0).id_salt("set-lastfm").show(ui);
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if ui.add(Button::new("Сохранить").style(Style::Tonal).enabled(!pages.lastfm_key.trim().is_empty()).id_salt("set-lastfm-save")).clicked() {
+            if ui.add(Button::new(i18n::common().save).style(Style::Tonal).enabled(!pages.lastfm_key.trim().is_empty()).id_salt("set-lastfm-save")).clicked() {
                 out.push(Command::SetLastfmKey(std::mem::take(&mut pages.lastfm_key).trim().to_owned()));
             }
-            if p.lastfm_configured && ui.add(Button::new("Убрать ключ").style(Style::Text).id_salt("set-lastfm-clear")).clicked() {
+            if p.lastfm_configured && ui.add(Button::new(st.remove_key).style(Style::Text).id_salt("set-lastfm-clear")).clicked() {
                 pages.lastfm_key.clear();
                 out.push(Command::SetLastfmKey(String::new()));
             }
@@ -119,19 +123,19 @@ fn keys(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
     block(ui, Id::ListenbrainzToken, |ui| {
         let mut field = TextField::new(&mut pages.listenbrainz_token, Id::ListenbrainzToken.label()).password(true);
         if p.listenbrainz_configured {
-            field = field.placeholder("Сохранён");
+            field = field.placeholder(st.saved);
         }
         field.width(480.0).id_salt("set-listenbrainz").show(ui);
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             if ui
-                .add(Button::new("Сохранить").style(Style::Tonal).enabled(!pages.listenbrainz_token.trim().is_empty()).id_salt("set-listenbrainz-save"))
+                .add(Button::new(i18n::common().save).style(Style::Tonal).enabled(!pages.listenbrainz_token.trim().is_empty()).id_salt("set-listenbrainz-save"))
                 .clicked()
             {
                 out.push(Command::SetListenbrainzToken(std::mem::take(&mut pages.listenbrainz_token).trim().to_owned()));
             }
-            if p.listenbrainz_configured && ui.add(Button::new("Убрать токен").style(Style::Text).id_salt("set-listenbrainz-clear")).clicked() {
+            if p.listenbrainz_configured && ui.add(Button::new(st.remove_token).style(Style::Text).id_salt("set-listenbrainz-clear")).clicked() {
                 pages.listenbrainz_token.clear();
                 out.push(Command::SetListenbrainzToken(String::new()));
             }
@@ -143,23 +147,24 @@ fn keys(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
 /// (`--demo-profile`), started beside this player or reset after a question.
 fn demo_profile(ui: &mut Ui, out: &mut Vec<Command>) {
     use nikgob_view::dev::DevProfile;
+    let st = i18n::settings_tabs();
     let asking = egui::Id::new("set-dev-profile-asking");
     row(ui, Id::DemoProfile, |ui| {
         ui.horizontal(|ui| {
-            if ui.add(Button::new("Открыть").style(Style::Tonal).id_salt("set-dev-profile-open")).clicked() {
+            if ui.add(Button::new(i18n::common().open).style(Style::Tonal).id_salt("set-dev-profile-open")).clicked() {
                 out.push(Command::DevProfile(DevProfile::Open));
             }
-            if ui.add(Button::new("Сбросить").style(Style::Outlined).id_salt("set-dev-profile-reset")).clicked() {
+            if ui.add(Button::new(i18n::common().reset).style(Style::Outlined).id_salt("set-dev-profile-reset")).clicked() {
                 ui.ctx().data_mut(|d| d.insert_temp(asking, true));
             }
         });
     });
     if ui.ctx().data(|d| d.get_temp::<bool>(asking)).unwrap_or(false) {
         let mut open = true;
-        let r = Dialog::new("md3e-dev-profile-reset", "Сбросить демо-профиль?")
+        let r = Dialog::new("md3e-dev-profile-reset", st.reset_demo_title)
             .icon(Icon::Refresh)
-            .action("Отмена")
-            .action("Сбросить")
+            .action(i18n::common().cancel)
+            .action(i18n::common().reset)
             .show(ui.ctx(), &mut open);
         if r.action == Some(1) {
             out.push(Command::DevProfile(DevProfile::Reset));

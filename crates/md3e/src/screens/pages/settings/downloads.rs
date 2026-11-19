@@ -3,6 +3,7 @@
 //! Prowlarr and the seeding.
 
 use egui::{Ui, emath::TSTransform, vec2};
+use nikgob_core::i18n;
 use nikgob_view::{self as v, Command, Prefs, ViewState};
 
 use super::super::PageState;
@@ -15,17 +16,18 @@ use crate::{
 };
 
 pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
-    group(ui, "Откуда качать");
+    let st = i18n::settings_tabs();
+    group(ui, st.g_sources);
     // Обычно · Всё · Свои: the one under the pointer tints the
     // sources it would switch and shows where their switches would go.
     let mut preview = preset::row(ui, v::presets::Area::Sources, p);
     let saved = p.clone();
     download_sources(ui, state, preview.as_mut().unwrap_or(&mut *p), &saved);
 
-    group(ui, "По лайку");
+    group(ui, st.g_on_like);
     segments(ui, Id::LikeDownload, p);
 
-    group(ui, "Качество");
+    group(ui, st.g_quality);
     let never = p.upgrade_every == v::UpgradeEvery::Never;
     dimmed(ui, never, |ui| segments(ui, Id::UpgradeBar, p));
     menu(ui, Id::UpgradeEvery, p);
@@ -36,7 +38,7 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
     // TODO(lead): the concept moves this to the Корзина page (library.rs);
     // it stays here until that page has it, so the undo is never lost.
     row(ui, Id::FakeRestore, |ui| {
-        if ui.add(Button::new("Вернуть").style(Style::Outlined).id_salt("set-fake-restore")).clicked() {
+        if ui.add(Button::new(st.restore).style(Style::Outlined).id_salt("set-fake-restore")).clicked() {
             out.push(Command::RestoreConvertedFlac);
         }
     });
@@ -44,10 +46,10 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
     group(ui, "Soulseek");
     soulseek(ui, state, pages, out);
 
-    group(ui, "Торренты");
+    group(ui, st.g_torrents);
     prowlarr(ui, state, p, pages, out);
 
-    group(ui, "Раздача");
+    group(ui, st.g_seeding);
     // Не раздавать · Обычно · Щедро · Свои, with the rows they own.
     let mut preview = preset::row(ui, v::presets::Area::Seeding, p);
     {
@@ -55,13 +57,13 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
         switch(ui, Id::NoSeed, &mut p.no_seed);
         let no_seed = p.no_seed;
         child(ui, no_seed, |ui| {
-            if let Some(v) = rows::slider(ui, Id::SeedLimit, p.seed_limit_gb as f32, Num::new(0.0, 500.0, 5.0, 0, " ГБ").zero("без лимита")) {
+            if let Some(v) = rows::slider(ui, Id::SeedLimit, p.seed_limit_gb as f32, Num::new(0.0, 500.0, 5.0, 0, st.suffix_gb).zero(st.no_limit)) {
                 p.seed_limit_gb = v as u32;
             }
-            if let Some(v) = rows::slider(ui, Id::SeedDays, p.seed_days as f32, Num::new(1.0, 90.0, 1.0, 0, " дн.")) {
+            if let Some(v) = rows::slider(ui, Id::SeedDays, p.seed_days as f32, Num::new(1.0, 90.0, 1.0, 0, "").unit(st.days)) {
                 p.seed_days = v as u32;
             }
-            if let Some(v) = rows::slider(ui, Id::SeedRatio, p.seed_ratio, Num::new(0.0, 5.0, 0.5, 1, "").zero("без предела")) {
+            if let Some(v) = rows::slider(ui, Id::SeedRatio, p.seed_ratio, Num::new(0.0, 5.0, 0.5, 1, "").zero(st.no_cap)) {
                 p.seed_ratio = v;
             }
         });
@@ -87,6 +89,7 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
 /// row says under its name follows them, so a preset under the pointer
 /// changes the switches only and no row grows or shrinks under it.
 fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs, saved: &Prefs) {
+    let st = i18n::settings_tabs();
     let mut order = p.source_order();
     let shown: Vec<v::SourceKey> = order
         .iter()
@@ -123,9 +126,9 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs, saved: &Prefs
         };
         // Only what blocks a source, or went wrong with it.
         let note = match (key, view) {
-            (v::SourceKey::Torrents, Some(v)) if !v.available => Some(Note::Blocker("Нужен Prowlarr")),
-            (v::SourceKey::Soulseek, _) if !state.downloads.soulseek.configured() => Some(Note::Blocker("Нужен аккаунт")),
-            (v::SourceKey::Soulseek, Some(v)) if saved.source_on(*key) && !v.available => Some(Note::Error("Не подключился")),
+            (v::SourceKey::Torrents, Some(v)) if !v.available => Some(Note::Blocker(st.need_prowlarr)),
+            (v::SourceKey::Soulseek, _) if !state.downloads.soulseek.configured() => Some(Note::Blocker(st.need_account)),
+            (v::SourceKey::Soulseek, Some(v)) if saved.source_on(*key) && !v.available => Some(Note::Error(st.not_connected)),
             (_, Some(v)) => v.status.as_deref().map(Note::Error),
             _ => None,
         };
@@ -140,7 +143,7 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs, saved: &Prefs
                 row_note(ui, Id::DownloadSource(*key), note, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        let up = ui.add(IconButton::new(Icon::ExpandLess).size(Size::Xs).enabled(n > 0).tooltip("Выше").id_salt(("src-up", key.as_str())));
+                        let up = ui.add(IconButton::new(Icon::ExpandLess).size(Size::Xs).enabled(n > 0).tooltip(st.up).id_salt(("src-up", key.as_str())));
                         if up.clicked() && n > 0 {
                             moved = order.iter().position(|o| o.key == shown[n - 1]).map(|to| (at, to));
                             lift_next = Some(*key);
@@ -149,7 +152,7 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs, saved: &Prefs
                             IconButton::new(Icon::ExpandMore)
                                 .size(Size::Xs)
                                 .enabled(n + 1 < shown.len())
-                                .tooltip("Ниже")
+                                .tooltip(st.down)
                                 .id_salt(("src-down", key.as_str())),
                         );
                         if down.clicked() && n + 1 < shown.len() {
@@ -226,6 +229,7 @@ fn lifted_row(ui: &mut Ui, shift: TSTransform, lift: f32, draw: impl FnOnce(&mut
 /// the sharing. Its switch is the row in «Откуда качать», its upload limit
 /// in «Раздача».
 fn soulseek(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) {
+    let st = i18n::settings_tabs();
     let saved = &state.downloads.soulseek;
     // The saved account fills the fields until something is typed (it may
     // come a moment after the page opens).
@@ -240,7 +244,7 @@ fn soulseek(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     let dev = rows::level_shown(rows::mode(ui.ctx()), settings_help::Level::Dev);
     block(ui, Id::Soulseek, |ui| {
         if dev {
-            let (pick, rects) = super::super::connected(ui, egui::Id::new("set-slsk-where"), &["В плеере", "На сервере"], usize::from(pages.slsk_remote), &[]);
+            let (pick, rects) = super::super::connected(ui, egui::Id::new("set-slsk-where"), &i18n::settings_tabs::slsk_where_in(i18n::locale()), usize::from(pages.slsk_remote), &[]);
             // The group fills its row: the ⓘ goes right after it, not beside
             // the fields' column further down.
             if let Some(last) = rects.last() {
@@ -253,31 +257,31 @@ fn soulseek(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
             ui.add_space(12.0);
         }
         let ready = if pages.slsk_remote {
-            TextField::new(&mut pages.slsk_url, "Адрес утилиты")
+            TextField::new(&mut pages.slsk_url, st.util_address)
                 .placeholder("http://…:5031")
                 .leading_icon(Icon::Link)
                 .width(480.0)
                 .id_salt("set-slsk-url")
                 .show(ui);
             ui.add_space(8.0);
-            let mut token = TextField::new(&mut pages.slsk_token, "Токен").password(true);
+            let mut token = TextField::new(&mut pages.slsk_token, st.token_label).password(true);
             if saved.token_saved {
-                token = token.placeholder("Сохранён");
+                token = token.placeholder(st.saved);
             }
             token.width(480.0).id_salt("set-slsk-token").show(ui);
             !pages.slsk_url.trim().is_empty()
         } else {
-            TextField::new(&mut pages.slsk_user, "Ник").leading_icon(Icon::Person).width(480.0).id_salt("set-slsk-user").show(ui);
+            TextField::new(&mut pages.slsk_user, st.nick).leading_icon(Icon::Person).width(480.0).id_salt("set-slsk-user").show(ui);
             ui.add_space(8.0);
-            let mut pass = TextField::new(&mut pages.slsk_pass, "Пароль").password(true);
+            let mut pass = TextField::new(&mut pages.slsk_pass, st.password).password(true);
             if saved.password_saved {
-                pass = pass.placeholder("Сохранён");
+                pass = pass.placeholder(st.saved);
             }
             pass.width(480.0).id_salt("set-slsk-pass").show(ui);
             !pages.slsk_user.trim().is_empty() && (saved.password_saved || !pages.slsk_pass.is_empty())
         };
         ui.add_space(8.0);
-        if ui.add(Button::new("Сохранить").style(Style::Tonal).enabled(ready).id_salt("set-slsk-save")).clicked() {
+        if ui.add(Button::new(i18n::common().save).style(Style::Tonal).enabled(ready).id_salt("set-slsk-save")).clicked() {
             out.push(Command::SetSoulseek(v::SoulseekForm {
                 remote: pages.slsk_remote,
                 username: pages.slsk_user.trim().to_owned(),
@@ -332,20 +336,21 @@ fn soulseek_upload(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
 /// check's answer in words (a failure in the error colour: it is one).
 fn prowlarr(ui: &mut Ui, state: &ViewState, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
+    let st = i18n::settings_tabs();
     if pages.indexer_url.is_empty() && !p.prowlarr_url.is_empty() {
         pages.indexer_url = p.prowlarr_url.clone();
     }
     block(ui, Id::Prowlarr, |ui| {
-        TextField::new(&mut pages.indexer_url, "Адрес Prowlarr")
+        TextField::new(&mut pages.indexer_url, st.prowlarr_address)
             .placeholder("https://…")
             .leading_icon(Icon::Link)
             .width(480.0)
             .id_salt("set-prowlarr-url")
             .show(ui);
         ui.add_space(8.0);
-        let mut key = TextField::new(&mut pages.indexer_key, "API-ключ").password(true);
+        let mut key = TextField::new(&mut pages.indexer_key, st.api_key_label).password(true);
         if p.prowlarr_configured {
-            key = key.placeholder("Сохранён");
+            key = key.placeholder(st.saved);
         }
         key.width(480.0).id_salt("set-prowlarr-key").show(ui);
         ui.add_space(8.0);
@@ -353,7 +358,7 @@ fn prowlarr(ui: &mut Ui, state: &ViewState, p: &Prefs, pages: &mut PageState, ou
             ui.spacing_mut().item_spacing.x = 8.0;
             if ui
                 .add(
-                    Button::new("Сохранить")
+                    Button::new(i18n::common().save)
                         .style(Style::Tonal)
                         .enabled(!pages.indexer_url.trim().is_empty() && !pages.indexer_key.trim().is_empty())
                         .id_salt("set-prowlarr-save"),
@@ -369,7 +374,7 @@ fn prowlarr(ui: &mut Ui, state: &ViewState, p: &Prefs, pages: &mut PageState, ou
             let checking = state.indexer_check.as_ref().is_some_and(|c| c.checking);
             let typed = !pages.indexer_url.trim().is_empty() && !pages.indexer_key.trim().is_empty();
             if (p.prowlarr_configured || typed)
-                && ui.add(Button::new("Проверить").style(Style::Text).enabled(!checking).id_salt("set-prowlarr-check")).clicked()
+                && ui.add(Button::new(st.check).style(Style::Text).enabled(!checking).id_salt("set-prowlarr-check")).clicked()
             {
                 out.push(Command::CheckIndexer { url: pages.indexer_url.trim().to_owned(), api_key: pages.indexer_key.trim().to_owned() });
             }

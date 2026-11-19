@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use egui::{Key, Modifiers, Ui, vec2};
+use nikgob_core::i18n;
 use nikgob_view::{ApiAccess, ApiActor, ApiNewToken, ApiPreset, ApiTokenView, ApiView, Command, ViewState, actor_label, preset_label};
 
 use super::super::PageState;
@@ -80,7 +81,7 @@ struct Made {
     name: String,
     secret: String,
     actor: ApiActor,
-    /// [`SNIPPETS`] shown.
+    /// The snippet tab shown (see `i18n::settings_tabs::snippets_in`).
     snippet: usize,
     /// This computer's address in the home network, for the snippets.
     lan: Option<String>,
@@ -97,8 +98,6 @@ impl Drop for Made {
 
 const PRESETS: [ApiPreset; 3] = [ApiPreset::Control, ApiPreset::Full, ApiPreset::Read];
 const ACTORS: [ApiActor; 4] = [ApiActor::Owner, ApiActor::Assistant, ApiActor::Agent, ApiActor::Guest];
-/// The snippets of the dialog's second step.
-const SNIPPETS: [&str; 4] = ["Claude Code", "mcpServers JSON", "curl", "MCP по сети"];
 /// How long a used token's row stays lit before it fades back.
 const PULSE_S: f64 = 0.25;
 /// How long the switch shows its new place before the runtime has it.
@@ -108,7 +107,7 @@ const KEEP_S: f64 = 5.0;
 
 pub(super) fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) {
     super::devices::show(ui, state, pages, out);
-    group(ui, "API и MCP");
+    group(ui, i18n::settings_tabs().g_api);
     let api = &state.api;
     let mem = &mut pages.net;
     let now = anim::now(ui.ctx());
@@ -146,7 +145,7 @@ fn local_host(api: &ApiView) -> String {
 /// name.
 fn enabled_row(ui: &mut Ui, api: &ApiView, on: bool, mem: &mut NetState, now: f64, out: &mut Vec<Command>) {
     let note = if !api.configurable {
-        Some(Note::Blocker("Нет файла настроек"))
+        Some(Note::Blocker(i18n::settings_tabs().no_settings_file))
     } else if on {
         api.error.as_deref().map(Note::Error)
     } else {
@@ -166,7 +165,7 @@ fn enabled_row(ui: &mut Ui, api: &ApiView, on: bool, mem: &mut NetState, now: f6
             if opening {
                 ui.add(LoadingIndicator::new().size(20.0));
             }
-            let docs = Button::new("Открыть /docs")
+            let docs = Button::new(i18n::settings_tabs().open_docs)
                 .icon(Icon::OpenInNew)
                 .style(Style::Outlined)
                 .size(Size::S)
@@ -185,7 +184,7 @@ fn access_row(ui: &mut Ui, api: &ApiView, out: &mut Vec<Command>) {
     let explicit = (!api.address.is_empty()).then_some(api.address.as_str());
     row_note(ui, Id::ApiAccess, explicit.map(Note::Value), |ui| {
         let at = usize::from(!api.local_only());
-        let labels = ["Этот компьютер", "Домашняя сеть"];
+        let labels = i18n::settings_tabs::api_access_in(i18n::locale());
         if let Some(n) = super::super::connected(ui, egui::Id::new("api-access"), &labels, at, &[]).0
             && n != at
         {
@@ -223,7 +222,7 @@ fn port_row(ui: &mut Ui, api: &ApiView, mem: &mut NetState, out: &mut Vec<Comman
                 out.push(Command::SetApiPort(p));
             }
             if api.port != nikgob_view::API_PORT
-                && ui.add(Button::new("Сбросить").style(Style::Text).size(Size::S).id_salt("api-port-reset")).clicked()
+                && ui.add(Button::new(i18n::common().reset).style(Style::Text).size(Size::S).id_salt("api-port-reset")).clicked()
             {
                 out.push(Command::SetApiPort(nikgob_view::API_PORT));
                 mem.port_draft = nikgob_view::API_PORT.to_string();
@@ -235,9 +234,10 @@ fn port_row(ui: &mut Ui, api: &ApiView, mem: &mut NetState, out: &mut Vec<Comman
 /// A ready token of the split button's menu: its name, preset, who plays
 /// with it and the snippet its dialog opens on.
 fn ready(i: usize) -> (&'static str, ApiPreset, ApiActor) {
+    let t = i18n::settings_tabs();
     match i {
-        0 => ("Агент на этом ПК", ApiPreset::Full, ApiActor::Agent),
-        _ => ("Голосовой ассистент", ApiPreset::Control, ApiActor::Assistant),
+        0 => (t.token_agent_pc, ApiPreset::Full, ApiActor::Agent),
+        _ => (t.token_assistant, ApiPreset::Control, ApiActor::Assistant),
     }
 }
 
@@ -249,12 +249,13 @@ fn first_snippet(actor: ApiActor) -> usize {
 /// «Токены»: «Новый токен», its menu two ready ones.
 fn tokens_row(ui: &mut Ui, mem: &mut NetState, now: f64, out: &mut Vec<Command>) {
     row(ui, Id::ApiTokens, |ui| {
-        let o = SplitButton::new("api-new-token", "Новый токен")
+        let t = i18n::settings_tabs();
+        let o = SplitButton::new("api-new-token", t.new_token)
             .icon(Icon::Add)
             .style(Style::Tonal)
             .size(Size::S)
-            .item(MenuItem::new("Для агента на этом ПК"))
-            .item(MenuItem::new("Для голосового ассистента"))
+            .item(MenuItem::new(t.for_agent_pc))
+            .item(MenuItem::new(t.for_assistant))
             .show(ui);
         if o.main.clicked() {
             mem.dialog = Some(TokenDialog {
@@ -303,7 +304,7 @@ fn kept(api: &ApiView, id: &str, waited: f64) -> Kept {
     } else if let Some((_, why)) = api.token_failed.as_ref().filter(|(f, _)| f == id) {
         Kept::No(why.clone())
     } else if waited > KEEP_S {
-        Kept::No("Плеер не ответил".to_owned())
+        Kept::No(i18n::settings_tabs().player_no_answer.to_owned())
     } else {
         Kept::NotYet
     }
@@ -320,14 +321,7 @@ pub(crate) fn lan_ip() -> Option<String> {
 
 /// «5 мин назад», «вчера».
 pub(crate) fn ago(now_ms: i64, then_ms: i64) -> String {
-    let s = (now_ms - then_ms).max(0) / 1000;
-    match s {
-        0..60 => "только что".to_owned(),
-        60..3600 => format!("{} мин назад", s / 60),
-        3600..86_400 => format!("{} ч назад", s / 3600),
-        86_400..172_800 => "вчера".to_owned(),
-        _ => format!("{} дн. назад", s / 86_400),
-    }
+    i18n::settings_tabs::ago(now_ms, then_ms)
 }
 
 fn actor_icon(a: ApiActor) -> Icon {
@@ -389,7 +383,7 @@ fn token_list(ui: &mut Ui, api: &ApiView, mem: &mut NetState, now: f64, out: &mu
             item = item.trailing_text(ago(wall, at));
         }
         item.trailing(|ui| {
-            revoke = ui.add(Button::new("Отозвать").style(Style::Text).size(Size::S).id_salt(("api-revoke", &t.id))).clicked();
+            revoke = ui.add(Button::new(i18n::settings_tabs().revoke).style(Style::Text).size(Size::S).id_salt(("api-revoke", &t.id))).clicked();
         })
         .show(ui);
         if revoke {
@@ -416,8 +410,8 @@ fn json_str(s: &str) -> String {
     out
 }
 
-/// The snippet `kind` ([`SNIPPETS`]) with the real values: the player's
-/// program, the token, where the API is.
+/// The snippet tab `kind` (see `i18n::settings_tabs::snippets_in`) with the
+/// real values: the player's program, the token, where the API is.
 pub(crate) fn snippet(kind: usize, token: &str, exe: &str, host: &str, port: u16) -> String {
     match kind {
         0 => format!("claude mcp add music -e NIKGOB_TOKEN={token} -- \"{exe}\" mcp"),
@@ -448,6 +442,8 @@ fn dialog(ui: &mut Ui, api: &ApiView, mem: &mut NetState, now: f64, out: &mut Ve
     let Some(d) = mem.dialog.as_mut() else { return };
     let ctx = ui.ctx().clone();
     let s = Theme::get(&ctx).scheme;
+    let t = i18n::settings_tabs();
+    let c = i18n::common();
     let mut open = true;
     // The secret shows only once the player has kept the token.
     if let Some(w) = d.waiting.as_ref() {
@@ -464,14 +460,14 @@ fn dialog(ui: &mut Ui, api: &ApiView, mem: &mut NetState, now: f64, out: &mut Ve
         let can = !d.name.trim().is_empty() && d.waiting.is_none();
         let waiting = d.waiting.is_some();
         let mut submitted = false;
-        let r = Dialog::new("api-token-dialog", "Новый токен")
+        let r = Dialog::new("api-token-dialog", t.new_token)
             .max_width(480.0)
-            .action("Отмена")
-            .action_with(DialogAction::new("Создать").enabled(can))
+            .action(c.cancel)
+            .action_with(DialogAction::new(t.create).enabled(can))
             .show_with(&ctx, &mut open, |ui| {
                 ui.add_space(16.0);
-                let f = TextField::new(&mut d.name, "Название")
-                    .placeholder("Ассистент на Pi")
+                let f = TextField::new(&mut d.name, t.token_name)
+                    .placeholder(t.token_placeholder)
                     .width(ui.available_width())
                     .request_focus(d.focus)
                     .id_salt("api-token-name")
@@ -479,7 +475,7 @@ fn dialog(ui: &mut Ui, api: &ApiView, mem: &mut NetState, now: f64, out: &mut Ve
                 d.focus = false;
                 submitted = f.submitted;
                 ui.add_space(16.0);
-                ui.label(TypeRole::LabelLarge.style().rich("Права", s.on_surface_variant));
+                ui.label(TypeRole::LabelLarge.style().rich(t.rights, s.on_surface_variant));
                 ui.add_space(8.0);
                 let labels = PRESETS.map(preset_label);
                 let at = PRESETS.iter().position(|p| *p == d.preset).unwrap_or(0);
@@ -499,7 +495,7 @@ fn dialog(ui: &mut Ui, api: &ApiView, mem: &mut NetState, now: f64, out: &mut Ve
                 // A token that only reads starts nothing: who plays with
                 // it does not matter.
                 dimmed(ui, d.preset == ApiPreset::Read, |ui| {
-                    ui.label(TypeRole::LabelLarge.style().rich("Кто включает", s.on_surface_variant));
+                    ui.label(TypeRole::LabelLarge.style().rich(t.who_uses, s.on_surface_variant));
                     ui.add_space(8.0);
                     let labels = ACTORS.map(actor_label);
                     let at = ACTORS.iter().position(|a| *a == d.actor).unwrap_or(0);
@@ -523,7 +519,7 @@ fn dialog(ui: &mut Ui, api: &ApiView, mem: &mut NetState, now: f64, out: &mut Ve
                     d.error = None;
                     d.waiting = Some(Waiting { made, at: now });
                 }
-                None => d.error = Some("Не удалось создать токен".to_owned()),
+                None => d.error = Some(t.token_failed.to_owned()),
             }
         } else if r.action.is_some() || r.dismissed || !open {
             mem.dialog = None;
@@ -541,12 +537,12 @@ fn dialog(ui: &mut Ui, api: &ApiView, mem: &mut NetState, now: f64, out: &mut Ve
     let r = Dialog::new("api-token-dialog", m.name.clone())
         .max_width(560.0)
         .dismissible(false)
-        .action("Готово")
+        .action(c.done)
         .show_with(&ctx, &mut open, |ui| {
             ui.add_space(16.0);
             code_block(ui, "api-token-secret", &m.secret, s);
             ui.add_space(16.0);
-            if let Some(n) = super::super::connected(ui, egui::Id::new("api-token-snippet"), &SNIPPETS, m.snippet, &[]).0 {
+            if let Some(n) = super::super::connected(ui, egui::Id::new("api-token-snippet"), &i18n::settings_tabs::snippets_in(i18n::locale()), m.snippet, &[]).0 {
                 m.snippet = n;
             }
             ui.add_space(8.0);
@@ -556,9 +552,9 @@ fn dialog(ui: &mut Ui, api: &ApiView, mem: &mut NetState, now: f64, out: &mut Ve
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.label(TypeRole::BodyMedium.style().rich("Доступ открыт только на этом компьютере", s.on_surface_variant));
+                    ui.label(TypeRole::BodyMedium.style().rich(t.local_only_notice, s.on_surface_variant));
                     open_network = ui
-                        .add(Button::new("Включить домашнюю сеть").style(Style::Text).size(Size::S).id_salt("api-open-network"))
+                        .add(Button::new(t.enable_home_network).style(Style::Text).size(Size::S).id_salt("api-open-network"))
                         .clicked();
                 });
             }

@@ -3,6 +3,7 @@
 //! the rows shows the lyrics.
 
 use egui::{ScrollArea, Ui};
+use nikgob_core::i18n;
 use nikgob_view::{Command, LYRICS_BY_LETTERS, Prefs, ViewState};
 
 use super::super::settings_help::SettingId as Id;
@@ -15,18 +16,19 @@ use crate::{
 };
 
 pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Command>) {
-    group(ui, "Модели");
+    let st = i18n::settings_tabs();
+    group(ui, st.models);
     models(ui, state, out);
 
     look(ui, p);
 
-    group(ui, "Поиск текста");
+    group(ui, st.g_lyrics_search);
     switch(ui, Id::LyricsGenius, &mut p.lyrics_genius);
     switch(ui, Id::SaveLyrics, &mut p.save_found_lyrics);
     switch(ui, Id::LyricsCheck, &mut p.lyrics_check);
     switch(ui, Id::LyricsKeepMisfits, &mut p.lyrics_keep_misfits);
 
-    group(ui, "Подсветка сама");
+    group(ui, st.g_lyrics_auto);
     switch(ui, Id::LyricsWordsPlaying, &mut p.lyrics_words_playing);
     switch(ui, Id::LyricsLinesAuto, &mut p.lyrics_lines_auto);
     switch(ui, Id::LyricsStreams, &mut p.lyrics_streams);
@@ -39,13 +41,14 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<
 /// its step and how it moves), the whole text (the size, the lines around,
 /// the edges), the pause in the song.
 fn look(ui: &mut Ui, p: &mut Prefs) {
-    group(ui, "Вид текста");
+    let st = i18n::settings_tabs();
+    group(ui, st.g_lyrics_look);
     // «Караоке · Спокойно · Прыжок · Чётко» (and «Свои»): live tiles; the
     // one under the pointer is shown in the rows and on the stage.
     let mut preview = preset::row(ui, nikgob_view::presets::Area::Lyrics, p);
     let p: &mut Prefs = preview.as_mut().unwrap_or(p);
 
-    sub(ui, "Строка, которую поют");
+    sub(ui, st.g_sung_line);
     segments(ui, Id::LyricsStyle, p);
     segments(ui, Id::LyricsUnit, p);
     // Focus by letters brightens the whole line: nothing to smooth, nothing
@@ -74,7 +77,7 @@ fn look(ui: &mut Ui, p: &mut Prefs) {
             p.lyrics_lift = v;
         }
     });
-    if let Some(v) = rows::slider(ui, Id::LyricsLead, p.lyrics_lead, Num::new(-0.5, 0.5, 0.05, 2, " с").signed()) {
+    if let Some(v) = rows::slider(ui, Id::LyricsLead, p.lyrics_lead, Num::new(-0.5, 0.5, 0.05, 2, st.suffix_sec).signed()) {
         p.lyrics_lead = v;
     }
     switch(ui, Id::LyricsGlow, &mut p.lyrics_glow);
@@ -82,7 +85,7 @@ fn look(ui: &mut Ui, p: &mut Prefs) {
     // calm Focus already.
     dimmed(ui, whole_line, |ui| menu(ui, Id::WaveFallback, p));
 
-    sub(ui, "Весь текст");
+    sub(ui, st.g_full_text);
     if let Some(v) = rows::slider(ui, Id::LyricsScale, p.lyrics_scale, Num::pct(0.8, 1.4, 0.05)) {
         p.lyrics_scale = v;
     }
@@ -103,11 +106,11 @@ fn look(ui: &mut Ui, p: &mut Prefs) {
             p.lyrics_soft_strength = v;
         }
     });
-    if let Some(v) = rows::slider(ui, Id::LyricsReturn, p.lyrics_return_s, Num::new(1.0, 15.0, 1.0, 0, " с")) {
+    if let Some(v) = rows::slider(ui, Id::LyricsReturn, p.lyrics_return_s, Num::new(1.0, 15.0, 1.0, 0, st.suffix_sec)) {
         p.lyrics_return_s = v;
     }
 
-    sub(ui, "Пауза в песне");
+    sub(ui, st.g_song_pause);
     menu(ui, Id::LyricsGap, p);
     // The waves are the wavy rings'.
     let wavy = matches!(p.lyrics_gap_style, 1 | 3);
@@ -134,11 +137,11 @@ fn models(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     let open_id = egui::Id::new("lyrics-models-open");
     let ready = a.models.iter().filter(|m| m.state == nikgob_view::ModelState::Ready).count();
     let bytes: u64 = a.models.iter().map(|m| m.size).sum();
-    let summary = format!("{ready} из {} · {}", a.models.len(), size_label(bytes));
+    let summary = i18n::settings_tabs::fmt_models_summary_in(i18n::locale(), ready, a.models.len(), &size_label(bytes));
     rows::titled(ui, Id::LyricsModels, |ui| {
         ui.horizontal(|ui| {
             ui.label(TypeRole::BodyLarge.style().rich(summary, Theme::get(ui.ctx()).scheme.on_surface));
-            if ui.add(Button::new("Открыть").style(Style::Outlined).size(Size::S).id_salt("lyrics-models-open")).clicked() {
+            if ui.add(Button::new(i18n::common().open).style(Style::Outlined).size(Size::S).id_salt("lyrics-models-open")).clicked() {
                 ui.ctx().data_mut(|d| d.insert_temp(open_id, true));
             }
         });
@@ -149,7 +152,7 @@ fn models(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     if ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
         let mut open = true;
         let s = Theme::get(ui.ctx()).scheme;
-        let r = Dialog::new("lyrics-models", "Модели").max_width(560.0).action("Закрыть").show_with(ui.ctx(), &mut open, |ui| {
+        let r = Dialog::new("lyrics-models", i18n::settings_tabs().models).max_width(560.0).action(i18n::common().close).show_with(ui.ctx(), &mut open, |ui| {
             if let Some(e) = &state.align.error {
                 ui.label(TypeRole::BodyMedium.style().rich(e, s.error));
                 ui.add_space(8.0);
@@ -162,7 +165,7 @@ fn models(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
                     let item = crate::components::ListItem::new(m.label.clone()).supporting(size_label(m.size)).id_salt(("align-model", i));
                     item.trailing(move |ui: &mut Ui| match model_state {
                         nikgob_view::ModelState::Ready => {
-                            if ui.add(IconButton::new(Icon::Delete).tooltip("Удалить").id_salt(("align-model-del", key.clone()))).clicked() {
+                            if ui.add(IconButton::new(Icon::Delete).tooltip(i18n::common().delete).id_salt(("align-model-del", key.clone()))).clicked() {
                                 out_push(ui, Command::AlignModel { key: key.clone(), download: false });
                             }
                         }
@@ -170,7 +173,7 @@ fn models(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
                             crate::components::wavy_progress(ui, ("align-model-dl", key.clone()), f, 96.0);
                         }
                         nikgob_view::ModelState::Missing => {
-                            if ui.add(Button::new("Скачать").style(Style::Tonal).size(Size::Xs).id_salt(("align-model-get", key.clone()))).clicked() {
+                            if ui.add(Button::new(i18n::settings_tabs().download).style(Style::Tonal).size(Size::Xs).id_salt(("align-model-get", key.clone()))).clicked() {
                                 out_push(ui, Command::AlignModel { key: key.clone(), download: true });
                             }
                         }

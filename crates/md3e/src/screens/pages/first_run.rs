@@ -10,6 +10,7 @@
 //! the side it comes from while its parts fade in one after another.
 
 use egui::{Align2, Color32, CursorIcon, Id, Rect, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
+use nikgob_core::i18n;
 use nikgob_view::first_run::{self as fr, Choices, Keep, Source};
 use nikgob_view::presets::Area;
 use nikgob_view::{Account, AccountView, Command, LoginInput, PrefPatch, Prefs, Service, ThemeMode, ViewState};
@@ -53,12 +54,13 @@ impl Step {
     }
 
     fn title(self) -> &'static str {
+        let f = i18n::first_run();
         match self {
-            Self::Sources => "Откуда брать музыку?",
-            Self::Keep => "Хранить музыку на компьютере?",
-            Self::Connect => "Подключи",
-            Self::Lyrics => "Как показывать текст песен?",
-            Self::More => "Ещё немного",
+            Self::Sources => f.step_sources,
+            Self::Keep => f.step_keep,
+            Self::Connect => f.step_connect,
+            Self::Lyrics => f.step_lyrics,
+            Self::More => f.step_more,
         }
     }
 
@@ -180,7 +182,7 @@ pub(crate) fn show(ui: &mut Ui, full: Rect, state: &ViewState, pages: &mut PageS
     let top = Rect::from_min_size(full.min + vec2(margin, 8.0), vec2(full.width() - 2.0 * margin, 56.0));
     indicator(ui, top.center(), path.len(), at);
     let close = Rect::from_center_size(pos2(top.right() - 20.0, top.center().y), Vec2::splat(40.0));
-    if ui.put(close, IconButton::new(Icon::Close).tooltip("Закрыть").id_salt("first-run-close")).clicked() {
+    if ui.put(close, IconButton::new(Icon::Close).tooltip(i18n::common().close).id_salt("first-run-close")).clicked() {
         finish(pages, state, false, out);
         return;
     }
@@ -355,6 +357,8 @@ fn column(ui: &mut Ui, step: Step, at: usize, steps: usize, slide: &Slide, state
 /// «Назад» at the left; at the right «Далее» once something is chosen,
 /// «Пропустить» while nothing is, «Готово» on the last step — one line.
 fn buttons(ui: &mut Ui, at: usize, steps: usize, step: Step, chosen: bool) -> Option<Act> {
+    let f = i18n::first_run();
+    let c = i18n::common();
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, Size::M.height()), Sense::hover());
     let mut act = None;
@@ -362,11 +366,11 @@ fn buttons(ui: &mut Ui, at: usize, steps: usize, step: Step, chosen: bool) -> Op
     right.spacing_mut().item_spacing.x = 8.0;
     let last = at + 1 == steps;
     if last {
-        if right.add(Button::new("Готово").style(Style::Filled).size(Size::M).id_salt("first-run-done")).clicked() {
+        if right.add(Button::new(c.done).style(Style::Filled).size(Size::M).id_salt("first-run-done")).clicked() {
             act = Some(Act::Done);
         }
     } else {
-        let (text, style) = if chosen { ("Далее", Style::Filled) } else { ("Пропустить", Style::Tonal) };
+        let (text, style) = if chosen { (f.next, Style::Filled) } else { (c.skip, Style::Tonal) };
         if right.add(Button::new(text).style(style).size(Size::M).id_salt(("first-run-next", step))).clicked() {
             act = Some(Act::Next);
         }
@@ -376,7 +380,7 @@ fn buttons(ui: &mut Ui, at: usize, steps: usize, step: Step, chosen: bool) -> Op
         // column's edge.
         let at = row.translate(vec2(-Size::M.side_padding(), 0.0));
         let mut left = ui.new_child(UiBuilder::new().max_rect(at).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("first-run-back"));
-        if left.add(Button::new("Назад").icon(Icon::ArrowBack).style(Style::Text).size(Size::M).id_salt("first-run-back-button")).clicked() {
+        if left.add(Button::new(c.back).icon(Icon::ArrowBack).style(Style::Text).size(Size::M).id_salt("first-run-back-button")).clicked() {
             act = Some(Act::Back);
         }
     }
@@ -520,7 +524,8 @@ fn sources(ui: &mut Ui, slide: &Slide, state: &ViewState, pages: &mut PageState,
 fn keep(ui: &mut Ui, slide: &Slide, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> bool {
     let st = &mut pages.first_run;
     let rects = slide.part(ui, 1, |ui| grid(ui, 2, 200.0, 260.0, 152.0, 12.0));
-    let options = [(Keep::Files, Icon::Download, "Да, скачивать"), (Keep::Listen, Icon::GraphicEq, "Нет, только слушать")];
+    let f = i18n::first_run();
+    let options = [(Keep::Files, Icon::Download, f.keep_yes), (Keep::Listen, Icon::GraphicEq, f.keep_no)];
     for (i, ((k, icon, label), r)) in options.iter().zip(&rects).enumerate() {
         let picked = st.choices.keep == Some(*k);
         if slide.part(ui, 2 + i, |ui| tile(ui, *r, Id::new(("first-run-keep", *k)), Art::Icon(*icon), label, picked)) && !picked {
@@ -617,6 +622,7 @@ fn signed_in(ui: &mut Ui, who: &str) {
 
 fn service_card(ui: &mut Ui, service: Service, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
+    let tabs = i18n::settings_tabs();
     let acc = state.account(service);
     let registered = acc.is_some_and(|a| a.registered);
     let busy = acc.is_some_and(|a| a.busy || matches!(a.account, Account::LoggingIn(_)));
@@ -640,13 +646,13 @@ fn service_card(ui: &mut Ui, service: Service, state: &ViewState, pages: &mut Pa
         } else if busy {
             ui.add(LoadingIndicator::new().size(32.0));
         } else if !registered {
-            ui.label(TypeRole::BodyMedium.style().rich("Не подключён в этой сборке", s.error));
+            ui.label(TypeRole::BodyMedium.style().rich(tabs.not_in_this_build, s.error));
         } else {
             let (text, salt) = match service {
-                Service::Spotify if !personal => ("Подключить", "first-run-sp-connect"),
-                Service::Spotify => ("Войти через Spotify", "first-run-sp-login"),
-                Service::Youtube => ("Войти через Google", "first-run-yt-login"),
-                _ => ("Войти", "first-run-sc-login"),
+                Service::Spotify if !personal => (tabs.connect, "first-run-sp-connect"),
+                Service::Spotify => (tabs.login_spotify, "first-run-sp-login"),
+                Service::Youtube => (tabs.login_google, "first-run-yt-login"),
+                _ => (tabs.login, "first-run-sc-login"),
             };
             let b = Button::new(text).icon(Icon::Login).style(Style::Tonal).enabled(enabled).selected(service == Service::Spotify && st.spotify_steps).id_salt(salt);
             if ui.add(b).clicked() {
@@ -675,7 +681,7 @@ fn service_card(ui: &mut Ui, service: Service, state: &ViewState, pages: &mut Pa
     // Signed in means Premium: the sound is one more consent away.
     if service == Service::Spotify && name.is_some() && acc.is_some_and(|a| !a.audio) {
         ui.add_space(4.0);
-        if ui.add(Button::new("Включить звук").icon(Icon::VolumeUp).style(Style::Tonal).enabled(!busy).id_salt("first-run-sp-sound")).clicked() {
+        if ui.add(Button::new(tabs.enable_sound).icon(Icon::VolumeUp).style(Style::Tonal).enabled(!busy).id_salt("first-run-sp-sound")).clicked() {
             out.push(Command::StreamLogin { service, input: LoginInput::Playback });
         }
         ui.add_space(4.0);
@@ -689,7 +695,8 @@ fn service_card(ui: &mut Ui, service: Service, state: &ViewState, pages: &mut Pa
 fn manual(ui: &mut Ui, service: Service, p: &Prefs, pages: &mut PageState, can: bool, out: &mut Vec<Command>) {
     let youtube = service == Service::Youtube;
     let open = if youtube { pages.yt_form } else { pages.sc_form };
-    let (label, salt) = if youtube { ("Вставить cookies…", "first-run-yt-cookies") } else { ("Вставить токен…", "first-run-sc-token") };
+    let st = i18n::settings_tabs();
+    let (label, salt) = if youtube { (st.paste_cookies, "first-run-yt-cookies") } else { (st.paste_token, "first-run-sc-token") };
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), Size::S.height()), Sense::hover());
     // The text under the name (the mark's 40 and its 16), the button's
     // own padding out of the way.
@@ -709,8 +716,9 @@ fn manual(ui: &mut Ui, service: Service, p: &Prefs, pages: &mut PageState, can: 
     if youtube {
         settings::cookies_fields(ui, p, pages, can, out);
     } else {
-        settings::step(ui, 1, "Войди на soundcloud.com в браузере.");
-        settings::step(ui, 2, "Открой инструменты разработчика → Application → Cookies и скопируй значение oauth_token.");
+        let f = i18n::first_run();
+        settings::step(ui, 1, f.sc_step1);
+        settings::step(ui, 2, f.sc_step2);
         ui.add_space(4.0);
         settings::token_fields(ui, pages, can, false, out);
     }
@@ -730,14 +738,15 @@ fn account_parts(ui: &mut Ui, a: &AccountView, out: &mut Vec<Command>) {
 }
 
 fn folder_card(ui: &mut Ui, pages: &mut PageState, out: &mut Vec<Command>) {
+    let f = i18n::first_run();
     let picked = pages.first_run.folder.clone();
     card_head(ui, Art::Icon(Icon::Folder), Source::Folder.label(), |ui| {
-        let text = if picked.is_some() { "Другая…" } else { "Выбрать папку…" };
+        let text = if picked.is_some() { f.other_folder } else { f.pick_folder };
         let style = if picked.is_some() { Style::Text } else { Style::Tonal };
         if ui.add(Button::new(text).style(style).id_salt("first-run-folder")).clicked() {
             let ctx = ui.ctx().clone();
             super::dialogs::folder(
-                |d| d.set_title("Папка с музыкой"),
+                |d| d.set_title(f.music_folder_title),
                 move |path| {
                     let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
                     ctx.data_mut(|d| d.insert_temp(folder_key(), name));
@@ -814,15 +823,15 @@ fn lyrics(ui: &mut Ui, slide: &Slide, state: &ViewState, out: &mut Vec<Command>)
 fn more(ui: &mut Ui, slide: &Slide, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) {
     let p = &state.prefs;
     slide.part(ui, 1, |ui| {
-        const THEMES: [&str; 3] = ["Светлая", "Тёмная", "Системная"];
-        let w = THEMES.iter().map(|l| Button::new(*l).size(Size::S).natural_width(ui)).sum::<f32>() + 2.0 * 2.0;
+        let themes = i18n::first_run::themes_in(i18n::locale());
+        let w = themes.iter().map(|l| Button::new(*l).size(Size::S).natural_width(ui)).sum::<f32>() + 2.0 * 2.0;
         setting_row(ui, SettingId::Theme.label(), w, |ui| {
             let i = match p.theme {
                 ThemeMode::Light => 0,
                 ThemeMode::Dark => 1,
                 ThemeMode::System => 2,
             };
-            let (pick, _) = connected(ui, Id::new("first-run-theme"), &THEMES, i, &[]);
+            let (pick, _) = connected(ui, Id::new("first-run-theme"), &themes, i, &[]);
             if let Some(n) = pick {
                 let mut after = p.clone();
                 after.theme = [ThemeMode::Light, ThemeMode::Dark, ThemeMode::System][n.min(2)];
@@ -833,7 +842,7 @@ fn more(ui: &mut Ui, slide: &Slide, state: &ViewState, pages: &mut PageState, ou
     slide.part(ui, 2, |ui| {
         let st = &mut pages.first_run;
         setting_row(ui, SettingId::UserName.label(), 240.0, |ui| {
-            let field = TextField::new(&mut st.name, "Имя").width(ui.available_width()).id_salt("first-run-name").show(ui);
+            let field = TextField::new(&mut st.name, i18n::settings_tabs().name_hint).width(ui.available_width()).id_salt("first-run-name").show(ui);
             let name = nikgob_view::user_name(&st.name);
             if (field.submitted || field.response.lost_focus()) && !name.is_empty() && name != p.user_name {
                 out.push(Command::SetPref(PrefPatch::UserName(name)));
@@ -879,12 +888,14 @@ fn setting_row(ui: &mut Ui, label: &str, width: f32, control: impl FnOnce(&mut U
 /// «Сервисы»), with no words around them.
 fn history(ui: &mut Ui, pages: &mut PageState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
+    let f = i18n::first_run();
+    let st_tabs = i18n::settings_tabs();
     let st = &mut pages.first_run;
     let icon = if st.history { Icon::ExpandLess } else { Icon::ExpandMore };
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), Size::S.height()), Sense::hover());
     let at = row.translate(vec2(-Size::S.side_padding(), 0.0));
     let mut c = ui.new_child(UiBuilder::new().max_rect(at).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("first-run-history-row"));
-    if c.add(Button::new("Перенести историю прослушиваний").icon(icon).style(Style::Text).size(Size::S).id_salt("first-run-history")).clicked() {
+    if c.add(Button::new(f.history_btn).icon(icon).style(Style::Text).size(Size::S).id_salt("first-run-history")).clicked() {
         st.history = !st.history;
     }
     let open = anim::fraction(ui.ctx(), Id::new("first-run-history-open"), if st.history { 1.0 } else { 0.0 }, Theme::get(ui.ctx()).motion.default_effects);
@@ -911,15 +922,15 @@ fn history(ui: &mut Ui, pages: &mut PageState, out: &mut Vec<Command>) {
                     if youtube && ui.add(Button::new("Google Takeout").icon(Icon::OpenInNew).style(Style::Tonal).size(Size::S).id_salt("first-run-takeout")).clicked() {
                         settings::open_url(TAKEOUT);
                     }
-                    if ui.add(Button::new("Архив .zip…").icon(Icon::UploadFile).style(Style::Tonal).size(Size::S).id_salt("first-run-import-zip")).clicked() {
+                    if ui.add(Button::new(f.archive_btn).icon(Icon::UploadFile).style(Style::Tonal).size(Size::S).id_salt("first-run-import-zip")).clicked() {
                         super::dialogs::file(
-                            |d| d.set_title("Архив выгрузки Spotify или Google Takeout").add_filter("Архив", &["zip"]),
+                            |d| d.set_title(st_tabs.import_zip_title).add_filter(st_tabs.archive_filter, &["zip"]),
                             Command::ImportExportFiles,
                             out,
                         );
                     }
-                    if ui.add(Button::new("Папка…").icon(Icon::Folder).style(Style::Outlined).size(Size::S).id_salt("first-run-import-dir")).clicked() {
-                        super::dialogs::folder(|d| d.set_title("Папка с выгрузкой Spotify или Google Takeout"), Command::ImportExportFiles, out);
+                    if ui.add(Button::new(st_tabs.folder_btn).icon(Icon::Folder).style(Style::Outlined).size(Size::S).id_salt("first-run-import-dir")).clicked() {
+                        super::dialogs::folder(|d| d.set_title(st_tabs.import_dir_title), Command::ImportExportFiles, out);
                     }
                 });
             });

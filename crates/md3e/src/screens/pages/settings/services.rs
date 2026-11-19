@@ -6,7 +6,7 @@
 //! says until when (a blocker); nothing else explains itself.
 
 use egui::{Sense, Stroke, Ui, Widget as _, vec2};
-use nikgob_core::streaming::SPOTIFY_PREMIUM_REQUIRED;
+use nikgob_core::{i18n, streaming::SPOTIFY_PREMIUM_REQUIRED};
 use nikgob_view::{
     Account, AccountView, Command, LoginInput, LoginPrompt, Prefs, Service, SoloistAction, SoloistPhase, SoloistStatus, ViewState,
 };
@@ -43,30 +43,32 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
     soundcloud(ui, state, p, pages, out);
     deezer(ui, state, p);
 
-    group(ui, "Лайки");
+    let st = i18n::settings_tabs();
+    group(ui, st.g_likes);
     switch(ui, Id::PushLikes, &mut p.push_likes);
     segments(ui, Id::AlbumLike, p);
     segments(ui, Id::SingleLike, p);
 
-    group(ui, "Плейлисты");
+    group(ui, st.g_playlists);
     segments(ui, Id::PlaylistSync, p);
 
     imports(ui, p, out);
 
-    group(ui, "Стриминг");
+    group(ui, st.g_streaming);
     stream_cache(ui, state, p, out);
 }
 
 /// «Кэш стриминга»: its limit per service and «Очистить».
 fn stream_cache(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Command>) {
+    let st = i18n::settings_tabs();
     let used = state.stream_cache_bytes;
     let limit = p.stream_cache_mb.min(4000) as f32;
     let clear = |ui: &mut Ui| {
-        if ui.add(Button::new("Очистить").style(Style::Text).enabled(used > 0).id_salt("stream-cache-clear")).clicked() {
+        if ui.add(Button::new(i18n::common().clear).style(Style::Text).enabled(used > 0).id_salt("stream-cache-clear")).clicked() {
             out.push(Command::ClearStreamCache);
         }
     };
-    if let Some(v) = rows::slider_with(ui, Id::StreamCache, limit, Num::new(0.0, 4000.0, 100.0, 0, " МБ"), 104.0, clear) {
+    if let Some(v) = rows::slider_with(ui, Id::StreamCache, limit, Num::new(0.0, 4000.0, 100.0, 0, st.suffix_mb), 104.0, clear) {
         p.stream_cache_mb = v as u32;
     }
 }
@@ -76,7 +78,7 @@ fn stream_cache(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Com
 /// say it), and a failure shows under the row.
 fn account_note(a: Option<&AccountView>) -> Option<Note<'_>> {
     let Some(a) = a.filter(|a| a.registered) else {
-        return Some(Note::Blocker("Не подключён в этой сборке"));
+        return Some(Note::Blocker(i18n::settings_tabs().not_in_this_build));
     };
     match &a.account {
         Account::LoggedIn { name, .. } => Some(Note::Value(name.as_str())),
@@ -93,6 +95,7 @@ fn logged_in(a: Option<&AccountView>) -> bool {
 /// (the user's own key, then the sign-in) — in «Просто» one «Подключить»
 /// that opens them.
 fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+    let st = i18n::settings_tabs();
     let acc = state.account(Service::Spotify);
     let registered = acc.is_some_and(|a| a.registered);
     group(ui, "Spotify");
@@ -108,13 +111,13 @@ fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
                     ui.add(LoadingIndicator::new().size(32.0));
                 }
                 if signed {
-                    if ui.add(Button::new("Выйти").icon(Icon::Logout).style(Style::Outlined).id_salt("sp-logout")).clicked() {
+                    if ui.add(Button::new(st.logout).icon(Icon::Logout).style(Style::Outlined).id_salt("sp-logout")).clicked() {
                         out.push(Command::StreamLogout(Service::Spotify));
                     }
                 } else if !busy
                     && !steps_shown
                     && ui
-                        .add(Button::new("Подключить").icon(Icon::Login).style(Style::Filled).enabled(registered).id_salt("sp-connect"))
+                        .add(Button::new(st.connect).icon(Icon::Login).style(Style::Filled).enabled(registered).id_salt("sp-connect"))
                         .clicked()
                 {
                     // The steps are a row of «Подробно»: this visit opens it.
@@ -145,7 +148,7 @@ fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
                     ui.add(Switch::new(&mut on).enabled(false).id_salt("sp-playback-on"));
                 } else if ui
                     .add(
-                        Button::new("Включить звук")
+                        Button::new(st.enable_sound)
                             .icon(Icon::VolumeUp)
                             .style(Style::Tonal)
                             .enabled(!busy && !on_soloist)
@@ -175,8 +178,9 @@ fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
 /// indicator while it downloads or starts, and only what went wrong in
 /// words.
 fn soloist_row(ui: &mut Ui, st: &SoloistStatus, can: bool, pages: &mut PageState) {
+    let t = i18n::settings_tabs();
     let note = match &st.phase {
-        SoloistPhase::NeedsKey if st.has_key => Some(Note::Error("Ключ не подошёл")),
+        SoloistPhase::NeedsKey if st.has_key => Some(Note::Error(t.key_rejected)),
         SoloistPhase::Failed(why) => Some(Note::Error(why.as_str())),
         _ => None,
     };
@@ -195,33 +199,33 @@ fn soloist_row(ui: &mut Ui, st: &SoloistStatus, can: bool, pages: &mut PageState
                 ui.add(LoadingIndicator::new().size(32.0));
             }
             SoloistPhase::Absent | SoloistPhase::Unsupported => {
-                if button(ui, "Скачать", Style::Tonal, "solo-download") {
+                if button(ui, t.download, Style::Tonal, "solo-download") {
                     pages.soloist_dialog = SoloistDialog::Download;
                 }
             }
             SoloistPhase::NeedsKey => {
-                if button(ui, "Ввести ключ", Style::Tonal, "solo-key") {
+                if button(ui, t.enter_key, Style::Tonal, "solo-key") {
                     pages.soloist_dialog = SoloistDialog::Key;
                 }
             }
             SoloistPhase::Pairing => {
-                if button(ui, "Подключить", Style::Tonal, "solo-pair") {
+                if button(ui, t.connect, Style::Tonal, "solo-pair") {
                     pages.soloist_dialog = SoloistDialog::Pair;
                 }
             }
             SoloistPhase::Ready => {
-                if button(ui, "Выключить", Style::Outlined, "solo-off") {
+                if button(ui, t.turn_off, Style::Outlined, "solo-off") {
                     pages.soloist_action = Some(SoloistAction::Disable);
                 }
             }
             SoloistPhase::Off => {
-                if button(ui, "Включить", Style::Tonal, "solo-on") {
+                if button(ui, t.turn_on, Style::Tonal, "solo-on") {
                     pages.soloist_action = Some(SoloistAction::Enable);
                     pages.soloist_dialog = SoloistDialog::Pair;
                 }
             }
             SoloistPhase::Failed(_) => {
-                if button(ui, "Повторить", Style::Tonal, "solo-retry") {
+                if button(ui, i18n::common().retry, Style::Tonal, "solo-retry") {
                     pages.soloist_action = Some(SoloistAction::Retry);
                 }
             }
@@ -233,6 +237,8 @@ fn soloist_row(ui: &mut Ui, st: &SoloistStatus, can: bool, pages: &mut PageState
 /// a Premium sign-in), then the key, then choosing the device in Spotify;
 /// each opens by itself when the step before is done.
 fn soloist_dialogs(ui: &mut Ui, st: &SoloistStatus, pages: &mut PageState, out: &mut Vec<Command>) {
+    let t = i18n::settings_tabs();
+    let c = i18n::common();
     if let Some(a) = pages.soloist_action.take() {
         out.push(Command::Soloist(a));
     }
@@ -260,12 +266,14 @@ fn soloist_dialogs(ui: &mut Ui, st: &SoloistStatus, pages: &mut PageState, out: 
     match pages.soloist_dialog {
         SoloistDialog::None => {}
         SoloistDialog::Download => {
-            let size = st.size.map_or_else(String::new, |b| format!(" (≈{} МБ)", (b + 524_288) / 1_048_576));
-            let r = Dialog::new("solo-dl-dialog", "Звук Spotify")
+            let size = st
+                .size
+                .map_or_else(String::new, |b| i18n::settings_tabs::fmt_solo_size_in(i18n::locale(), b));
+            let r = Dialog::new("solo-dl-dialog", t.solo_sound_title)
                 .icon(Icon::Download)
-                .supporting(format!("Чтобы играл звук из Spotify, нужен Spotify Soloist — официальный плеер Spotify{size}."))
-                .action("Не сейчас")
-                .action("Скачать")
+                .supporting(i18n::settings_tabs::fmt_solo_need_in(i18n::locale(), &size))
+                .action(t.not_now)
+                .action(t.download)
                 .show(&ctx, &mut open);
             if r.action == Some(1) {
                 out.push(Command::Soloist(SoloistAction::Download));
@@ -283,31 +291,31 @@ fn soloist_dialogs(ui: &mut Ui, st: &SoloistStatus, pages: &mut PageState, out: 
         SoloistDialog::Key => {
             let typed = pages.soloist_key.trim().to_owned();
             let refused = st.has_key && st.phase == SoloistPhase::NeedsKey;
-            let r = Dialog::new("solo-key-dialog", "Ключ Soloist")
+            let r = Dialog::new("solo-key-dialog", t.solo_key_title)
                 .max_width(480.0)
-                .action("Не сейчас")
-                .action_with(DialogAction::new("Готово").enabled(typed.len() >= 8))
+                .action(t.not_now)
+                .action_with(DialogAction::new(c.done).enabled(typed.len() >= 8))
                 .show_with(&ctx, &mut open, |ui| {
                     ui.add_space(12.0);
                     numbered(ui, 1, 20.0, |ui| {
-                        ui.label(TypeRole::BodyMedium.style().rich_para("Войди в аккаунт Spotify с Premium", s.on_surface));
+                        ui.label(TypeRole::BodyMedium.style().rich_para(t.solo_login_premium, s.on_surface));
                     });
                     numbered(ui, 2, 20.0, |ui| {
-                        ui.label(TypeRole::BodyMedium.style().rich_para("Создай ключ и скопируй его", s.on_surface));
+                        ui.label(TypeRole::BodyMedium.style().rich_para(t.solo_create_key, s.on_surface));
                         ui.add_space(4.0);
                         if ui
-                            .add(Button::new("Открыть страницу ключа").icon(Icon::OpenInNew).style(Style::Tonal).id_salt("solo-key-page"))
+                            .add(Button::new(t.solo_open_key_page).icon(Icon::OpenInNew).style(Style::Tonal).id_salt("solo-key-page"))
                             .clicked()
                         {
                             open_url(SOLOIST_KEY_PAGE);
                         }
                     });
                     numbered(ui, 3, 20.0, |ui| {
-                        ui.label(TypeRole::BodyMedium.style().rich_para("Вставь его сюда", s.on_surface));
+                        ui.label(TypeRole::BodyMedium.style().rich_para(t.solo_paste_here, s.on_surface));
                         ui.add_space(4.0);
-                        let mut field = TextField::new(&mut pages.soloist_key, "Ключ").password(true);
+                        let mut field = TextField::new(&mut pages.soloist_key, t.key_label).password(true);
                         if refused {
-                            field = field.error("Ключ не подошёл");
+                            field = field.error(t.key_rejected);
                         }
                         field.width(ui.available_width().min(380.0)).id_salt("solo-key-field").show(ui);
                     });
@@ -326,16 +334,16 @@ fn soloist_dialogs(ui: &mut Ui, st: &SoloistStatus, pages: &mut PageState, out: 
         }
         SoloistDialog::Pair => {
             let name = st.device_name.clone();
-            let r = Dialog::new("solo-pair-dialog", "Подключить Soloist")
+            let r = Dialog::new("solo-pair-dialog", t.solo_pair_title)
                 .max_width(480.0)
-                .action("Закрыть")
+                .action(c.close)
                 .show_with(&ctx, &mut open, |ui| {
                     ui.add_space(12.0);
                     numbered(ui, 1, 20.0, |ui| {
-                        ui.label(TypeRole::BodyMedium.style().rich_para("Открой Spotify на телефоне или компьютере в этой же сети", s.on_surface));
+                        ui.label(TypeRole::BodyMedium.style().rich_para(t.solo_pair_step1, s.on_surface));
                     });
                     numbered(ui, 2, 20.0, |ui| {
-                        ui.label(TypeRole::BodyMedium.style().rich_para(format!("В списке устройств выбери «{name}»"), s.on_surface));
+                        ui.label(TypeRole::BodyMedium.style().rich_para(i18n::settings_tabs::fmt_pick_device_in(i18n::locale(), &name), s.on_surface));
                     });
                     // It closes by itself once Spotify chose it; only a failure
                     // has something to say.
@@ -366,24 +374,25 @@ fn setup_steps(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: bool, out: &m
 /// The steps themselves, numbered (the first run shows them too).
 pub(crate) fn spotify_steps(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: bool, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
+    let t = i18n::settings_tabs();
     numbered(ui, 1, 32.0, |ui| {
-        if ui.add(Button::new("Открыть Spotify for Developers").icon(Icon::OpenInNew).style(Style::Tonal).id_salt("sp-dash")).clicked() {
+        if ui.add(Button::new(t.open_dashboard).icon(Icon::OpenInNew).style(Style::Tonal).id_salt("sp-dash")).clicked() {
             open_url(DASHBOARD);
         }
     });
     numbered(ui, 2, 20.0, |ui| {
-        ui.label(TypeRole::BodyMedium.style().rich_para("Создай приложение (Create app), Redirect URI:", s.on_surface));
+        ui.label(TypeRole::BodyMedium.style().rich_para(t.create_app, s.on_surface));
         ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.label(TypeRole::BodyMedium.emphasized().rich(REDIRECT_URI, s.on_surface));
             copy_button(ui, "sp-redirect-copy", REDIRECT_URI);
         });
-        ui.label(TypeRole::BodyMedium.style().rich_para("Отметь Web API и Web Playback SDK, сохрани.", s.on_surface));
+        ui.label(TypeRole::BodyMedium.style().rich_para(t.mark_apis, s.on_surface));
     });
     numbered(ui, 3, 20.0, |ui| {
-        ui.label(TypeRole::BodyMedium.style().rich_para("Скопируй Client ID из Settings приложения:", s.on_surface));
+        ui.label(TypeRole::BodyMedium.style().rich_para(t.copy_client_id, s.on_surface));
         ui.add_space(4.0);
-        let placeholder = if p.spotify_personal_app { "Сохранён" } else { "32 символа" };
+        let placeholder = if p.spotify_personal_app { t.saved } else { t.chars32 };
         TextField::new(&mut pages.sp_client_id, "Client ID")
             .placeholder(placeholder)
             .width(ui.available_width().min(420.0))
@@ -395,7 +404,7 @@ pub(crate) fn spotify_steps(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: 
     numbered(ui, 4, 40.0, |ui| {
         if ui
             .add(
-                Button::new("Войти через Spotify")
+                Button::new(t.login_spotify)
                     .icon(Icon::Login)
                     .style(Style::Filled)
                     .size(Size::M)
@@ -447,7 +456,9 @@ pub(crate) fn paused_line(ui: &mut Ui, a: &AccountView) {
             Icon::HourglassEmpty.widget(false, s.on_surface_variant, 18.0).ui(ui);
             ui.add(
                 egui::Label::new(
-                    TypeRole::BodyMedium.style().rich_para(format!("{} просит подождать до {hm}", a.service.display_name()), s.on_surface_variant),
+                    TypeRole::BodyMedium
+                        .style()
+                        .rich_para(i18n::settings_tabs::fmt_asks_wait_until_in(i18n::locale(), &a.service.display_name(), hm), s.on_surface_variant),
                 )
                 .wrap(),
             );
@@ -463,10 +474,10 @@ fn refused_line(ui: &mut Ui, a: &AccountView, can: bool, out: &mut Vec<Command>)
     let Some(hm) = &a.audio_refused_until_hm else { return };
     ui.horizontal(|ui| {
         Icon::Error.widget(false, s.error, 18.0).ui(ui);
-        let text = format!("{} не отдаёт звук до {hm}", a.service.display_name());
+        let text = i18n::settings_tabs::fmt_no_audio_until_in(i18n::locale(), &a.service.display_name(), hm);
         ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich_para(text, s.error)).wrap());
         if ui
-            .add(Button::new("Повторить").style(Style::Text).size(Size::S).enabled(can).id_salt(("retry-audio", a.service.as_str())))
+            .add(Button::new(i18n::common().retry).style(Style::Text).size(Size::S).enabled(can).id_salt(("retry-audio", a.service.as_str())))
             .clicked()
         {
             out.push(Command::RetryStreamAudio(a.service));
@@ -485,7 +496,7 @@ fn reconnect_line(ui: &mut Ui, a: &AccountView, can: bool, out: &mut Vec<Command
         Icon::Info.widget(false, s.on_surface_variant, 18.0).ui(ui);
         ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich_para(note, s.on_surface_variant)).wrap());
         if ui
-            .add(Button::new("Переподключить").style(Style::Text).size(Size::S).enabled(can).id_salt(("reconnect", a.service.as_str())))
+            .add(Button::new(i18n::settings_tabs().reconnect).style(Style::Text).size(Size::S).enabled(can).id_salt(("reconnect", a.service.as_str())))
             .clicked()
         {
             out.push(Command::StreamLogin { service: a.service, input: LoginInput::Browser });
@@ -505,7 +516,7 @@ fn import_row(ui: &mut Ui, state: &ViewState, service: Service, out: &mut Vec<Co
     let ready = state.prefs.service_enabled(service);
     row(ui, id, |ui| {
         if ui
-            .add(Button::new("Импортировать").icon(Icon::Download).style(Style::Tonal).enabled(ready).id_salt(("import", service.as_str())))
+            .add(Button::new(i18n::settings_tabs().import).icon(Icon::Download).style(Style::Tonal).enabled(ready).id_salt(("import", service.as_str())))
             .clicked()
         {
             out.push(Command::ImportFromService(service));
@@ -517,6 +528,8 @@ fn import_row(ui: &mut Ui, state: &ViewState, service: Service, out: &mut Vec<Co
 /// have opened by itself) with «Открыть» and «Копировать», or a device code.
 pub(crate) fn login_prompt(ui: &mut Ui, a: &AccountView, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
+    let t = i18n::settings_tabs();
+    let c = i18n::common();
     let Account::LoggingIn(Some(prompt)) = &a.account else { return };
     let salt = a.service.as_str();
     let (url, code) = match prompt {
@@ -529,11 +542,11 @@ pub(crate) fn login_prompt(ui: &mut Ui, a: &AccountView, out: &mut Vec<Command>)
     };
     Card::outlined().id_salt(("login-prompt", salt)).show(ui, |ui| {
         ui.set_width(ui.available_width().min(640.0));
-        ui.label(TypeRole::TitleSmall.style().rich("Заверши вход в браузере", s.on_surface));
+        ui.label(TypeRole::TitleSmall.style().rich(t.finish_in_browser, s.on_surface));
         ui.label(TypeRole::BodyMedium.style().rich_para(
             match code {
-                Some(_) => "Открой страницу и введи код:",
-                None => "Если браузер не открылся сам, открой эту ссылку:",
+                Some(_) => t.open_page_enter_code,
+                None => t.browser_not_opened,
             },
             s.on_surface_variant,
         ));
@@ -546,11 +559,11 @@ pub(crate) fn login_prompt(ui: &mut Ui, a: &AccountView, out: &mut Vec<Command>)
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if ui.add(Button::new("Открыть").icon(Icon::OpenInNew).style(Style::Tonal).size(Size::S).id_salt(("login-open", salt))).clicked() {
+            if ui.add(Button::new(c.open).icon(Icon::OpenInNew).style(Style::Tonal).size(Size::S).id_salt(("login-open", salt))).clicked() {
                 open_url(url);
             }
             copy_button(ui, ("login-copy", salt), code.unwrap_or(url));
-            if ui.add(Button::new("Отмена").style(Style::Text).size(Size::S).id_salt(("login-cancel", salt))).clicked() {
+            if ui.add(Button::new(c.cancel).style(Style::Text).size(Size::S).id_salt(("login-cancel", salt))).clicked() {
                 out.push(Command::StreamLogout(a.service));
             }
         });
@@ -562,18 +575,19 @@ pub(crate) fn login_prompt(ui: &mut Ui, a: &AccountView, out: &mut Vec<Command>)
 /// (closes it; the window's saved Google session stays).
 fn window_prompt(ui: &mut Ui, a: &AccountView, text: &str, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
+    let t = i18n::settings_tabs();
     let salt = a.service.as_str();
     Card::outlined().id_salt(("login-window", salt)).show(ui, |ui| {
         ui.set_width(ui.available_width().min(640.0));
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             Icon::OpenInNew.widget(false, s.primary, 20.0).ui(ui);
-            ui.label(TypeRole::TitleSmall.style().rich("Заверши вход в окне", s.on_surface));
+            ui.label(TypeRole::TitleSmall.style().rich(t.finish_in_window, s.on_surface));
         });
         ui.add_space(4.0);
         ui.label(TypeRole::BodyMedium.style().rich_para(text, s.on_surface_variant));
         ui.add_space(8.0);
-        if ui.add(Button::new("Отмена").style(Style::Text).size(Size::S).id_salt(("login-window-cancel", salt))).clicked() {
+        if ui.add(Button::new(i18n::common().cancel).style(Style::Text).size(Size::S).id_salt(("login-window-cancel", salt))).clicked() {
             out.push(Command::StreamLogout(a.service));
         }
     });
@@ -610,6 +624,7 @@ fn deezer(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
 }
 
 fn youtube(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+    let st = i18n::settings_tabs();
     let acc = state.account(Service::Youtube);
     let registered = acc.is_some_and(|a| a.registered);
     group(ui, "YouTube Music");
@@ -624,7 +639,7 @@ fn youtube(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
                     ui.add(LoadingIndicator::new().size(32.0));
                 }
                 if logged_in(acc) {
-                    if ui.add(Button::new("Выйти").icon(Icon::Logout).style(Style::Outlined).id_salt("yt-logout")).clicked() {
+                    if ui.add(Button::new(st.logout).icon(Icon::Logout).style(Style::Outlined).id_salt("yt-logout")).clicked() {
                         out.push(Command::StreamLogout(Service::Youtube));
                     }
                 } else if !busy {
@@ -632,7 +647,7 @@ fn youtube(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
                     // controls), the cookies form as the smaller fallback
                     // («Подробно»).
                     if ui
-                        .add(Button::new("Войти через Google").icon(Icon::Login).style(Style::Filled).enabled(registered).id_salt("yt-login"))
+                        .add(Button::new(st.login_google).icon(Icon::Login).style(Style::Filled).enabled(registered).id_salt("yt-login"))
                         .clicked()
                     {
                         pages.yt_form = false;
@@ -641,7 +656,7 @@ fn youtube(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
                     if fallback
                         && ui
                             .add(
-                                Button::new("Вставить cookies…")
+                                Button::new(st.paste_cookies)
                                     .style(Style::Text)
                                     .size(Size::S)
                                     .selected(pages.yt_form)
@@ -675,6 +690,7 @@ fn youtube(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
 /// SoundCloud: the switch, the account (its sign-in window; the token as
 /// the fallback in «Подробно»), the import.
 fn soundcloud(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+    let st = i18n::settings_tabs();
     let acc = state.account(Service::Soundcloud);
     let registered = acc.is_some_and(|a| a.registered);
     group(ui, "SoundCloud");
@@ -689,13 +705,13 @@ fn soundcloud(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageSta
                     ui.add(LoadingIndicator::new().size(32.0));
                 }
                 if logged_in(acc) {
-                    if ui.add(Button::new("Выйти").icon(Icon::Logout).style(Style::Outlined).id_salt("sc-logout")).clicked() {
+                    if ui.add(Button::new(st.logout).icon(Icon::Logout).style(Style::Outlined).id_salt("sc-logout")).clicked() {
                         out.push(Command::StreamLogout(Service::Soundcloud));
                     }
                 } else if !busy {
                     if ui
                         .add(
-                            Button::new("Войти")
+                            Button::new(st.login)
                                 .icon(Icon::Login)
                                 .style(Style::Filled)
                                 .enabled(registered && p.soundcloud_enabled)
@@ -709,7 +725,7 @@ fn soundcloud(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageSta
                     if fallback
                         && ui
                             .add(
-                                Button::new("Вставить токен…")
+                                Button::new(st.paste_token)
                                     .style(Style::Text)
                                     .size(Size::S)
                                     .selected(pages.sc_form)
@@ -756,7 +772,7 @@ pub(crate) fn token_fields(ui: &mut Ui, pages: &mut PageState, can: bool, help: 
     });
     ui.add_space(8.0);
     let text = pages.sc_token.trim().to_owned();
-    if ui.add(Button::new("Войти").style(Style::Filled).enabled(can && !text.is_empty()).id_salt("sc-token-login")).clicked() {
+    if ui.add(Button::new(i18n::settings_tabs().login).style(Style::Filled).enabled(can && !text.is_empty()).id_salt("sc-token-login")).clicked() {
         out.push(Command::StreamLogin { service: Service::Soundcloud, input: LoginInput::Cookies(text) });
         pages.sc_token.clear();
         pages.sc_form = false;
@@ -771,7 +787,7 @@ fn cookies_form(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: bool, out: &
             ui.set_width(ui.available_width().min(640.0));
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(TypeRole::TitleSmall.style().rich("Вход по cookies", s.on_surface));
+                ui.label(TypeRole::TitleSmall.style().rich(i18n::settings_tabs().cookies_title, s.on_surface));
                 settings_help::help_button(ui, Id::YouTubeCookies);
             });
             ui.add_space(4.0);
@@ -785,9 +801,10 @@ fn cookies_form(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: bool, out: &
 /// Настройки' card and the first run's.
 pub(crate) fn cookies_fields(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: bool, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
-    step(ui, 1, "Войди на music.youtube.com в браузере.");
-    step(ui, 2, "Расширением вроде «Get cookies.txt LOCALLY» выгрузи cookies.txt для этого сайта.");
-    step(ui, 3, "Выбери файл или вставь его текст (или заголовок Cookie) ниже.");
+    let t = i18n::settings_tabs();
+    step(ui, 1, t.cookies_step1);
+    step(ui, 2, t.cookies_step2);
+    step(ui, 3, t.cookies_step3);
     ui.add_space(4.0);
     let frame = egui::Frame::new()
         .fill(s.surface_container_low)
@@ -796,7 +813,7 @@ pub(crate) fn cookies_fields(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can:
         .inner_margin(egui::Margin::same(10));
     frame.show(ui, |ui| {
         // Saved ones are not shown back: the field says they are there.
-        let hint = if p.youtube_cookies_set { "Cookies сохранены" } else { "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t…" };
+        let hint = if p.youtube_cookies_set { t.cookies_saved } else { "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t…" };
         ui.add(
             egui::TextEdit::multiline(&mut pages.yt_cookies)
                 .id_salt("yt-cookies-text")
@@ -812,9 +829,9 @@ pub(crate) fn cookies_fields(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can:
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         if ui
-            .add(Button::new("Выбрать cookies.txt…").icon(Icon::UploadFile).style(Style::Outlined).id_salt("yt-cookies-file"))
+            .add(Button::new(t.pick_cookies_file).icon(Icon::UploadFile).style(Style::Outlined).id_salt("yt-cookies-file"))
             .clicked()
-            && let Some(f) = rfd::FileDialog::new().set_title("cookies.txt для music.youtube.com").add_filter("cookies.txt", &["txt"]).pick_file()
+            && let Some(f) = rfd::FileDialog::new().set_title(t.cookies_file_title).add_filter("cookies.txt", &["txt"]).pick_file()
         {
             match std::fs::read_to_string(&f) {
                 Ok(t) => pages.yt_cookies = t,
@@ -822,12 +839,12 @@ pub(crate) fn cookies_fields(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can:
             }
         }
         let text = pages.yt_cookies.trim().to_owned();
-        if ui.add(Button::new("Войти").style(Style::Filled).enabled(can && !text.is_empty()).id_salt("yt-cookies-login")).clicked() {
+        if ui.add(Button::new(t.login).style(Style::Filled).enabled(can && !text.is_empty()).id_salt("yt-cookies-login")).clicked() {
             out.push(Command::StreamLogin { service: Service::Youtube, input: LoginInput::Cookies(text) });
             pages.yt_cookies.clear();
             pages.yt_form = false;
         }
-        if p.youtube_cookies_set && ui.add(Button::new("Забыть cookies").style(Style::Text).id_salt("yt-cookies-clear")).clicked() {
+        if p.youtube_cookies_set && ui.add(Button::new(t.forget_cookies).style(Style::Text).id_salt("yt-cookies-clear")).clicked() {
             out.push(Command::SetStreamSecrets { spotify_client_id: None, youtube_cookies: Some(String::new()) });
         }
     });
@@ -836,16 +853,17 @@ pub(crate) fn cookies_fields(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can:
 /// «Импорт истории»: the export files (years of listening; where to get
 /// them is in the ⓘ) and the YouTube Music library's songs.
 fn imports(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
-    group(ui, "Импорт истории");
+    let t = i18n::settings_tabs();
+    group(ui, t.g_import_history);
     row(ui, Id::ImportFiles, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if ui.add(Button::new("Папка…").icon(Icon::Folder).style(Style::Tonal).id_salt("import-dir")).clicked() {
-                super::super::dialogs::folder(|d| d.set_title("Папка с выгрузкой Spotify или Google Takeout"), Command::ImportExportFiles, out);
+            if ui.add(Button::new(t.folder_btn).icon(Icon::Folder).style(Style::Tonal).id_salt("import-dir")).clicked() {
+                super::super::dialogs::folder(|d| d.set_title(t.import_dir_title), Command::ImportExportFiles, out);
             }
             if ui.add(Button::new(".zip…").icon(Icon::UploadFile).style(Style::Outlined).id_salt("import-zip")).clicked() {
                 super::super::dialogs::file(
-                    |d| d.set_title("Архив выгрузки Spotify или Google Takeout").add_filter("Архив", &["zip"]),
+                    |d| d.set_title(t.import_zip_title).add_filter(t.archive_filter, &["zip"]),
                     Command::ImportExportFiles,
                     out,
                 );
@@ -885,7 +903,7 @@ pub(super) fn copy_button(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::De
     if fresh {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
     }
-    let b = Button::new(if fresh { "Скопировано" } else { "Копировать" })
+    let b = Button::new(if fresh { i18n::settings_tabs().copied } else { i18n::common().copy })
         .icon(if fresh { Icon::Check } else { Icon::ContentCopy })
         .style(Style::Text)
         .size(Size::S)
