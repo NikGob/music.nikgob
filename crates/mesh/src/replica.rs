@@ -29,7 +29,11 @@
 //! Title.ext`, a master in the masters folder), only in folders inside
 //! them, never over another file, checked again after a copy across disks,
 //! and becomes this device's own (a source, a master row, a `replica` row).
-//! The sending device writes nothing.
+//! The sending device writes nothing. What the plan gives the device and
+//! what of it it holds (bytes) goes out in its presence
+//! ([`crate::presence::Presence::copy`]): the cards show the device's own
+//! word; the owner's computer counts only for a build that does not tell
+//! it.
 //!
 //! **Copies of this computer's masters** (a device with a window): every
 //! [`AUDIT_EVERY`] each owner device online is asked which of this
@@ -51,7 +55,7 @@ use nikgob_core::model::{Codec, Source, SourceKind};
 use nikgob_library::Library;
 use nikgob_core::model::TrackId;
 use nikgob_library::replica::{CheckAnswer, CheckAsk, Held, HeldFile, Keep, MasterItem, MastersPage, Offer, Want, best_offers, held_satisfies, plan_tracks};
-use nikgob_view::{Command, MeshProfile, MeshScope, MeshTransfer};
+use nikgob_view::{Command, MeshCopy, MeshProfile, MeshScope, MeshTransfer};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -152,6 +156,9 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 pub(crate) struct ReplicaShared {
     /// This device's pull now (none: nothing to pull).
     transfer: Mutex<Option<MeshTransfer>>,
+    /// What this device's plan gives it and what of it it holds (none: no
+    /// such plan).
+    copy: Mutex<Option<MeshCopy>>,
     /// The devices whose pulls the owner paused here (this one's id: its
     /// own).
     paused: Mutex<HashSet<String>>,
@@ -174,6 +181,10 @@ impl ReplicaShared {
 
     pub(crate) fn transfer(&self) -> Option<MeshTransfer> {
         *self.transfer.lock()
+    }
+
+    pub(crate) fn copy(&self) -> Option<MeshCopy> {
+        *self.copy.lock()
     }
 
     pub(crate) fn pause_list(&self) -> Vec<String> {
@@ -411,6 +422,8 @@ struct Puller {
     /// For the speed: the bytes and the time of the last turn.
     last: Option<(u64, Instant)>,
     speed: f64,
+    /// What its plan gives it and what of it it holds (none: no plan).
+    copy: Option<MeshCopy>,
 }
 
 impl Puller {
@@ -863,13 +876,59 @@ fn masters_bytes(masters: &[(String, u64)], verified: &HashSet<String>) -> (u64,
     })
 }
 
+/// What the songs' part of this device's plan gives it and what of them it
+/// holds, in bytes: the best file of every track the devices it pulls from
+/// offer (`keep`: all of them) and, of those bytes, the files it holds —
+/// `held` its checked files, a better quality satisfying as
+/// [`plan_tracks`] has it. None: «Избранное»'s cap is another measure.
+fn songs_progress(keep: &Keep, offers: &[Offer], held: &HashMap<TrackId, Vec<HeldFile>>) -> Option<(u64, u64)> {
+    if !matches!(keep, Keep::All) {
+        return None;
+    }
+    // The size of the planned file of a track, told by any device that has
+    // that very file (`want_of` takes the largest of them).
+    let mut sizes: HashMap<(TrackId, &str), u64> = HashMap::new();
+    for o in offers {
+        let n = sizes.entry((o.track_id, o.file_hash.as_str())).or_default();
+        *n = (*n).max(o.size);
+    }
+    let none: Vec<HeldFile> = Vec::new();
+    let mut done = 0u64;
+    let mut goal = 0u64;
+    for best in best_offers(offers).into_values() {
+        let size = sizes.get(&(best.track_id, best.file_hash.as_str())).copied().unwrap_or(best.size);
+        goal = goal.saturating_add(size);
+        if held_satisfies(&best, held.get(&best.track_id).unwrap_or(&none)) {
+            done = done.saturating_add(size);
+        }
+    }
+    Some((done, goal))
+}
+
+/// What the masters' part of this device's plan gives it and what of them
+/// it holds, in bytes: every master the devices it pulls from list
+/// (`lists`: a file shared by several once) and, of those bytes, the
+/// masters whose files it holds verified (`held`).
+fn masters_progress(lists: &HashMap<String, (Instant, Vec<MasterItem>)>, held: &HashSet<String>) -> (u64, u64) {
+    let mut sizes: BTreeMap<&str, u64> = BTreeMap::new();
+    for list in lists.values() {
+        for m in list {
+            let n = sizes.entry(m.hash.as_str()).or_default();
+            *n = (*n).max(m.size);
+        }
+    }
+    sizes.into_iter().fold((0u64, 0u64), |(done, goal), (hash, size)| {
+        (goal.saturating_add(size), if held.contains(hash) { done.saturating_add(size) } else { done })
+    })
+}
+
 /// What device `target` (profile `profile`) is to hold of this computer's
 /// music and how much of it it holds, in bytes: the planned file of every
 /// track (`peers`: the devices it pulls from, itself not among them) and,
 /// with «Полная копия», every master. Its holdings are what its catalog
 /// tells (`node_file` rows, synced here) and its `replica` rows for the
 /// masters. None: no such plan, or nothing counted.
-pub(crate) fn copy_stats(lib: &Library, target: &str, profile: MeshProfile, peers: &[String]) -> nikgob_library::Result<Option<(u64, u64)>> {
+pub(crate) fn copy_stats(lib: &Library, target: &str, profile: MeshProfile, peers: &[String]) -> nikgob_library::Result<Option<MeshCopy>> {
     let keep = match profile {
         MeshProfile::Full | MeshProfile::Library => Keep::All,
         _ => return Ok(None),
@@ -880,7 +939,7 @@ pub(crate) fn copy_stats(lib: &Library, target: &str, profile: MeshProfile, peer
         done = done.saturating_add(held);
         goal = goal.saturating_add(masters);
     }
-    Ok((goal > 0).then_some((done, goal)))
+    Ok((goal > 0).then_some(MeshCopy { done, goal }))
 }
 
 /// A new plan: what `a` wants and this device lacks.
@@ -896,8 +955,8 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, dirs: &Dirs, a: &Assigned, peer
             }
         }
     };
-    let songs = match ground {
-        None => Vec::new(),
+    let (songs, songs_seen) = match ground {
+        None => (Vec::new(), None),
         Some(mut g) => {
             // «Избранное» charges each file with its real size: one no
             // device told is asked for it first, the sizes learned kept
@@ -918,8 +977,15 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, dirs: &Dirs, a: &Assigned, peer
                 tokio::time::sleep(PACE).await;
             }
             learn(&mut g.offers, &st.sizes);
-            match tokio::task::spawn_blocking(move || plan_tracks(&g.keep, g.offers, &g.held, &g.pending)).await {
-                Ok(w) => w,
+            // What the plan gives this device and what of it it holds, as
+            // its own disk tells (the cards' numbers).
+            match tokio::task::spawn_blocking(move || {
+                let seen = songs_progress(&g.keep, &g.offers, &g.held);
+                (plan_tracks(&g.keep, g.offers, &g.held, &g.pending), seen)
+            })
+            .await
+            {
+                Ok((w, seen)) => (w, seen),
                 Err(e) => {
                     log::warn!("replica: the songs to keep not worked out: {e}");
                     st.planned_at = Some(Instant::now());
@@ -929,6 +995,7 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, dirs: &Dirs, a: &Assigned, peer
         }
     };
     let mut jobs: Vec<Job> = songs.into_iter().map(Job::Track).collect();
+    let mut masters_seen = (0u64, 0u64);
     if a.profile == MeshProfile::Full {
         for peer in peers {
             let fresh = st.masters.get(peer).is_some_and(|(at, _)| at.elapsed() < MASTERS_AGAIN);
@@ -944,10 +1011,10 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, dirs: &Dirs, a: &Assigned, peer
         }
         st.masters.retain(|p, _| peers.contains(p));
         // Held, or a file here not read yet (it waits): not pulled.
-        let skip = {
+        let (held, pending) = {
             let (l, m) = (lib.clone(), dirs.masters.clone());
             match blocking(move || masters_on_disk(&l, &m, &mut Rehash::new())).await {
-                Ok((held, pending)) => held.into_iter().chain(pending).collect::<HashSet<String>>(),
+                Ok((held, pending)) => (held, pending),
                 Err(e) => {
                     log::warn!("replica: the masters here not read: {e}");
                     st.planned_at = Some(Instant::now());
@@ -955,6 +1022,8 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, dirs: &Dirs, a: &Assigned, peer
                 }
             }
         };
+        let skip: HashSet<String> = held.iter().chain(pending.iter()).cloned().collect();
+        masters_seen = masters_progress(&st.masters, &held);
         jobs.extend(plan_masters(&st.masters, &skip).into_iter().map(|(item, from)| Job::Master { item, from }));
     }
     jobs.retain(|j| !st.waiting(&j.key()));
@@ -976,6 +1045,10 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, dirs: &Dirs, a: &Assigned, peer
     st.queue = jobs.into();
     st.planned_at = Some(Instant::now());
     st.plan_for = Some(a.clone());
+    st.copy = songs_seen.map(|(done, goal)| MeshCopy {
+        done: done.saturating_add(masters_seen.0),
+        goal: goal.saturating_add(masters_seen.1),
+    });
 }
 
 // ------------------------------------------------------------- the loop
@@ -998,9 +1071,16 @@ pub(crate) async fn run(sh: Arc<Shared>) {
             _ = tick.tick() => {}
             _ = sh.replica.poke.notified() => {}
             Some(done) = tasks.join_next(), if !tasks.is_empty() => match done {
-                Ok((job, _, Ok(bytes))) => {
+                Ok((job, era, Ok(bytes))) => {
                     log::debug!("replica: {} kept ({bytes} bytes)", job.key());
                     st.failed.remove(&job.key());
+                    // The plan's progress moves with each file kept (the
+                    // next plan counts the disk again).
+                    if era == ctl.era.load(Ordering::Relaxed)
+                        && let Some(c) = st.copy.as_mut()
+                    {
+                        c.done = c.done.saturating_add(job.size()).min(c.goal);
+                    }
                 }
                 // A pull of an older plan is dropped with it.
                 Ok((job, era, Err(Failed::Stopped))) => {
@@ -1048,6 +1128,7 @@ fn drop_plan(st: &mut Puller, ctl: &Ctl) {
     st.plan_for = None;
     st.planned_at = None;
     st.cut = false;
+    st.copy = None;
 }
 
 /// One turn: whether this device keeps copies now, a plan when due, the
@@ -1126,7 +1207,8 @@ async fn turn(sh: &Arc<Shared>, lib: &Library, me: &str, ctl: &Arc<Ctl>, st: &mu
     show(sh, st, ctl, tasks, false);
 }
 
-/// The transfer as this device shows it (and tells the others).
+/// The transfer as this device shows it (and tells the others), and what
+/// its plan gives it and what of that it holds.
 fn show(sh: &Shared, st: &mut Puller, ctl: &Ctl, tasks: &JoinSet<Done>, paused: bool) {
     let busy = !st.queue.is_empty() || !tasks.is_empty();
     let now = Instant::now();
@@ -1151,7 +1233,13 @@ fn show(sh: &Shared, st: &mut Puller, ctl: &Ctl, tasks: &JoinSet<Done>, paused: 
         *cur = t;
         changed
     };
-    if changed {
+    let copy_changed = {
+        let mut cur = sh.replica.copy.lock();
+        let changed = *cur != st.copy;
+        *cur = st.copy;
+        changed
+    };
+    if changed || copy_changed {
         sh.notify();
     }
 }
@@ -1764,11 +1852,15 @@ pub(crate) async fn recheck(sh: Arc<Shared>, card: u64, hashes: Vec<String>, nee
 // ------------------------------------------------ what the cards show
 
 /// Counts, now and then, what each device of the ring holds of the files
-/// its plan gives it ([`copy_stats`]), for the map's cards. The ring
-/// holder's word is what a device's profile is; the others have none to
-/// count here.
+/// its plan gives it ([`copy_stats`]), for the map's cards: a fallback for
+/// devices that do not tell it themselves. Only on a device with a window
+/// (where the map is); the ring holder's word is got from its presence
+/// when it is not this device.
 pub(crate) async fn count_copies(sh: Arc<Shared>) {
     let Some(lib) = sh.library.clone() else { return };
+    if sh.headless {
+        return;
+    }
     tokio::time::sleep(COPIES_FIRST).await;
     loop {
         if sh.node.lock().is_some()
@@ -1780,20 +1872,37 @@ pub(crate) async fn count_copies(sh: Arc<Shared>) {
     }
 }
 
+/// What the ring holder gives the devices to store: this device's word
+/// when it holds the ring, else the holder's heard on a link now (none:
+/// the holder is away, and nothing is counted here).
+fn holder_assign(sh: &Shared) -> Option<Vec<Assigned>> {
+    if sh.state.lock().ring_key.is_some() {
+        return Some(sh.presence.borrow().assign.clone());
+    }
+    owner_presences(sh).into_iter().find(|p| p.holder).map(|p| p.assign)
+}
+
 /// One count: every owner device the holder gave a storing profile, what
-/// it holds of its plan and the plan's bytes ([`copy_stats`]).
+/// it holds of its plan and the plan's bytes ([`copy_stats`]) — a fallback
+/// for devices whose build does not tell their progress itself. The files
+/// are the ones this device's owner peers online offer (as the puller
+/// plans from them), this device's own too.
 async fn count_copies_once(sh: &Arc<Shared>, lib: &Library) -> Result<(), String> {
     let me = sh.key.public().to_string();
     let owners: Vec<String> = {
         let s = sh.state.lock();
         s.ring.as_ref().map(|r| r.others().filter(|c| c.scope == MeshScope::Owner).map(|c| c.node.clone()).collect()).unwrap_or_default()
     };
-    let assign = sh.presence.borrow().assign.clone();
-    let mut copies: HashMap<String, (u64, u64)> = HashMap::new();
+    let peers: Vec<String> = std::iter::once(me).chain(owner_peers(sh)).collect();
+    let Some(assign) = holder_assign(sh) else {
+        sh.set_copies(HashMap::new());
+        return Ok(());
+    };
+    let mut copies: HashMap<String, MeshCopy> = HashMap::new();
     for a in assign.iter().filter(|a| owners.contains(&a.node)) {
-        let peers: Vec<String> = std::iter::once(me.clone()).chain(owners.iter().cloned()).filter(|p| *p != a.node).collect();
+        let from: Vec<String> = peers.iter().filter(|p| **p != a.node).cloned().collect();
         let (l, node, profile) = (lib.clone(), a.node.clone(), a.profile);
-        if let Some(c) = blocking(move || copy_stats(&l, &node, profile, &peers)).await? {
+        if let Some(c) = blocking(move || copy_stats(&l, &node, profile, &from)).await? {
             copies.insert(a.node.clone(), c);
         }
     }
@@ -2262,11 +2371,45 @@ mod tests {
         };
         lib.put_master(&master).unwrap();
         let peers = ["pc".to_owned()];
-        assert_eq!(copy_stats(&lib, "pi", MeshProfile::Full, &peers).unwrap(), Some((0, 6_000)), "the plan, nothing held");
+        assert_eq!(copy_stats(&lib, "pi", MeshProfile::Full, &peers).unwrap(), Some(MeshCopy { done: 0, goal: 6_000 }), "the plan, nothing held");
+        lib.put_replica(&Replica { file_hash: "hm".into(), node_id: DeviceId("pi".into()), verified_at: None }).unwrap();
+        assert_eq!(
+            copy_stats(&lib, "pi", MeshProfile::Full, &peers).unwrap(),
+            Some(MeshCopy { done: 0, goal: 6_000 }),
+            "a copy never verified is not held"
+        );
         lib.put_replica(&Replica { file_hash: "hm".into(), node_id: DeviceId("pi".into()), verified_at: Some(1) }).unwrap();
-        assert_eq!(copy_stats(&lib, "pi", MeshProfile::Full, &peers).unwrap(), Some((5_000, 6_000)), "its master");
-        assert_eq!(copy_stats(&lib, "pi", MeshProfile::Library, &peers).unwrap(), Some((0, 1_000)), "no masters");
+        assert_eq!(copy_stats(&lib, "pi", MeshProfile::Full, &peers).unwrap(), Some(MeshCopy { done: 5_000, goal: 6_000 }), "its master");
+        assert_eq!(copy_stats(&lib, "pi", MeshProfile::Library, &peers).unwrap(), Some(MeshCopy { done: 0, goal: 1_000 }), "no masters");
         assert_eq!(copy_stats(&lib, "pi", MeshProfile::SoundOnly, &peers).unwrap(), None, "no plan: the disk's use");
         assert_eq!(copy_stats(&lib, "pi", MeshProfile::Favorites { cap_bytes: 8 << 30 }, &peers).unwrap(), None);
+    }
+
+    /// The device's own numbers: the plan's bytes (every track's best file
+    /// and every master the peers list, once) and, of them, the files its
+    /// checked disk holds — its very hash, or a better quality; a file not
+    /// read yet counts for neither.
+    #[test]
+    fn a_devices_progress_is_its_plan_against_the_files_it_holds() {
+        let (a, b) = (TrackId::new(), TrackId::new());
+        let offers = vec![
+            offer(a, "pc", "ha", 1_000, 70),
+            offer(a, "tv", "ha", 1_000, 70),
+            offer(b, "pc", "hb", 2_000, 50),
+        ];
+        let held: HashMap<TrackId, Vec<HeldFile>> =
+            [(a, vec![HeldFile { track_id: a, file_hash: Some("ha".into()), size: 1_000, quality_score: 70, locator: "a.opus".into() }])].into();
+        assert_eq!(songs_progress(&Keep::All, &offers, &held), Some((1_000, 3_000)), "one track's very file");
+        assert_eq!(songs_progress(&Keep::All, &offers, &HashMap::new()), Some((0, 3_000)));
+        let cap = Keep::Ordered { order: vec![a], cap: 8 << 30 };
+        assert_eq!(songs_progress(&cap, &offers, &held), None, "«Избранное» has its cap to show");
+
+        let now = Instant::now();
+        let item = |h: &str, size: u64| MasterItem { hash: h.into(), codec: "flac".into(), size, tracks: Vec::new() };
+        let lists: HashMap<String, (Instant, Vec<MasterItem>)> =
+            [("pc".to_owned(), (now, vec![item("m1", 4_000), item("m2", 5_000)])), ("tv".to_owned(), (now, vec![item("m2", 5_000)]))].into();
+        let verified: HashSet<String> = ["m1".to_owned()].into();
+        assert_eq!(masters_progress(&lists, &verified), (4_000, 9_000), "each master once; only the one held");
+        assert_eq!(masters_progress(&lists, &HashSet::new()), (0, 9_000));
     }
 }

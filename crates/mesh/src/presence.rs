@@ -4,7 +4,7 @@
 //! its copies of the library come along; the ring holder also what each
 //! device is to store, and any device whose copies the owner paused there.
 
-use nikgob_view::{MeshKind, MeshPlaying, MeshProfile, MeshScope, MeshStorage, MeshTransfer, PlaylistId, Status, TrackRow, ViewState};
+use nikgob_view::{MeshCopy, MeshKind, MeshPlaying, MeshProfile, MeshScope, MeshStorage, MeshTransfer, PlaylistId, Status, TrackRow, ViewState};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -13,6 +13,10 @@ pub struct Presence {
     pub kind: MeshKind,
     pub version: String,
     pub storage: Option<MeshStorage>,
+    /// What this device's replica plan gives it and how much of that it
+    /// holds now (none: it keeps no copies, or has no plan yet).
+    #[serde(default)]
+    pub copy: Option<MeshCopy>,
     pub playing: Option<MeshPlaying>,
     /// This device pulling the library's files (none: nothing to pull).
     #[serde(default)]
@@ -106,7 +110,7 @@ pub fn of_view(st: &ViewState, name: &str, kind: MeshKind, version: &str, now_ms
     } else {
         Vec::new()
     };
-    Presence { name: name.to_owned(), kind, version: version.to_owned(), storage, playing, transfer: None, holder, assign, pause: Vec::new() }
+    Presence { name: name.to_owned(), kind, version: version.to_owned(), storage, copy: None, playing, transfer: None, holder, assign, pause: Vec::new() }
 }
 
 /// Whether a transfer changed enough to tell at once: begun or ended, its
@@ -133,7 +137,7 @@ pub fn position_at(p: &MeshPlaying, now_ms: i64) -> i64 {
 /// Whether `new` says something `old` does not (the position moving on
 /// with its clock is nothing new).
 pub fn differs(old: &Presence, new: &Presence) -> bool {
-    if old.name != new.name || old.kind != new.kind || old.version != new.version || old.storage != new.storage {
+    if old.name != new.name || old.kind != new.kind || old.version != new.version || old.storage != new.storage || old.copy != new.copy {
         return true;
     }
     if old.holder != new.holder || old.assign != new.assign || old.pause != new.pause || transfer_differs(&old.transfer, &new.transfer) {
@@ -249,7 +253,19 @@ mod tests {
         let back: Presence = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back, p);
         let old: Presence = serde_json::from_str(r#"{"name":"Pi","kind":"pi","version":"0.0.4","storage":null,"playing":null}"#).unwrap();
-        assert!(old.assign.is_empty() && old.transfer.is_none(), "a device of an older version");
+        assert!(old.assign.is_empty() && old.transfer.is_none() && old.copy.is_none(), "a device of an older version");
+    }
+
+    /// What a device's plan gives it and how much of it it holds goes out
+    /// with its presence; a presence without it (an older build) still parses.
+    #[test]
+    fn a_devices_plan_progress_survives_json() {
+        let p = Presence { copy: Some(MeshCopy { done: 14 << 30, goal: 16 << 30 }), ..Presence::default() };
+        let back: Presence = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.copy, Some(MeshCopy { done: 14 << 30, goal: 16 << 30 }));
+        let old: Presence = serde_json::from_str(r#"{"name":"Pi","kind":"pi","version":"0.0.4","storage":null,"playing":null}"#).unwrap();
+        assert_eq!(old.copy, None, "a device of an older version");
+        assert!(differs(&Presence::default(), &p), "the progress is news");
     }
 
     #[test]

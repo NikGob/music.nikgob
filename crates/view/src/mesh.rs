@@ -188,6 +188,18 @@ pub struct MeshStorage {
     pub free: u64,
 }
 
+/// What a device's replica plan gives it and how much of it it holds: its
+/// own word in its presence (the PC falls back to counting for devices
+/// that do not tell it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeshCopy {
+    /// Bytes of the plan it holds, verified.
+    pub done: u64,
+    /// Bytes its plan gives it: its songs and, with «Полная копия», the
+    /// masters.
+    pub goal: u64,
+}
+
 /// What a device plays, with its clock: the position is `position_ms` at
 /// `at_ms` (that device's unix ms) moving at `rate` (0 while paused).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -246,11 +258,11 @@ pub struct MeshNodeView {
     pub profile: MeshProfile,
     pub transfer: Option<MeshTransfer>,
     /// What the replica plan gives this device of this computer's music
-    /// and how much of it the device holds (bytes: done, goal), counted
-    /// here: the card's bar and line. None: no such plan (the profile
-    /// keeps no files), or not counted yet — the card falls back to the
-    /// device's disk.
-    pub copy: Option<(u64, u64)>,
+    /// and how much of it the device holds (bytes: done, goal). This
+    /// device's own word when its build tells it; until then, counted
+    /// here. None: no such plan (the profile keeps no files), or not
+    /// counted yet — the card falls back to the device's disk.
+    pub copy: Option<MeshCopy>,
     /// «Любимые» and the playlists it keeps with «Избранное» (chosen here).
     pub pins: MeshPins,
     /// The library's sync with it.

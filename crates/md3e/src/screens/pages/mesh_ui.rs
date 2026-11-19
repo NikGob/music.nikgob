@@ -202,10 +202,10 @@ pub(crate) fn transfer_line(t: &MeshTransfer) -> String {
     }
 }
 
-/// The disk's goal for a device of profile `p` — the card's fallback until
-/// the plan's own numbers are counted: all of this computer's music with
-/// «Полная копия», the tracks without the originals with «Библиотека»
-/// (none: no such goal, or this computer's not counted yet).
+/// The disk's goal for a device of profile `p` — the card's fallback while
+/// no plan's numbers are there (an older device): all of this computer's
+/// music with «Полная копия», the tracks without the originals with
+/// «Библиотека» (none: no such goal, or this computer's not counted yet).
 pub(crate) fn copy_goal(p: MeshProfile, here: &StorageView) -> Option<u64> {
     if !here.known {
         return None;
@@ -219,20 +219,30 @@ pub(crate) fn copy_goal(p: MeshProfile, here: &StorageView) -> Option<u64> {
 }
 
 /// A device's bar and line on the map: of a full copy or the library, how
-/// much of its plan's files it holds («14 из 27,6 ГБ», the whole once it
-/// is there); else while files come, how far they got; else what it
-/// holds. A nearly full disk says so before anything.
+/// much of its plan's files it holds («14 из 27,6 ГБ») — the plan's own
+/// numbers whenever there are any, so 98 of 100 is said as it is and the
+/// whole goal alone gives the storage line; else while files come, how far
+/// they got; else what it holds. A nearly full disk says so before
+/// anything.
 pub(crate) fn node_bar_and_line(n: &MeshNodeView, here: &StorageView) -> (Option<(f32, f32)>, Option<(String, bool)>) {
     let line = storage_line(n);
     if line.as_ref().is_some_and(|(_, error)| *error) {
         return (bar_parts(n), line);
     }
-    // The plan's numbers where this computer counted them (what the device
-    // has beyond its plan and what it lacks, the disk's use counts neither
-    // right); the disk's use against this computer's music until then.
-    let numbers = n.copy.filter(|(_, goal)| *goal > 0).or_else(|| Some((n.storage?.used, copy_goal(n.profile, here)?)));
-    if let Some((done, goal)) = numbers {
-        // Within a few per cent it is there (sizes counted at two ends).
+    // The plan's numbers (the device's own word, or this computer's count
+    // of it): the whole goal is there when none is left, and the disk says.
+    if let Some(c) = n.copy {
+        if c.goal == 0 || c.done >= c.goal {
+            return (bar_parts(n), line);
+        }
+        let t = MeshTransfer { done: c.done, total: c.goal, paused: false, speed: 0 };
+        let f = (c.done as f64 / c.goal as f64).clamp(0.0, 1.0) as f32;
+        return (Some((f, 0.0)), Some((transfer_line(&t), false)));
+    }
+    // No plan's numbers (a device of an older build none was counted for):
+    // the disk's use against this computer's music, as before — sizes
+    // counted at two ends, so within a few per cent it is there.
+    if let Some((done, goal)) = n.storage.and_then(|st| copy_goal(n.profile, here).map(|goal| (st.used, goal))) {
         if done.saturating_mul(100) < goal.saturating_mul(98) {
             let t = MeshTransfer { done, total: goal, paused: false, speed: 0 };
             let f = (done as f64 / goal as f64).clamp(0.0, 1.0) as f32;
@@ -619,7 +629,7 @@ fn forget_text(originals: Option<u64>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nikgob_view::{MeshStorage, MeshPlaying};
+    use nikgob_view::{MeshCopy, MeshPlaying, MeshStorage};
 
     use super::*;
 
@@ -681,23 +691,32 @@ mod tests {
         assert_eq!(node_bar_and_line(&n, &here).1, Some(("16,2 ГБ".to_owned(), false)), "all there: what it holds");
     }
 
-    /// The plan's numbers, once this computer counted them, win over the
-    /// disk's use: files the device has beyond its plan and the ones it
-    /// lacks are neither counted nor missed.
+    /// The plan's numbers, once there are any, win over the disk's use:
+    /// files the device has beyond its plan and the ones it lacks are
+    /// neither counted nor missed, and a plan nearly done is said as it is.
     #[test]
     fn the_plans_numbers_win_over_the_disks_use() {
         let none = StorageView::default();
         let mut n = MeshNodeView {
             profile: MeshProfile::Full,
             storage: Some(MeshStorage { used: 15 * GB, free: 100 * GB }),
-            copy: Some((14 * GB, 16 * GB)),
+            copy: Some(MeshCopy { done: 14 * GB, goal: 16 * GB }),
             ..MeshNodeView::default()
         };
         let (bar, line) = node_bar_and_line(&n, &none);
         assert_eq!(line, Some(("14 из 16 ГБ".to_owned(), false)));
         assert!(bar.is_some_and(|(f, _)| (f - 14.0 / 16.0).abs() < 0.001), "{bar:?}");
+        // 98 and 99 of 100 are not «all there»: the plan's numbers stay,
+        // whatever the disk holds.
+        n.copy = Some(MeshCopy { done: 98 * GB, goal: 100 * GB });
+        n.storage = Some(MeshStorage { used: 150 * GB, free: 100 * GB });
+        let (bar, line) = node_bar_and_line(&n, &none);
+        assert_eq!(line, Some(("98 из 100 ГБ".to_owned(), false)));
+        assert!(bar.is_some_and(|(f, _)| (f - 0.98).abs() < 0.001), "{bar:?}");
+        n.copy = Some(MeshCopy { done: 99 * GB + GB / 2, goal: 100 * GB });
+        assert_eq!(node_bar_and_line(&n, &none).1, Some(("99,5 из 100 ГБ".to_owned(), false)));
         // There: the disk's line, as before.
-        n.copy = Some((16 * GB, 16 * GB));
+        n.copy = Some(MeshCopy { done: 100 * GB, goal: 100 * GB });
         n.storage = Some(MeshStorage { used: 16 * GB + GB / 2, free: 100 * GB });
         let (bar, line) = node_bar_and_line(&n, &none);
         assert_eq!(line, Some(("16,5 ГБ".to_owned(), false)));
@@ -706,6 +725,9 @@ mod tests {
         // still says, and over its goal it is all there.
         n.copy = None;
         let here = StorageView { known: true, library: 4 * GB, masters: 2 * GB, disks: Vec::new() };
+        assert_eq!(node_bar_and_line(&n, &here).1, Some(("16,5 ГБ".to_owned(), false)));
+        // A device's own word of an empty plan is no disk comparison.
+        n.copy = Some(MeshCopy { done: 0, goal: 0 });
         assert_eq!(node_bar_and_line(&n, &here).1, Some(("16,5 ГБ".to_owned(), false)));
     }
 

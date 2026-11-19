@@ -15,7 +15,7 @@ use nikgob_api::LocalApi;
 use nikgob_runtime::RuntimeHandle;
 use nikgob_core::i18n::mesh::fmt_open_net_in;
 use nikgob_core::i18n::{Locale, locale, mesh, mesh_in};
-use nikgob_view::{Command, MeshInvite, MeshKind, MeshNearbyView, MeshNodeView, MeshPairing, MeshScope, MeshSnapshot, MeshSnapshotNode};
+use nikgob_view::{Command, MeshCopy, MeshInvite, MeshKind, MeshNearbyView, MeshNodeView, MeshPairing, MeshScope, MeshSnapshot, MeshSnapshotNode};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
@@ -215,9 +215,10 @@ pub(crate) struct Shared {
     library: Option<nikgob_library::Library>,
     /// This device's pull of the library's files and the pauses asked here.
     replica: replica::ReplicaShared,
-    /// What each device holds of the files the replica plan gives it
-    /// (bytes done, bytes planned), counted by [`replica::count_copies`].
-    copies: Mutex<HashMap<String, (u64, u64)>>,
+    /// What each device holds of the files the replica plan gives it, here
+    /// for the devices that do not tell it themselves, counted by
+    /// [`replica::count_copies`].
+    copies: Mutex<HashMap<String, MeshCopy>>,
 }
 
 /// Binds an endpoint with `key`: LAN only, every ALPN of the mesh; on
@@ -429,7 +430,7 @@ impl Shared {
 
     /// The map's numbers of what each device holds of its plan: kept for
     /// the snapshot, the runtime told when they change.
-    fn set_copies(&self, copies: HashMap<String, (u64, u64)>) {
+    fn set_copies(&self, copies: HashMap<String, MeshCopy>) {
         let changed = {
             let mut c = self.copies.lock();
             if *c == copies {
@@ -774,10 +775,11 @@ impl Shared {
             let p = presence::of_view(&st, &name, kind, &self.version, now_ms());
             (st.mesh.enabled, name, known, p)
         };
-        // The copies: this device's pull, and the devices whose pulls the
-        // owner paused here.
+        // The copies: this device's pull, what its own plan gives it and
+        // holds, and the devices whose pulls the owner paused here.
         let mut p = p;
         p.transfer = self.replica.transfer();
+        p.copy = self.replica.copy();
         p.pause = self.replica.pause_list();
         let renamed = {
             let mut s = self.state.lock();
@@ -931,7 +933,9 @@ impl Shared {
                 storage: pres.and_then(|p| p.storage),
                 playing: if online { pres.and_then(|p| p.playing.clone()) } else { None },
                 transfer: if online { pres.and_then(|p| p.transfer) } else { None },
-                copy: copies.get(&c.node).copied(),
+                // What the device says of its plan wins; the count here is
+                // for its older builds.
+                copy: pres.and_then(|p| p.copy).or_else(|| copies.get(&c.node).copied()),
                 ..MeshNodeView::default()
             };
             nodes.push(MeshSnapshotNode { view, cert: serde_json::to_string(&c).unwrap_or_default() });
