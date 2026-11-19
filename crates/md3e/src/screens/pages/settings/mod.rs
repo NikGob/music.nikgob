@@ -30,6 +30,7 @@ mod services;
 mod system;
 
 use egui::{Align2, Key, Modifiers, Rangef, Rect, Sense, Ui, UiBuilder, Vec2, emath::GuiRounding as _, pos2, vec2};
+use nikgob_core::i18n;
 use nikgob_view::{Command, CoverShape, PrefPatch, Prefs, ViewState};
 
 pub(crate) use net::{NetState, ago, code_block, lan_ip};
@@ -532,7 +533,7 @@ fn header(ui: &mut Ui, deep: bool) -> Option<bool> {
     let w = ui.available_width();
     let h = Size::S.height();
     let (line, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
-    ui.painter().text(line.left_center(), Align2::LEFT_CENTER, "Настройки", TypeRole::HeadlineMedium.font_id(), s.on_surface);
+    ui.painter().text(line.left_center(), Align2::LEFT_CENTER, i18n::nav().settings, TypeRole::HeadlineMedium.font_id(), s.on_surface);
     let at = if w < toggle_w + 220.0 {
         ui.add_space(8.0);
         let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
@@ -541,7 +542,9 @@ fn header(ui: &mut Ui, deep: bool) -> Option<bool> {
         Rect::from_min_size(pos2(line.right() - toggle_w, line.center().y - h * 0.5), vec2(toggle_w, h))
     };
     let mut cui = ui.new_child(UiBuilder::new().max_rect(at).id_salt("settings-mode"));
-    let (pick, rects) = connected(&mut cui, egui::Id::new("set-mode"), &["Просто", "Подробно"], usize::from(deep), &[]);
+    let levels = i18n::settings();
+    let modes = [levels.level_simple, levels.level_deep];
+    let (pick, rects) = connected(&mut cui, egui::Id::new("set-mode"), &modes, usize::from(deep), &[]);
     if let (Some(a), Some(b)) = (rects.first(), rects.last()) {
         let measured = b.right() - a.left();
         if (measured - toggle_w).abs() > 0.5 {
@@ -636,8 +639,7 @@ fn recs_patches(before: &Prefs, p: &Prefs) -> Vec<PrefPatch> {
 
 /// «317 МБ», «1,1 ГБ».
 fn size_label(bytes: u64) -> String {
-    let mb = bytes as f64 / 1_048_576.0;
-    if mb >= 1000.0 { format!("{:.1} ГБ", mb / 1024.0).replace('.', ",") } else { format!("{mb:.0} МБ") }
+    i18n::settings_tabs::fmt_size(bytes)
 }
 
 /// Commands from list items' trailing closures (they cannot borrow `out`).
@@ -724,7 +726,7 @@ mod tests {
         let row = deep.iter().find(|r| r.id == Id::TrackMenu).expect("the row");
         assert_eq!((row.label.as_str(), row.group.as_str()), ("Меню трека", "Окно"));
         assert!(!drawn(&ctx, &state, settings_help::TAB_LOOK, false, 1280.0).iter().any(|r| r.id == Id::TrackMenu));
-        assert_eq!(look::TRACK_MENU_PLACES.len(), nikgob_view::TrackMenuPlace::ALL.len());
+        assert_eq!(look::track_menu_places().len(), nikgob_view::TrackMenuPlace::ALL.len());
         let names: std::collections::BTreeSet<&str> = nikgob_view::TrackMenuItem::ALL.iter().map(|i| i.label()).collect();
         assert_eq!(names.len(), nikgob_view::TrackMenuItem::ALL.len());
     }

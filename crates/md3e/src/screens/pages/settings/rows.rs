@@ -16,6 +16,7 @@
 //! the ⓘ cards.
 
 use egui::{Sense, Stroke, Ui, vec2};
+use nikgob_core::i18n::{self, PluralForms};
 use nikgob_view::{PrefPatch, Prefs};
 
 use super::super::settings_help::{self, Level, SettingId as Id};
@@ -301,7 +302,7 @@ fn note_label(ui: &mut Ui, note: Note<'_>) {
 /// «Бета» after a row's label: a 16 dp outlined label-small mark.
 fn beta_mark(ui: &mut Ui) {
     let s = Theme::get(ui.ctx()).scheme;
-    let galley = ui.painter().layout_no_wrap("Бета".to_owned(), TypeRole::LabelSmall.font_id(), s.tertiary);
+    let galley = ui.painter().layout_no_wrap(i18n::settings_tabs().beta.to_owned(), TypeRole::LabelSmall.font_id(), s.tertiary);
     let size = vec2(galley.size().x + 12.0, 16.0);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter();
@@ -522,17 +523,21 @@ pub(crate) struct Num {
     plus: bool,
     /// What zero reads as, when it means «none» (no limit).
     zero: Option<&'static str>,
+    /// A share shown in percent (the suffix comes from the locale's table).
+    pct: bool,
+    /// A countable unit, pluralized by the locale's rule (days).
+    unit: Option<PluralForms>,
 }
 
 impl Num {
     /// `lo..=hi` in steps of `step`, shown with `dec` decimals and `suffix`.
     pub(crate) const fn new(lo: f32, hi: f32, step: f32, dec: usize, suffix: &'static str) -> Self {
-        Self { lo, hi, step, mul: 1.0, dec, suffix, plus: false, zero: None }
+        Self { lo, hi, step, mul: 1.0, dec, suffix, plus: false, zero: None, pct: false, unit: None }
     }
 
     /// A share `lo..=hi` (1 = 100 %), in percent.
     pub(crate) const fn pct(lo: f32, hi: f32, step: f32) -> Self {
-        Self { lo, hi, step, mul: 100.0, dec: 0, suffix: " %", plus: false, zero: None }
+        Self { lo, hi, step, mul: 100.0, dec: 0, suffix: "", plus: false, zero: None, pct: true, unit: None }
     }
 
     pub(crate) const fn signed(mut self) -> Self {
@@ -552,6 +557,12 @@ impl Num {
         self
     }
 
+    /// The value reads as a count of `unit` («5 дн.» / «5 days»).
+    pub(crate) const fn unit(mut self, unit: PluralForms) -> Self {
+        self.unit = Some(unit);
+        self
+    }
+
     /// On a step, inside the range.
     pub(crate) fn snap(&self, v: f32) -> f32 {
         ((v / self.step).round() * self.step).clamp(self.lo, self.hi)
@@ -567,6 +578,12 @@ impl Num {
     }
 
     pub(crate) fn fmt(&self, v: f32) -> String {
+        self.fmt_in(i18n::locale(), v)
+    }
+
+    /// The value in `loc`: the decimal separator, the percent suffix and the
+    /// plural unit all come from the locale's table.
+    pub(crate) fn fmt_in(&self, loc: i18n::Locale, v: f32) -> String {
         let v = self.snap(v);
         if let Some(z) = self.zero
             && v.abs() < self.step * 0.5
@@ -581,7 +598,13 @@ impl Num {
         if self.plus && !t.starts_with('-') {
             t.insert(0, '+');
         }
-        format!("{}{}", t.replace('.', ","), self.suffix)
+        let t = t.replace('.', i18n::settings_tabs::decimal_point_in(loc));
+        if let Some(u) = self.unit {
+            let n = (v * self.mul).round().max(0.0) as u64;
+            return format!("{} {}", t, i18n::plural_forms(loc, n, u));
+        }
+        let suffix = if self.pct { i18n::settings_tabs_in(loc).suffix_pct } else { self.suffix };
+        format!("{t}{suffix}")
     }
 
 }
@@ -672,11 +695,7 @@ fn speed_step(raw: f32) -> f32 {
 
 /// «без лимита», «500 КиБ/с», «1,5 МиБ/с».
 pub(crate) fn fmt_speed(kbps: u32) -> String {
-    match kbps {
-        0 => "без лимита".to_owned(),
-        k if k < 1024 => format!("{k} КиБ/с"),
-        k => format!("{:.1} МиБ/с", k as f32 / 1024.0).replace('.', ","),
-    }
+    i18n::settings_tabs::fmt_speed(kbps)
 }
 
 /// A speed-limit row: the value under the pointer while dragging, and the

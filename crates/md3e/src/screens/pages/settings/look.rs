@@ -4,6 +4,7 @@
 //! for their groups).
 
 use egui::{Rect, Sense, Ui, vec2};
+use nikgob_core::i18n;
 use nikgob_shapes::paint as shape_paint;
 use nikgob_view::presets::Area;
 use nikgob_view::{self as v, Ambient, BgShapes, Command, CoverShape, HomeSectionSwitch, PrefPatch, Prefs};
@@ -18,7 +19,8 @@ use crate::{
 };
 
 pub(super) fn show(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
-    group(ui, "Тема");
+    let st = i18n::settings_tabs();
+    group(ui, st.g_theme);
     menu(ui, Id::Language, p);
     segments(ui, Id::Theme, p);
     menu(ui, Id::Scheme, p);
@@ -27,11 +29,11 @@ pub(super) fn show(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
     track_screen(ui, p);
     home(ui, p, out);
 
-    group(ui, "Библиотека и альбом");
+    group(ui, st.g_library_album);
     segments(ui, Id::AlbumDate, p);
     segments(ui, Id::LikedAlbumsPlace, p);
 
-    group(ui, "Окно");
+    group(ui, st.g_window);
     // Taken when let go: the window grows or shrinks under the pointer.
     let scale = Num::pct(*v::UI_SCALE_RANGE.start(), *v::UI_SCALE_RANGE.end(), v::UI_SCALE_STEP);
     if let Some(s) = rows::slider_on_release(ui, Id::UiScale, v::ui_scale(p.ui_scale), scale) {
@@ -42,7 +44,7 @@ pub(super) fn show(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
     switch(ui, Id::ReducedMotion, &mut p.reduced_motion);
     switch(ui, Id::Tooltips, &mut p.tooltips);
     track_menu(ui, p);
-    sub(ui, "Панель справа");
+    sub(ui, st.g_right_pane);
     switch(ui, Id::PaneLyrics, &mut p.pane_lyrics);
     switch(ui, Id::PaneInfo, &mut p.pane_info);
 }
@@ -50,19 +52,20 @@ pub(super) fn show(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
 /// «Экран трека», in «Подробно» under its subtitles: Обложка · Кольцо ·
 /// Фон · Полоса и громкость · Управление · Кнопки.
 fn track_screen(ui: &mut Ui, p: &mut Prefs) {
-    group(ui, "Экран трека");
+    let st = i18n::settings_tabs();
+    group(ui, st.g_track_screen);
     // Строго · Живо · Максимум · Свои: while one is under the pointer the
     // rows show what it would give (and keep none of it).
     let mut preview = preset::row(ui, Area::Track, p);
     let p: &mut Prefs = preview.as_mut().unwrap_or(p);
-    sub(ui, "Обложка");
+    sub(ui, st.g_cover);
     segments(ui, Id::CoverShape, p);
     shapes(ui, p);
     switch(ui, Id::CoverSpin, &mut p.cover_spin);
     let spin = p.cover_spin;
     child(ui, !spin, |ui| {
         segments(ui, Id::CoverDir, p);
-        let num = Num::new(*v::COVER_SPIN_RANGE.start(), *v::COVER_SPIN_RANGE.end(), 1.0, 0, " с");
+        let num = Num::new(*v::COVER_SPIN_RANGE.start(), *v::COVER_SPIN_RANGE.end(), 1.0, 0, st.suffix_sec);
         if let Some(s) = rows::slider(ui, Id::CoverSpinSpeed, p.cover_spin_s, num) {
             p.cover_spin_s = s;
         }
@@ -78,22 +81,22 @@ fn track_screen(ui: &mut Ui, p: &mut Prefs) {
     // The square cover has no shape to change.
     dimmed(ui, p.cover_shape == CoverShape::Original, |ui| switch(ui, Id::CoverPauseMorph, &mut p.cover_pause_morph));
 
-    sub(ui, "Кольцо");
+    sub(ui, st.g_ring);
     // Only a shaped cover has a ring.
     let square = p.cover_shape == CoverShape::Original;
     dimmed(ui, square, |ui| switch(ui, Id::Ring, &mut p.ring));
     let ring = p.ring && !square;
     child(ui, !ring, |ui| segments(ui, Id::RingStyle, p));
 
-    sub(ui, "Фон");
+    sub(ui, st.g_background);
     background(ui, p);
 
-    sub(ui, "Полоса и громкость");
+    sub(ui, st.g_progress_volume);
     switch(ui, Id::ProgressWave, &mut p.progress_wave);
     segments(ui, Id::NpVolume, p);
     let pop = p.np_volume_pop && !p.np_volume;
     child(ui, !pop, |ui| {
-        if let Some(v) = rows::slider(ui, Id::NpVolumeHold, p.np_volume_pop_hold, Num::new(0.3, 3.0, 0.1, 1, " с")) {
+        if let Some(v) = rows::slider(ui, Id::NpVolumeHold, p.np_volume_pop_hold, Num::new(0.3, 3.0, 0.1, 1, st.suffix_sec)) {
             p.np_volume_pop_hold = v;
             if !pop {
                 // Tuning the pill turns it on.
@@ -103,19 +106,19 @@ fn track_screen(ui: &mut Ui, p: &mut Prefs) {
         }
     });
 
-    sub(ui, "Управление");
+    sub(ui, st.g_controls);
     switch(ui, Id::CoverClickPause, &mut p.cover_click_pause);
     menu(ui, Id::DblClickShape, p);
     let double = p.dbl_click_shape != 0;
     child(ui, !double, |ui| {
-        if let Some(v) = rows::slider(ui, Id::TapWait, p.np_tap_wait, Num::new(0.0, 0.4, 0.02, 0, " мс").times(1000.0)) {
+        if let Some(v) = rows::slider(ui, Id::TapWait, p.np_tap_wait, Num::new(0.0, 0.4, 0.02, 0, st.suffix_ms).times(1000.0)) {
             p.np_tap_wait = v;
         }
     });
     segments(ui, Id::NpMotion, p);
 
     // Play, previous and next always stay; the keys work whatever is off.
-    sub(ui, "Кнопки");
+    sub(ui, st.g_buttons);
     for b in v::PlayerButton::ALL {
         switch(ui, Id::PlayerButton(b), p.player_buttons.of_mut(b));
     }
@@ -132,7 +135,7 @@ fn shapes(ui: &mut Ui, p: &mut Prefs) {
             item(ui, Id::ShapeRange, |ui| {
                 let mut every = false;
                 let picked = shape_grid(ui, Id::ShapeRange, |c| pool.contains(&c), |ui| {
-                    every = !all && ui.add(Button::new("Все").style(Style::Outlined).id_salt("set-shapes-all")).clicked();
+                    every = !all && ui.add(Button::new(i18n::common().all).style(Style::Outlined).id_salt("set-shapes-all")).clicked();
                 });
                 if every {
                     p.random_shapes.clear();
@@ -215,7 +218,7 @@ fn background(ui: &mut Ui, p: &mut Prefs) {
 
 /// «Главная»: what its mixes are and how they open.
 fn home(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
-    group(ui, "Главная");
+    group(ui, i18n::nav().home);
     home_sections(ui, p);
     switch(ui, Id::MixesProfiles, &mut p.mixes_profiles);
     switch(ui, Id::MixesEverything, &mut p.mixes_everything);
@@ -226,7 +229,7 @@ fn home(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
     if !p.home_hidden_mixes.is_empty() {
         rows::titled(ui, Id::HiddenMixes, |ui| {
             for m in &p.home_hidden_mixes {
-                rows::mark_row(ui, egui::Id::new(("set-unhide-mix", m.key)), &m.title, None, "Вернуть", || {
+                rows::mark_row(ui, egui::Id::new(("set-unhide-mix", m.key)), &m.title, None, i18n::settings_tabs().restore, || {
                     out.push(Command::SetPref(PrefPatch::ShowMix(m.key)));
                 });
             }
@@ -235,16 +238,19 @@ fn home(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
 }
 
 /// The places of «Меню трека», as [`v::TrackMenuPlace::ALL`] has them.
-pub(super) const TRACK_MENU_PLACES: [&str; 3] = ["В меню", "В «Файл»", "Скрыт"];
+pub(super) fn track_menu_places() -> [&'static str; 3] {
+    i18n::settings_tabs::track_menu_places_in(i18n::locale())
+}
 /// The column of the items' names in the list of «Меню трека».
 const TRACK_MENU_NAME_W: f32 = 280.0;
 
 /// «Меню трека»: a row that opens the list of the menu's items, each in
 /// the menu, in «Файл» or hidden, and «Сбросить» under it.
 fn track_menu(ui: &mut Ui, p: &mut Prefs) {
+    let st = i18n::settings_tabs();
     let open_id = egui::Id::new("set-track-menu-open");
     row(ui, Id::TrackMenu, |ui| {
-        if ui.add(Button::new("Настроить").style(Style::Outlined).size(Size::S).id_salt("set-track-menu")).clicked() {
+        if ui.add(Button::new(st.configure).style(Style::Outlined).size(Size::S).id_salt("set-track-menu")).clicked() {
             ui.ctx().data_mut(|d| d.insert_temp(open_id, true));
         }
     });
@@ -253,7 +259,7 @@ fn track_menu(ui: &mut Ui, p: &mut Prefs) {
     }
     let s = Theme::get(ui.ctx()).scheme;
     let mut open = true;
-    let r = Dialog::new("set-track-menu-list", Id::TrackMenu.label()).max_width(640.0).action("Закрыть").show_with(ui.ctx(), &mut open, |ui| {
+    let r = Dialog::new("set-track-menu-list", Id::TrackMenu.label()).max_width(640.0).action(i18n::common().close).show_with(ui.ctx(), &mut open, |ui| {
         egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
             for item in v::TrackMenuItem::ALL {
                 ui.horizontal(|ui| {
@@ -261,7 +267,7 @@ fn track_menu(ui: &mut Ui, p: &mut Prefs) {
                     ui.painter().text(name.left_center(), egui::Align2::LEFT_CENTER, item.label(), TypeRole::BodyLarge.font_id(), s.on_surface);
                     let now = p.track_menu_place(item);
                     let at = v::TrackMenuPlace::ALL.iter().position(|x| *x == now).unwrap_or(0);
-                    let (picked, _) = super::super::connected(ui, egui::Id::new(("set-track-menu-place", item)), &TRACK_MENU_PLACES, at, &[]);
+                    let (picked, _) = super::super::connected(ui, egui::Id::new(("set-track-menu-place", item)), &track_menu_places(), at, &[]);
                     if let Some(i) = picked {
                         p.set_track_menu_place(item, v::TrackMenuPlace::ALL[i.min(v::TrackMenuPlace::ALL.len() - 1)]);
                     }
@@ -269,7 +275,7 @@ fn track_menu(ui: &mut Ui, p: &mut Prefs) {
             }
         });
         ui.add_space(8.0);
-        let reset = Button::new("Сбросить").style(Style::Outlined).size(Size::S).enabled(!p.track_menu.is_empty());
+        let reset = Button::new(i18n::common().reset).style(Style::Outlined).size(Size::S).enabled(!p.track_menu.is_empty());
         if ui.add(reset.id_salt("set-track-menu-reset")).clicked() {
             p.track_menu.clear();
         }
@@ -283,6 +289,7 @@ fn track_menu(ui: &mut Ui, p: &mut Prefs) {
 /// / «Ниже» and its switch. While the row is shown the stage fits the
 /// whole of Главная, so a toggle is visible.
 fn home_sections(ui: &mut Ui, p: &mut Prefs) {
+    let st = i18n::settings_tabs();
     let _ = item(ui, Id::HomeSections, |ui| {
         let s = Theme::get(ui.ctx()).scheme;
         ui.add_space(8.0);
@@ -309,11 +316,11 @@ fn home_sections(ui: &mut Ui, p: &mut Prefs) {
                     let (name, _) = ui.allocate_exact_size(vec2(label_w.max(120.0), 40.0), Sense::hover());
                     let color = if sec.on { s.on_surface } else { s.on_surface_variant };
                     ui.painter().text(name.left_center(), egui::Align2::LEFT_CENTER, sec.key.label(), TypeRole::BodyLarge.font_id(), color);
-                    let up = IconButton::new(Icon::ExpandLess).size(Size::Xs).enabled(i > 0).tooltip("Выше");
+                    let up = IconButton::new(Icon::ExpandLess).size(Size::Xs).enabled(i > 0).tooltip(st.up);
                     if ui.add(up.id_salt(("set-home-up", sec.key))).clicked() && i > 0 {
                         moved = Some((i, i - 1));
                     }
-                    let down = IconButton::new(Icon::ExpandMore).size(Size::Xs).enabled(i + 1 < n).tooltip("Ниже");
+                    let down = IconButton::new(Icon::ExpandMore).size(Size::Xs).enabled(i + 1 < n).tooltip(st.down);
                     if ui.add(down.id_salt(("set-home-down", sec.key))).clicked() && i + 1 < n {
                         moved = Some((i, i + 1));
                     }

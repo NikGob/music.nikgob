@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 
 use egui::{Align, Layout, Rect, Response, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
+use nikgob_core::i18n;
 use nikgob_view::{Command, KeepMasters, MeshKind, MeshPairing, MeshTransfer, MeshView, Route, ViewState};
 
 use super::super::PageState;
@@ -55,7 +56,7 @@ pub(crate) fn spaced_code(code: &str) -> String {
 pub(super) fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) {
     let m = &state.mesh;
     let now = anim::now(ui.ctx());
-    group(ui, "Устройства");
+    group(ui, i18n::settings_tabs().g_devices);
     let on = enabled_shown(&mut pages.net.devices, m, now);
     let mut nav = None;
     {
@@ -174,7 +175,7 @@ fn this_name(m: &MeshView) -> String {
     } else if !m.this.name.is_empty() {
         m.this.name.clone()
     } else {
-        "Этот компьютер".to_owned()
+        i18n::settings_tabs().this_computer.to_owned()
     }
 }
 
@@ -294,17 +295,18 @@ fn transfer_wave(ui: &Ui, rect: Rect, id: egui::Id, transfer: Option<MeshTransfe
 fn actions(ui: &mut Ui, state: &ViewState, on: bool, shared: &mut MeshUi, out: &mut Vec<Command>) -> bool {
     let m = &state.mesh;
     let s = Theme::get(ui.ctx()).scheme;
+    let st = i18n::settings_tabs();
     let mut map = false;
     ui.add_space(12.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        let add = Button::new("Добавить устройство").icon(Icon::Add).style(Style::Tonal).size(Size::S).enabled(m.can_pair()).id_salt("mesh-add-device");
+        let add = Button::new(st.add_device).icon(Icon::Add).style(Style::Tonal).size(Size::S).enabled(m.can_pair()).id_salt("mesh-add-device");
         let r = ui.add(add);
         if r.clicked() {
             add_device::open(ui.ctx(), m, shared, Some(r.rect), AddTab::Connect, out);
         }
         if m.device_count() >= 2 {
-            map = ui.add(Button::new("Карта сети").style(Style::Outlined).size(Size::S).id_salt("mesh-open-map")).clicked();
+            map = ui.add(Button::new(st.network_map).style(Style::Outlined).size(Size::S).id_salt("mesh-open-map")).clicked();
         }
     });
     // What blocks it, in words, and the switch out of it when there is one.
@@ -313,9 +315,9 @@ fn actions(ui: &mut Ui, state: &ViewState, on: bool, shared: &mut MeshUi, out: &
         _ => None,
     };
     let (text, fix): (Option<String>, Option<(&str, Command)>) = if !m.configurable {
-        (Some("Нет файла настроек".to_owned()), None)
+        (Some(st.no_settings_file.to_owned()), None)
     } else if !on {
-        (Some("Связь с устройствами выключена".to_owned()), Some(("Включить", Command::MeshSetEnabled(true))))
+        (Some(st.mesh_off.to_owned()), Some((st.turn_on, Command::MeshSetEnabled(true))))
     } else if let Some(e) = m.error.clone() {
         (Some(e), None)
     } else {
@@ -362,7 +364,7 @@ fn nearby(ui: &mut Ui, m: &MeshView, shared: &mut MeshUi, out: &mut Vec<Command>
             mesh_ui::paint_avatar(ui, pos2(rect.left() + 16.0 + AVATAR * 0.5, rect.center().y), AVATAR, &format!("nearby-{}", d.id), d.kind, Look::default());
             let area = Rect::from_min_max(pos2(rect.left() + 72.0, rect.top()), pos2(rect.right() - 12.0, rect.bottom()));
             let mut child = ui.new_child(UiBuilder::new().max_rect(area).layout(Layout::right_to_left(Align::Center)).id_salt(("mesh-nearby", &d.id)));
-            let b = child.add(Button::new("Подключить").style(Style::Filled).size(Size::S).enabled(can).id_salt(("mesh-connect", &d.id)));
+            let b = child.add(Button::new(i18n::settings_tabs().connect).style(Style::Filled).size(Size::S).enabled(can).id_salt(("mesh-connect", &d.id)));
             if b.clicked() {
                 add_device::open_pair(ui.ctx(), m, shared, Some(b.rect), &d.id, out);
             }
@@ -385,7 +387,7 @@ fn keep_masters_row(ui: &mut Ui, m: &MeshView, mem: &mut DevicesState, now: f64,
         }
     };
     row(ui, Id::MeshKeepMasters, |ui| {
-        let labels = ["Всегда", "После 1 копии", "После 2 копий"];
+        let labels = i18n::settings_tabs::keep_masters_in(i18n::locale());
         let at = KeepMasters::ALL.iter().position(|k| *k == shown).unwrap_or(0);
         if let Some(n) = super::super::connected(ui, egui::Id::new("mesh-keep-masters"), &labels, at, &[]).0
             && n != at

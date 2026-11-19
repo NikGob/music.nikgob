@@ -8,7 +8,7 @@
 //! what was not chosen keeps its value; the library's own filter is never
 //! touched.
 
-use crate::{Prefs, Service};
+use crate::{Locale, Prefs, Service};
 
 /// The first run is shown at this start: it is still pending in the
 /// prefs, and either it was already on screen (`started`: the app quit
@@ -37,14 +37,21 @@ impl Source {
     /// The tiles in their order.
     pub const ALL: [Self; 5] = [Self::Spotify, Self::YouTube, Self::SoundCloud, Self::Folder, Self::LocalOnly];
 
-    pub const fn label(self) -> &'static str {
+    /// The tile's name in `loc`.
+    pub const fn label_in(self, loc: Locale) -> &'static str {
+        let f = nikgob_core::i18n::first_run_in(loc);
         match self {
             Self::Spotify => "Spotify",
             Self::YouTube => "YouTube Music",
             Self::SoundCloud => "SoundCloud",
-            Self::Folder => "Папка на диске",
-            Self::LocalOnly => "Только локальное",
+            Self::Folder => f.source_folder,
+            Self::LocalOnly => f.source_local_only,
         }
+    }
+
+    /// The tile's name in the active process locale.
+    pub fn label(self) -> &'static str {
+        self.label_in(nikgob_core::i18n::locale())
     }
 
     /// The streaming service the tile stands for.
