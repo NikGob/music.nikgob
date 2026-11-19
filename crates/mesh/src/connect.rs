@@ -33,8 +33,8 @@ use std::time::{Duration, Instant, SystemTime};
 use axum::body::Body;
 use futures_util::StreamExt as _;
 use nikgob_api::{Caller, LocalApi};
+use nikgob_core::i18n::{Locale, mesh_in};
 use nikgob_core::model::TrackId;
-use nikgob_runtime::RuntimeHandle;
 use nikgob_view::{
     ApiActor, ApiPreset, Command, ConnectFail, ConnectJob, ConnectReport, RemoteCommand, RemoteLink, ZoneLoaded, ZoneSnapshot, ZoneState,
 };
@@ -140,14 +140,16 @@ pub(crate) fn start(rt: &tokio::runtime::Handle, client: MeshClient, api: Option
     rt.spawn(dispatch(ctx, rx));
 }
 
-/// Russian words for a request to a device that failed.
-fn why(e: &MeshError) -> String {
+/// Words for a request to a device that failed, in `loc` («response» says
+/// them inside a toast).
+fn why(loc: Locale, e: &MeshError) -> String {
     log::debug!("connect: {e}");
+    let s = mesh_in(loc);
     match e {
-        MeshError::Stopped => "Межсеть выключена".to_owned(),
-        MeshError::NotPaired => "устройство не в кольце".to_owned(),
-        MeshError::Unreachable(_) => "устройство недоступно".to_owned(),
-        MeshError::Http(_) => "запрос не прошёл".to_owned(),
+        MeshError::Stopped => s.mesh_off.to_owned(),
+        MeshError::NotPaired => s.ask_not_in_ring.to_owned(),
+        MeshError::Unreachable(_) => s.ask_unreachable.to_owned(),
+        MeshError::Http(_) => s.ask_request_failed.to_owned(),
     }
 }
 
@@ -162,6 +164,11 @@ fn request(method: http::Method, path: &str, json: Option<Vec<u8>>) -> Result<ht
 }
 
 impl Ctx {
+    /// The locale a message to the owner is said in.
+    fn loc(&self) -> Locale {
+        self.runtime.state().prefs.resolved_locale()
+    }
+
     fn report(&self, r: ConnectReport) {
         self.runtime.send(Command::ConnectReport(Box::new(r)));
     }
@@ -186,16 +193,17 @@ impl Ctx {
     /// `req` to the API of `node` (None: this device's, its caller naming
     /// `peer`, the device the files come from); its head within `wait`.
     async fn call(&self, node: Option<&str>, peer: Option<&str>, req: http::Request<Body>, wait: Duration) -> Result<http::Response<Body>, String> {
+        let s = mesh_in(self.loc());
         match node {
             Some(n) => match tokio::time::timeout(wait, self.client.request(n, req)).await {
                 Ok(Ok(r)) => Ok(r),
-                Ok(Err(e)) => Err(why(&e)),
-                Err(_) => Err("устройство не ответило".to_owned()),
+                Ok(Err(e)) => Err(why(self.loc(), &e)),
+                Err(_) => Err(s.ask_no_answer.to_owned()),
             },
             None => {
-                let api = self.api.as_ref().ok_or_else(|| "API этого устройства не запущен".to_owned())?;
+                let api = self.api.as_ref().ok_or_else(|| s.ask_api_down.to_owned())?;
                 let caller = Caller { token_id: format!("connect:{}", peer.unwrap_or("-")), name: "connect".to_owned(), preset: ApiPreset::Full, actor: ApiActor::Owner };
-                tokio::time::timeout(wait, api.call(caller, req)).await.map_err(|_| "плеер не ответил".to_owned())
+                tokio::time::timeout(wait, api.call(caller, req)).await.map_err(|_| s.ask_player_silent.to_owned())
             }
         }
     }
@@ -213,7 +221,7 @@ impl Ctx {
             }
             serde_json::from_slice(&bytes).map_err(|e| e.to_string())
         };
-        tokio::time::timeout(wait, whole).await.unwrap_or_else(|_| Err("устройство не ответило".to_owned()))
+        tokio::time::timeout(wait, whole).await.unwrap_or_else(|_| Err(mesh_in(self.loc()).ask_no_answer.to_owned()))
     }
 
     /// Runs `commands` on `node`'s zone (None: this device's).
@@ -287,7 +295,7 @@ async fn dispatch(ctx: Ctx, mut jobs: mpsc::Receiver<ConnectJob>) {
                 tokio::spawn(async move {
                     let result = match pulls.acquire_owned().await {
                         Ok(_permit) => pull(&c, track, &from).await,
-                        Err(_) => Err("Межсеть выключена".to_owned()),
+                        Err(_) => Err(mesh_in(c.loc()).mesh_off.to_owned()),
                     };
                     pulling.lock().remove(&key);
                     if let Err(e) = &result {
@@ -308,7 +316,7 @@ async fn dispatch(ctx: Ctx, mut jobs: mpsc::Receiver<ConnectJob>) {
             let op = match e {
                 mpsc::error::TrySendError::Full(op) | mpsc::error::TrySendError::Closed(op) => op,
             };
-            if let Some(r) = op.not_run(ConnectFail::NothingDone("слишком много дел сразу".to_owned())) {
+            if let Some(r) = op.not_run(ConnectFail::NothingDone(mesh_in(ctx.loc()).ask_busy_now.to_owned())) {
                 ctx.report(r);
             }
         }
@@ -879,7 +887,7 @@ pub(crate) async fn reuse(done: &Path, hash: &str) -> bool {
 /// Writes `resp`'s body to `part` (after its first `offset` bytes, or over
 /// it when `offset` is 0); how long the part is then.
 pub(crate) async fn receive(resp: http::Response<Body>, part: &Path, offset: u64) -> Result<u64, String> {
-    let io = |e: std::io::Error| format!("кэш: {e}");
+    let io = |e: std::io::Error| format!("cache: {e}");
     let mut file = if offset == 0 {
         tokio::fs::File::create(part).await.map_err(io)?
     } else {
@@ -892,18 +900,18 @@ pub(crate) async fn receive(resp: http::Response<Body>, part: &Path, offset: u64
             Ok(Some(Ok(bytes))) => {
                 len += bytes.len() as u64;
                 if len > FILE_MAX {
-                    return Err("файл слишком большой".to_owned());
+                    return Err("the file is too big".to_owned());
                 }
                 file.write_all(&bytes).await.map_err(io)?;
             }
             Ok(Some(Err(e))) => {
                 file.flush().await.map_err(io)?;
-                return Err(format!("передача оборвалась: {e}"));
+                return Err(format!("the transfer broke off: {e}"));
             }
             Ok(None) => break,
             Err(_) => {
                 file.flush().await.map_err(io)?;
-                return Err("передача остановилась".to_owned());
+                return Err("the transfer stalled".to_owned());
             }
         }
     }
@@ -916,13 +924,13 @@ pub(crate) async fn receive(resp: http::Response<Body>, part: &Path, offset: u64
 /// that does not match is deleted.
 pub(crate) async fn finish(part: &Path, hash: &str, done: &Path) -> Result<(), String> {
     let p = part.to_owned();
-    let sum = tokio::task::spawn_blocking(move || blake3_of(&p)).await.map_err(|e| e.to_string())?.map_err(|e| format!("кэш: {e}"))?;
+    let sum = tokio::task::spawn_blocking(move || blake3_of(&p)).await.map_err(|e| e.to_string())?.map_err(|e| format!("cache: {e}"))?;
     if sum != hash {
         let _ = tokio::fs::remove_file(part).await;
         let _ = tokio::fs::remove_file(part.with_extension("meta")).await;
-        return Err("файл пришёл повреждённым".to_owned());
+        return Err("the file arrived damaged".to_owned());
     }
-    tokio::fs::rename(part, done).await.map_err(|e| format!("кэш: {e}"))?;
+    tokio::fs::rename(part, done).await.map_err(|e| format!("cache: {e}"))?;
     let _ = tokio::fs::remove_file(part.with_extension("meta")).await;
     Ok(())
 }
@@ -931,7 +939,7 @@ pub(crate) async fn finish(part: &Path, hash: &str, done: &Path) -> Result<(), S
 /// there, checked); its path.
 async fn pull(ctx: &Ctx, track: TrackId, from: &str) -> Result<PathBuf, String> {
     let dir = ctx.cache.clone();
-    tokio::fs::create_dir_all(&dir).await.map_err(|e| format!("кэш: {e}"))?;
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| format!("cache: {e}"))?;
     let part = dir.join(format!("{track}.part"));
     let meta = part.with_extension("meta");
     // A part of an earlier fetch goes on where it stopped, if the file
@@ -951,7 +959,7 @@ async fn pull(ctx: &Ctx, track: TrackId, from: &str) -> Result<PathBuf, String> 
         let resp = ctx.call(Some(from), None, req, PULL_HEAD_WAIT).await?;
         let status = resp.status();
         if status == http::StatusCode::NOT_FOUND {
-            return Err("на том устройстве нет файла этой песни".to_owned());
+            return Err("the device has no file of this song".to_owned());
         }
         // The part is no part of the file there, or the answer is not the
         // part asked for: from the start.
@@ -963,9 +971,9 @@ async fn pull(ctx: &Ctx, track: TrackId, from: &str) -> Result<PathBuf, String> 
             continue;
         }
         if !status.is_success() {
-            return Err(format!("ответ {status}"));
+            return Err(format!("answer {status}"));
         }
-        let hash = header(&resp, nikgob_api::HASH_HEADER).and_then(clean_hash).ok_or_else(|| "тот плеер не сказал хэш файла".to_owned())?;
+        let hash = header(&resp, nikgob_api::HASH_HEADER).and_then(clean_hash).ok_or_else(|| "that player did not say the file's hash".to_owned())?;
         let ext = clean_ext(header(&resp, nikgob_api::EXT_HEADER).unwrap_or(""));
         let done = dir.join(format!("{hash}.{ext}"));
         if tokio::fs::try_exists(&done).await.unwrap_or(false) && reuse(&done, &hash).await {
@@ -985,10 +993,10 @@ async fn pull(ctx: &Ctx, track: TrackId, from: &str) -> Result<PathBuf, String> 
         // A whole file sent for a Range: over the part.
         let from_byte = if status == http::StatusCode::PARTIAL_CONTENT { offset } else { 0 };
         if length.is_some_and(|l| l.saturating_add(from_byte) > FILE_MAX) {
-            return Err("файл слишком большой".to_owned());
+            return Err("the file is too big".to_owned());
         }
         if expected.is_none() {
-            tokio::fs::write(&meta, &hash).await.map_err(|e| format!("кэш: {e}"))?;
+            tokio::fs::write(&meta, &hash).await.map_err(|e| format!("cache: {e}"))?;
             expected = Some(hash.clone());
         }
         receive(resp, &part, from_byte).await?;
@@ -1003,7 +1011,7 @@ async fn pull(ctx: &Ctx, track: TrackId, from: &str) -> Result<PathBuf, String> 
         .await;
         return Ok(done);
     }
-    Err("файл на том устройстве всё время меняется".to_owned())
+    Err("the file on that device keeps changing".to_owned())
 }
 
 #[cfg(test)]

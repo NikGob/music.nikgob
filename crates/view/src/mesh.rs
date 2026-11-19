@@ -107,14 +107,15 @@ impl MeshProfile {
         }
     }
 
-    /// The profile chip's word: «Полная копия», «Библиотека», «Избранное»,
-    /// «Только звук».
-    pub const fn label(self) -> &'static str {
+    /// The profile chip's word, in the active locale: «Полная копия»,
+    /// «Библиотека», «Избранное», «Только звук».
+    pub fn label(self) -> &'static str {
+        let s = nikgob_core::i18n::mesh();
         match self {
-            Self::Full => "Полная копия",
-            Self::Library => "Библиотека",
-            Self::Favorites { .. } => "Избранное",
-            Self::SoundOnly => "Только звук",
+            Self::Full => s.profile_full,
+            Self::Library => s.profile_library,
+            Self::Favorites { .. } => s.favorites,
+            Self::SoundOnly => s.profile_sound_only,
         }
     }
 
@@ -313,8 +314,10 @@ pub enum MeshPairing {
     WaitingCode { nearby_id: String },
     /// The exchange runs.
     Working,
-    /// Why it did not pair, in words.
+    /// Why it did not pair, already said in the owner's language.
     Failed(String),
+    /// The code the device showed was wrong: its window shakes, no word.
+    FailedWrongCode,
     /// Paired: the new device's id.
     Done { node_id: String },
 }
@@ -402,14 +405,15 @@ pub struct MeshSnapshot {
     pub error: Option<String>,
 }
 
-/// «Компьютер», «Raspberry Pi»…: a device's kind in words.
+/// «Компьютер», «Raspberry Pi»…: a device's kind in words, in the active locale.
 pub fn kind_label(k: MeshKind) -> &'static str {
+    let s = nikgob_core::i18n::mesh();
     match k {
-        MeshKind::Pc => "Компьютер",
-        MeshKind::Pi => "Raspberry Pi",
-        MeshKind::Phone => "Телефон",
-        MeshKind::Tv => "Телевизор",
-        MeshKind::Server => "Сервер",
+        MeshKind::Pc => s.kind_pc,
+        MeshKind::Pi => s.kind_pi,
+        MeshKind::Phone => s.kind_phone,
+        MeshKind::Tv => s.kind_tv,
+        MeshKind::Server => s.kind_server,
     }
 }
 

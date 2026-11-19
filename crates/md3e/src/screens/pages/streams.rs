@@ -163,18 +163,19 @@ fn track_row(
             routes.push(Route::Stream(StreamPage::Album(id.clone())));
         }
     }
+    let si = nikgob_core::i18n::streams_ui();
     let mut extras: Vec<String> = Vec::new();
     if t.kind == TrackKind::Video {
-        extras.push("клип".into());
+        extras.push(si.video.into());
     }
     // A song filed on another library album says which.
     match (&t.elsewhere, t.has_local) {
-        (Some(a), true) => extras.push(format!("у тебя в «{a}»")),
-        (None, true) => extras.push("у тебя".into()),
+        (Some(a), true) => extras.push(nikgob_core::i18n::streams_ui::fmt_yours_in(nikgob_core::i18n::locale(), a)),
+        (None, true) => extras.push(si.yours.into()),
         _ => {}
     }
     if !plays {
-        extras.push("недоступен".into());
+        extras.push(si.unavailable.into());
     }
     // Two lines: after the artist; one line (an album page): quiet text by
     // the duration, so every row keeps its height.
@@ -201,7 +202,7 @@ fn track_row(
         .trailing(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                menu_resp = Some(ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("st-more", id, i))));
+                menu_resp = Some(ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip(nikgob_core::i18n::common().more).id_salt(("st-more", id, i))));
                 if let Some(st) = wished
                     && widgets::wish_mark(ui, st, state.prefs.prowlarr_configured, ("st-wish", id, i)).clicked()
                 {
@@ -284,7 +285,7 @@ pub(crate) fn stream_track_rows(
         find_song: None,
         wrong_file: false,
         dislike: super::dislike_item(t.track.is_some_and(|id| marks.track(id))),
-        ban: (!t.artist.is_empty()).then(|| MenuItem::new("Не рекомендовать исполнителя").icon(Icon::Block)),
+        ban: (!t.artist.is_empty()).then(|| MenuItem::new(nikgob_core::i18n::streams_ui().ban_artist).icon(Icon::Block)),
         // Out of the library only through its library track.
         library: super::library_item(t.in_library, t.has_local, t.liked).filter(|on| *on || t.track.is_some()),
     })
@@ -439,7 +440,7 @@ pub fn album_card(
         .cover_opt(a.cover_url.clone())
         .badge_opt(a.have.label())
         .status(status)
-        .download_button(can_download.then_some("Скачать альбом"))
+        .download_button(can_download.then_some(nikgob_core::i18n::streams_ui().download_album))
         .menu_button(true)
         .width(width)
         .id_salt(("st-album", row, &a.remote))
@@ -534,12 +535,14 @@ pub const DISCOGRAPHY: &str = "discography";
 pub fn stream_album_rows(o: StreamAlbumMenuOf) -> Vec<widgets::Row<StreamAlbumAct>> {
     use StreamAlbumAct as A;
     use widgets::Row;
+    let c = nikgob_core::i18n::common();
+    let s = nikgob_core::i18n::streams_ui();
     let mut rows = Vec::new();
     if !o.on_page {
-        rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
-        rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
+        rows.push(Row::Item(A::Play, MenuItem::new(c.play).icon(Icon::PlayArrow)));
+        rows.push(Row::Item(A::Shuffle, MenuItem::new(c.shuffle).icon(Icon::Shuffle)));
     }
-    rows.push(Row::Item(A::Radio, MenuItem::new("Радио по альбому").icon(Icon::Radio)));
+    rows.push(Row::Item(A::Radio, MenuItem::new(s.album_radio).icon(Icon::Radio)));
     rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
     rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
     rows.push(Row::Divider);
@@ -547,21 +550,21 @@ pub fn stream_album_rows(o: StreamAlbumMenuOf) -> Vec<widgets::Row<StreamAlbumAc
         // Liking is not downloading: there whatever the library has of it.
         rows.push(Row::Item(A::Like, MenuItem::new(super::LIKE).icon(Icon::Favorite)));
     }
-    rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
+    rows.push(Row::Item(A::Playlist, MenuItem::new(s.to_playlist).icon(Icon::PlaylistAdd)));
     rows.push(Row::Divider);
     if o.has_artists {
-        rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person)));
+        rows.push(Row::Item(A::Artist, MenuItem::new(s.go_artist).icon(Icon::Person)));
     }
     if o.in_library {
-        rows.push(Row::Item(A::Library, MenuItem::new("Открыть в библиотеке").icon(Icon::LibraryMusic)));
+        rows.push(Row::Item(A::Library, MenuItem::new(s.open_in_library).icon(Icon::LibraryMusic)));
     }
-    rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
+    rows.push(Row::Item(A::Share, MenuItem::new(s.share).icon(Icon::Share)));
     if o.on_page || o.refresh {
         rows.push(Row::Item(A::RefreshCover, MenuItem::new(widgets::REFRESH_COVER).icon(Icon::Refresh)));
     }
     if !o.on_page && o.can_download {
         rows.push(Row::Divider);
-        rows.push(Row::Item(A::Download, MenuItem::new("Скачать альбом").icon(Icon::Download)));
+        rows.push(Row::Item(A::Download, MenuItem::new(s.download_album).icon(Icon::Download)));
     }
     rows
 }
@@ -676,20 +679,22 @@ pub enum StreamArtistAct {
 pub fn stream_artist_rows(a: &StreamArtistCard, marks: &nikgob_view::DislikesView) -> Vec<widgets::Row<StreamArtistAct>> {
     use StreamArtistAct as A;
     use widgets::Row;
+    let c = nikgob_core::i18n::common();
+    let s = nikgob_core::i18n::streams_ui();
     let mut rows = Vec::new();
     if a.artist.is_some() {
-        rows.push(Row::Item(A::Play, MenuItem::new("Слушать микс").icon(Icon::PlayArrow)));
-        rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
-        rows.push(Row::Item(A::Radio, MenuItem::new("Радио исполнителя").icon(Icon::Radio)));
+        rows.push(Row::Item(A::Play, MenuItem::new(s.play_mix).icon(Icon::PlayArrow)));
+        rows.push(Row::Item(A::Shuffle, MenuItem::new(c.shuffle).icon(Icon::Shuffle)));
+        rows.push(Row::Item(A::Radio, MenuItem::new(s.artist_radio).icon(Icon::Radio)));
     } else {
-        rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
+        rows.push(Row::Item(A::Play, MenuItem::new(c.play).icon(Icon::PlayArrow)));
     }
     rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
     rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
     rows.push(Row::Divider);
     let ban = match a.artist {
         Some(id) => super::ban_item(id, marks),
-        None => MenuItem::new("Не рекомендовать исполнителя").icon(Icon::Block),
+        None => MenuItem::new(s.ban_artist).icon(Icon::Block),
     };
     rows.push(Row::Item(A::Ban, ban));
     rows
@@ -744,24 +749,26 @@ pub enum StreamPlaylistAct {
 pub fn stream_playlist_rows(on_page: bool, followed: bool) -> Vec<widgets::Row<StreamPlaylistAct>> {
     use StreamPlaylistAct as A;
     use widgets::Row;
+    let c = nikgob_core::i18n::common();
+    let s = nikgob_core::i18n::streams_ui();
     let mut rows = Vec::new();
     if on_page {
-        rows.push(Row::Item(A::Radio, MenuItem::new("Радио по плейлисту").icon(Icon::Radio)));
+        rows.push(Row::Item(A::Radio, MenuItem::new(s.playlist_radio).icon(Icon::Radio)));
         rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
         rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
         rows.push(Row::Divider);
-        rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
+        rows.push(Row::Item(A::Playlist, MenuItem::new(s.to_playlist).icon(Icon::PlaylistAdd)));
     } else {
-        rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
-        rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
-        rows.push(Row::Item(A::Radio, MenuItem::new("Радио по плейлисту").icon(Icon::Radio)));
+        rows.push(Row::Item(A::Play, MenuItem::new(c.play).icon(Icon::PlayArrow)));
+        rows.push(Row::Item(A::Shuffle, MenuItem::new(c.shuffle).icon(Icon::Shuffle)));
+        rows.push(Row::Item(A::Radio, MenuItem::new(s.playlist_radio).icon(Icon::Radio)));
         rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
         rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
         rows.push(Row::Divider);
         rows.push(if followed {
-            Row::Item(A::Library, MenuItem::new("Открыть в библиотеке").icon(Icon::LibraryMusic))
+            Row::Item(A::Library, MenuItem::new(s.open_in_library).icon(Icon::LibraryMusic))
         } else {
-            Row::Item(A::Follow, MenuItem::new("В библиотеку").icon(Icon::LibraryMusic))
+            Row::Item(A::Follow, MenuItem::new(s.to_library).icon(Icon::LibraryMusic))
         });
     }
     rows
@@ -773,7 +780,7 @@ pub fn playlist_card(ui: &mut Ui, p: &StreamPlaylistCard, width: f32, row: &str,
     let mut sub = p.owner.clone().unwrap_or_default();
     if let Some(n) = p.total_tracks {
         let n = u64::from(n);
-        let count = format!("{n} {}", common::plural(n, "трек", "трека", "треков"));
+        let count = nikgob_core::i18n::tracks_count(n);
         sub = if sub.is_empty() { count } else { format!("{sub} · {count}") };
     }
     let o = MediaCard::new(&p.name)
@@ -826,9 +833,9 @@ pub fn page(ui: &mut Ui, page: &StreamPage, state: &ViewState, pages: &mut PageS
             return None;
         };
         if let Some(e) = &v.error {
-            widgets::empty_state(ui, Icon::Error, "Не открылось", e, None);
+            widgets::empty_state(ui, Icon::Error, nikgob_core::i18n::streams_ui().failed_open, e, None);
             ui.vertical_centered(|ui| {
-                if ui.add(Button::new("Повторить").style(Style::Text).icon(Icon::Refresh).id_salt("st-page-retry")).clicked() {
+                if ui.add(Button::new(nikgob_core::i18n::common().retry).style(Style::Text).icon(Icon::Refresh).id_salt("st-page-retry")).clicked() {
                     out.push(Command::LoadStream(page.clone()));
                 }
             });
@@ -843,11 +850,12 @@ pub fn page(ui: &mut Ui, page: &StreamPage, state: &ViewState, pages: &mut PageS
 }
 
 fn type_label(t: Option<ReleaseType>) -> &'static str {
+    let s = nikgob_core::i18n::streams_ui();
     match t {
-        Some(ReleaseType::Single) => "СИНГЛ",
+        Some(ReleaseType::Single) => s.overline_single,
         Some(ReleaseType::Ep) => "EP",
-        Some(ReleaseType::Compilation) => "СБОРНИК",
-        _ => "АЛЬБОМ",
+        Some(ReleaseType::Compilation) => s.overline_compilation,
+        _ => s.overline_album,
     }
 }
 
@@ -883,14 +891,13 @@ fn header(ui: &mut Ui, v: &StreamPageView, round: bool, add_text: impl FnOnce(&m
 
 /// "Кино · 8 треков · 37 мин".
 fn count_line(lead: &str, n: usize, total: std::time::Duration) -> String {
-    let n = n as u64;
     let mut parts = Vec::new();
     if !lead.is_empty() {
         parts.push(lead.to_owned());
     }
-    parts.push(format!("{n} {}", common::plural(n, "трек", "трека", "треков")));
+    parts.push(nikgob_core::i18n::tracks_count(n as u64));
     if !total.is_zero() {
-        parts.push(common::fmt_total(total));
+        parts.push(nikgob_core::i18n::fmt_total(total));
     }
     parts.join(" · ")
 }
@@ -898,15 +905,16 @@ fn count_line(lead: &str, n: usize, total: std::time::Duration) -> String {
 /// The download button of a service's album page: what «Хочу скачать»
 /// says about the album, and whether a click downloads it.
 fn album_download(v: &StreamPageView, wish: &widgets::WishIndex, all_local: bool, torrents: bool) -> (&'static str, bool) {
+    let s = nikgob_core::i18n::streams_ui();
     if all_local {
-        return ("Скачан", false);
+        return (s.downloaded, false);
     }
     match v.release.and_then(|r| wish.of_release(r)) {
-        None | Some(WishlistStatus::Waiting | WishlistStatus::Dismissed | WishlistStatus::Done) => ("Скачать альбом", true),
-        Some(WishlistStatus::Downloading) => ("Качается", false),
-        Some(WishlistStatus::NoTorrent | WishlistStatus::Failed) => ("Не нашлось", false),
-        Some(_) if !torrents => ("Ждёт торренты", false),
-        Some(_) => ("В очереди", false),
+        None | Some(WishlistStatus::Waiting | WishlistStatus::Dismissed | WishlistStatus::Done) => (s.download_album, true),
+        Some(WishlistStatus::Downloading) => (s.downloading, false),
+        Some(WishlistStatus::NoTorrent | WishlistStatus::Failed) => (s.not_found, false),
+        Some(_) if !torrents => (s.waits_torrents, false),
+        Some(_) => (s.queued, false),
     }
 }
 
@@ -943,9 +951,11 @@ fn album_page(
         // Ugly Is Beautiful · 13 из 14».
         if let Some(r) = v.release.filter(|_| v.have.in_library > 0 || v.library.as_ref().is_some_and(|l| l.1.in_library > 0)) {
             let label = match &v.library {
-                Some((title, h)) if h.local > 0 && !h.complete() => format!("В библиотеке: {title} · {} из {}", h.local, h.total),
-                Some((title, _)) => format!("В библиотеке: {title}"),
-                None => "Открыть в библиотеке".to_owned(),
+                Some((title, h)) if h.local > 0 && !h.complete() => {
+                    nikgob_core::i18n::streams_ui::in_library_of_in(nikgob_core::i18n::locale(), title, h.local, h.total)
+                }
+                Some((title, _)) => nikgob_core::i18n::streams_ui::in_library_in(nikgob_core::i18n::locale(), title),
+                None => nikgob_core::i18n::streams_ui().open_in_library.to_owned(),
             };
             ui.add_space(8.0);
             if ui.add(AssistChip::new(label).icon(Icon::LibraryMusic).id_salt("st-chip-lib")).clicked() {
@@ -959,7 +969,7 @@ fn album_page(
     let wish = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist);
     let (dl_label, dl_can) = album_download(v, &wish, all_local, state.prefs.prowlarr_configured);
     let members: Vec<Member> = vec![
-        Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
+        Button::new(nikgob_core::i18n::common().play).icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
         widgets::shuffle_member(ui),
         Button::new(dl_label).icon(Icon::Download).size(Size::M).style(Style::Tonal).enabled(!all_local).into(),
         IconButton::new(Icon::Favorite)
@@ -968,7 +978,7 @@ fn album_page(
             .selected(v.liked)
             .tooltip(super::like_label(v.liked))
             .into(),
-        IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into(),
+        IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip(nikgob_core::i18n::common().more).into(),
     ];
     let row = ButtonRow::new("st-album-actions", Size::M).show(ui, members);
     let r = &row.responses;
@@ -980,11 +990,8 @@ fn album_page(
     }
     // «Скачать» downloads without a like; once on its way, the button says
     // how far it is and opens «Хочу скачать».
-    let dl = r[2].clone().on_hover_text(if dl_can {
-        "Весь альбом — в «Хочу скачать» (без лайка)"
-    } else {
-        "Открыть «Хочу скачать»"
-    });
+    let si = nikgob_core::i18n::streams_ui();
+    let dl = r[2].clone().on_hover_text(if dl_can { si.album_to_wishlist } else { si.open_wishlist });
     if dl.clicked() {
         if dl_can {
             out.push(Command::DownloadStreamAlbum(id.clone()));
@@ -1019,10 +1026,11 @@ fn playlist_page(
     out: &mut Vec<Command>,
 ) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
+    let t = nikgob_core::i18n::streams_ui();
     let mut nav = None;
     // (Once followed, «✓ В библиотеке» below opens the library playlist.)
     header(ui, v, false, |ui| {
-        overline(ui, &["ПЛЕЙЛИСТ", service_upper(id.service)]);
+        overline(ui, &[t.overline_playlist, service_upper(id.service)]);
         ui.label(TypeRole::TitleMedium.style().rich(count_line(&v.subtitle, v.tracks.len(), v.total_duration), s.on_surface_variant));
     });
     ui.add_space(16.0);
@@ -1031,15 +1039,15 @@ fn playlist_page(
     let row = ButtonRow::new("st-pl-actions", Size::M).show(
         ui,
         vec![
-            Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
+            Button::new(nikgob_core::i18n::common().play).icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
             widgets::shuffle_member(ui),
-            Button::new(if followed { "В библиотеке" } else { "В библиотеку" })
+            Button::new(if followed { t.in_library } else { t.to_library })
                 .icon(if followed { Icon::Check } else { Icon::LibraryMusic })
                 .size(Size::M)
                 .style(Style::Outlined)
                 .selected(followed)
                 .into(),
-            IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into(),
+            IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip(nikgob_core::i18n::common().more).into(),
         ],
     );
     let r = &row.responses;
@@ -1049,11 +1057,7 @@ fn playlist_page(
     if r[1].clicked() {
         out.push(Command::PlayStreamPlaylist { id: id.clone(), start: None, shuffle: true });
     }
-    let follow = r[2].clone().on_hover_text(if followed {
-        "Плейлист в библиотеке и следит за сервисом — открыть"
-    } else {
-        "Плейлист в библиотеку: он будет следить за сервисом"
-    });
+    let follow = r[2].clone().on_hover_text(if followed { t.followed_tip } else { t.follow_tip });
     if follow.clicked() {
         match v.playlist {
             Some(p) => nav = Some(Route::Playlist(p)),
@@ -1070,7 +1074,7 @@ fn playlist_page(
     }
     ui.add_space(16.0);
     if v.tracks.is_empty() {
-        widgets::empty_state(ui, Icon::QueueMusic, "Плейлист пуст", "", None);
+        widgets::empty_state(ui, Icon::QueueMusic, t.playlist_empty, "", None);
         return nav;
     }
     track_rows(ui, "st-playlist", &v.tracks, false, &StreamFrom::Playlist(id.clone()), state, pages, out).or(nav)
@@ -1084,45 +1088,46 @@ fn artist_page(
     out: &mut Vec<Command>,
 ) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
+    let t = nikgob_core::i18n::streams_ui();
     let mut nav = None;
     header(ui, v, true, |ui| {
-        overline(ui, &["ИСПОЛНИТЕЛЬ", service_upper(id.service)]);
+        overline(ui, &[t.overline_artist, service_upper(id.service)]);
         let n = v.albums.len() as u64;
-        let mut line = format!("{n} {}", common::plural(n, "релиз", "релиза", "релизов"));
+        let mut line = nikgob_core::i18n::streams_ui::releases_count_in(nikgob_core::i18n::locale(), n);
         let have: u32 = v.albums.iter().map(|a| a.have.local).sum();
         if have > 0 {
-            line = format!("{line} · {have} {} у тебя", common::plural(u64::from(have), "трек", "трека", "треков"));
+            line = format!("{line} · {}", nikgob_core::i18n::streams_ui::have_tracks_in(nikgob_core::i18n::locale(), u64::from(have)));
         }
         ui.label(TypeRole::TitleMedium.style().rich(line, s.on_surface_variant));
     });
     ui.add_space(16.0);
     let newest = v.albums.first().map(|a| a.remote.clone());
     let mut members: Vec<Member> = vec![
-        Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).enabled(newest.is_some()).into(),
+        Button::new(nikgob_core::i18n::common().play).icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).enabled(newest.is_some()).into(),
     ];
     if v.artist.is_some() {
         // The library knows the artist: a radio of its tracks and the
         // like (an artist only on the service has nothing to grow from).
-        members.push(Button::new("Радио").icon(Icon::Radio).size(Size::M).style(Style::Tonal).into());
+        members.push(Button::new(t.radio).icon(Icon::Radio).size(Size::M).style(Style::Tonal).into());
         members.push(
-            Button::new(if v.liked { "В подписках" } else { "Подписаться" })
+            Button::new(if v.liked { t.subscribed } else { t.subscribe })
                 .icon(Icon::Favorite)
                 .size(Size::M)
                 .style(Style::Outlined)
                 .selected(v.liked)
                 .into(),
         );
-        members.push(Button::new("В библиотеке").icon(Icon::LibraryMusic).size(Size::M).style(Style::Tonal).into());
+        members.push(Button::new(t.in_library).icon(Icon::LibraryMusic).size(Size::M).style(Style::Tonal).into());
     }
     let row = ButtonRow::new("st-ar-actions", Size::M).show(ui, members);
     let r = &row.responses;
-    if r[0].clone().on_hover_text("Самый новый релиз").clicked()
+    if r[0].clone().on_hover_text(t.newest_release).clicked()
         && let Some(a) = newest
     {
         out.push(Command::PlayStreamAlbum { id: a, start: None, shuffle: false });
     }
     if let Some(a) = v.artist {
-        if r[1].clone().on_hover_text("Его треки и похожее — очередь дописывается сама").clicked() {
+        if r[1].clone().on_hover_text(t.artist_radio_tip).clicked() {
             out.push(Command::StartRadio { seed: nikgob_view::RadioSeed::Artist(a) });
         }
         if r[2].clicked() {
@@ -1135,7 +1140,7 @@ fn artist_page(
     ui.add_space(widgets::SECTION_GAP);
     let (albums, singles): (Vec<&StreamAlbumCard>, Vec<&StreamAlbumCard>) =
         v.albums.iter().partition(|a| matches!(a.release_type, ReleaseType::Album | ReleaseType::Compilation));
-    for (title, list) in [("Альбомы", albums), ("Синглы и EP", singles)] {
+    for (title, list) in [(t.albums, albums), (t.singles, singles)] {
         if list.is_empty() {
             continue;
         }
@@ -1145,7 +1150,7 @@ fn artist_page(
         ui.add_space(widgets::SECTION_GAP);
     }
     if v.albums.is_empty() {
-        widgets::empty_state(ui, Icon::Album, "Релизов нет", "", None);
+        widgets::empty_state(ui, Icon::Album, t.no_releases, "", None);
     }
     nav
 }

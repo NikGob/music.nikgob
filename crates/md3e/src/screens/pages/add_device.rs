@@ -127,7 +127,7 @@ pub(crate) fn open(ctx: &egui::Context, m: &MeshView, mem: &mut MeshUi, from: Op
         a.builds = look_for_builds(ctx);
     }
     let now = anim::now(ctx);
-    a.stale = matches!(m.pairing, MeshPairing::Done { .. } | MeshPairing::Failed(_)).then(|| m.pairing.clone());
+    a.stale = matches!(m.pairing, MeshPairing::Done { .. } | MeshPairing::Failed(_) | MeshPairing::FailedWrongCode).then(|| m.pairing.clone());
     a.open = true;
     a.tab = tab;
     a.missing_since = Some(now);
@@ -202,10 +202,11 @@ pub(crate) fn windows_url(host: &str, ticket: &str) -> String {
 /// What keeps the API from the home network, and the command that lifts
 /// it: off, or this computer only. A bind error says itself.
 fn api_blocker(api: &ApiView) -> Option<(String, Option<(&'static str, Command)>)> {
+    let s = nikgob_core::i18n::mesh();
     if !api.enabled {
-        Some(("API выключен".to_owned(), Some(("Включить", Command::SetApiEnabled(true)))))
+        Some((s.api_off.to_owned(), Some((s.turn_on, Command::SetApiEnabled(true)))))
     } else if api.local_only() {
-        Some(("Доступ открыт только на этом компьютере".to_owned(), Some(("Включить домашнюю сеть", Command::SetApiAccess(ApiAccess::Network)))))
+        Some((s.local_only.to_owned(), Some((s.enable_home_network, Command::SetApiAccess(ApiAccess::Network)))))
     } else {
         api.error.clone().map(|e| (e, None))
     }
@@ -213,12 +214,13 @@ fn api_blocker(api: &ApiView) -> Option<(String, Option<(&'static str, Command)>
 
 /// Why this computer cannot add a device now, in words.
 fn cannot_pair(m: &MeshView) -> Option<String> {
+    let s = nikgob_core::i18n::mesh();
     if !m.enabled {
-        Some("Связь с устройствами выключена".to_owned())
+        Some(s.links_off.to_owned())
     } else if !m.running {
-        Some(m.error.clone().unwrap_or_else(|| "Межсеть не запущена".to_owned()))
+        Some(m.error.clone().unwrap_or_else(|| s.mesh_not_running.to_owned()))
     } else if m.paired && !m.ring_holder {
-        Some("Добавлять устройства может только главное устройство".to_owned())
+        Some(s.only_holder_adds.to_owned())
     } else {
         None
     }
@@ -336,6 +338,8 @@ fn follow_pairing(a: &mut AddState, m: &MeshView, out: &mut Vec<Command>) {
             a.error = Some(why.clone());
             out.push(Command::MeshClearPairing);
         }
+        // The nearby device's window says it; this one never shows it.
+        MeshPairing::FailedWrongCode => out.push(Command::MeshClearPairing),
         _ => {}
     }
 }
@@ -345,12 +349,13 @@ fn header(ui: &mut Ui, tab: &mut AddTab) -> bool {
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H), Sense::hover());
     let mut right = ui.new_child(UiBuilder::new().max_rect(row).layout(Layout::right_to_left(Align::Center)).id_salt("mesh-add-header-right"));
     let closed = right
-        .add(IconButton::new(Icon::Close).size(Size::S).style(Style::Standard).tooltip("Закрыть (Esc)").id_salt("mesh-add-close"))
+        .add(IconButton::new(Icon::Close).size(Size::S).style(Style::Standard).tooltip(nikgob_core::i18n::mesh().close_esc).id_salt("mesh-add-close"))
         .clicked();
     let left = Rect::from_min_max(row.min, pos2((right.min_rect().left() - 12.0).max(row.left()), row.bottom()));
     let mut left = ui.new_child(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)).id_salt("mesh-add-header-left"));
     let at = usize::from(*tab == AddTab::Install);
-    if let Some(picked) = ConnectedGroup::new("mesh-add-tabs", &["Подключить", "Установить"]).show(&mut left, at) {
+    let t = nikgob_core::i18n::mesh();
+    if let Some(picked) = ConnectedGroup::new("mesh-add-tabs", &[t.connect, t.install]).show(&mut left, at) {
         *tab = if picked == 0 { AddTab::Connect } else { AddTab::Install };
     }
     closed
@@ -453,7 +458,7 @@ fn invite_column(ui: &mut Ui, state: &ViewState, a: &mut AddState, invite_late: 
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width().min(COLUMN_W), 40.0), Sense::hover());
         mesh_ui::paint_avatar(ui, pos2(row.left() + 16.0, row.center().y), 32.0, &format!("add-{}", n.id), n.kind, Look::default());
         let mut right = ui.new_child(UiBuilder::new().max_rect(row).layout(Layout::right_to_left(Align::Center)).id_salt(("mesh-add-near", &n.id)));
-        let b = right.add(crate::components::Button::new("Подключить").style(Style::Text).size(Size::S).id_salt(("mesh-add-pair", &n.id)));
+        let b = right.add(crate::components::Button::new(nikgob_core::i18n::mesh().connect).style(Style::Text).size(Size::S).id_salt(("mesh-add-pair", &n.id)));
         if b.clicked() {
             *pick = Some((n.id.clone(), b.rect));
         }
@@ -464,12 +469,12 @@ fn invite_column(ui: &mut Ui, state: &ViewState, a: &mut AddState, invite_late: 
     if !m.nearby.is_empty() {
         ui.add_space(12.0);
     }
-    let error = a.error.clone().or_else(|| invite_late.then(|| "Межсеть не ответила".to_owned()));
+    let error = a.error.clone().or_else(|| invite_late.then(|| nikgob_core::i18n::mesh().mesh_no_answer.to_owned()));
     if let Some(e) = error {
         error_line(ui, &e);
         ui.add_space(12.0);
     }
-    if ui.add(FilterChip::new("Гость", a.guest).id_salt("mesh-add-guest")).clicked() {
+    if ui.add(FilterChip::new(nikgob_core::i18n::mesh().guest, a.guest).id_salt("mesh-add-guest")).clicked() {
         a.guest = !a.guest;
         // The invite shown stops being one: another, of the new scope,
         // signs what joins with it (the QR waits for it).
@@ -580,7 +585,7 @@ fn install(ui: &mut Ui, state: &ViewState, a: &mut AddState, now: f64, out: &mut
     let builds = a.builds.lock().unwrap_or_else(PoisonError::into_inner).clone();
     let (Some(inv), Some(builds)) = (shown_invite(m, wanted_scope(a)), builds) else {
         if a.missing_since.is_some_and(|at| now - at > INVITE_WAIT_S) {
-            error_line(ui, "Межсеть не ответила");
+            error_line(ui, nikgob_core::i18n::mesh().mesh_no_answer);
         } else {
             ui.add(LoadingIndicator::new().size(32.0));
         }
@@ -588,7 +593,8 @@ fn install(ui: &mut Ui, state: &ViewState, a: &mut AddState, now: f64, out: &mut
     };
     let linux = !builds.linux.is_empty();
     // Windows only when its program is here (no tab that leads nowhere).
-    let platforms: &[&str] = if builds.windows { &["Linux и Raspberry Pi", "Windows"] } else { &["Linux и Raspberry Pi"] };
+    let linux_label = nikgob_core::i18n::mesh().platform_linux;
+    let platforms: &[&str] = if builds.windows { &[linux_label, "Windows"] } else { &[linux_label] };
     if a.platform >= platforms.len() {
         a.platform = 0;
     }
@@ -616,7 +622,7 @@ fn install(ui: &mut Ui, state: &ViewState, a: &mut AddState, now: f64, out: &mut
     };
     super::settings::code_block(ui, ("mesh-add-line", a.platform), &line, s);
     if served {
-        let blocker = api_blocker(api).or_else(|| host.is_none().then(|| ("У компьютера нет адреса в домашней сети".to_owned(), None)));
+        let blocker = api_blocker(api).or_else(|| host.is_none().then(|| (nikgob_core::i18n::mesh().no_lan_addr.to_owned(), None)));
         if let Some((text, fix)) = blocker {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
@@ -639,9 +645,8 @@ pub(crate) fn mesh_ui_pair_line(ticket: &str) -> String {
     format!("~/.local/bin/nikgobd pair {ticket}")
 }
 
-/// What the device says to a wrong code ([`MeshPairing::Failed`]): the
-/// cells shake, no word.
-const WRONG_CODE: &str = "Неверный код";
+/// What the device says to a wrong code
+/// ([`MeshPairing::FailedWrongCode`]): the cells shake, no word.
 /// How long the cells shake (s), how far (dp) and how many times.
 const SHAKE_S: f64 = 0.45;
 const SHAKE_DP: f32 = 10.0;
@@ -697,7 +702,7 @@ pub(crate) fn open_pair(ctx: &egui::Context, m: &MeshView, mem: &mut MeshUi, fro
         name: n.name.clone(),
         kind: n.kind,
         focus: true,
-        stale: matches!(m.pairing, MeshPairing::Done { .. } | MeshPairing::Failed(_)).then(|| m.pairing.clone()),
+        stale: matches!(m.pairing, MeshPairing::Done { .. } | MeshPairing::Failed(_) | MeshPairing::FailedWrongCode).then(|| m.pairing.clone()),
         ..PairState::default()
     };
     out.push(Command::MeshClearPairing);
@@ -732,13 +737,17 @@ fn follow_pair(p: &mut PairState, m: &MeshView, now: f64, out: &mut Vec<Command>
                 p.code.clear();
                 p.focus = true;
             }
-            if why == WRONG_CODE {
-                p.wrong = true;
-                p.shake_at = Some(now);
-                p.error = None;
-            } else {
-                p.error = Some(why.clone());
+            p.error = Some(why.clone());
+            out.push(Command::MeshClearPairing);
+        }
+        MeshPairing::FailedWrongCode => {
+            if std::mem::take(&mut p.sent) {
+                p.code.clear();
+                p.focus = true;
             }
+            p.wrong = true;
+            p.shake_at = Some(now);
+            p.error = None;
             out.push(Command::MeshClearPairing);
         }
         _ => {}
@@ -942,7 +951,7 @@ mod tests {
         out.clear();
         follow_pair(&mut p, &m, 1.1, &mut out);
         assert!(out.is_empty(), "sent once");
-        m.pairing = MeshPairing::Failed(WRONG_CODE.into());
+        m.pairing = MeshPairing::FailedWrongCode;
         follow_pair(&mut p, &m, 2.0, &mut out);
         assert!(p.code.is_empty() && !p.sent && p.wrong && p.focus);
         assert_eq!((p.shake_at, p.error.as_deref()), (Some(2.0), None), "a shake, no caption");

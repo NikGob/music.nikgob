@@ -25,13 +25,10 @@ fn cover_side(width: f32) -> f32 {
     widgets::header_cover(width)
 }
 
-/// «слышал 5 из 52», «слышал все 20», «не слушал».
+/// «слышал 5 из 52» under a world's album card
+/// ([`nikgob_core::i18n::streams_ui::album_tail`], in the i18n table).
 pub fn album_tail(heard: u32, total: u32) -> String {
-    match heard {
-        0 => "не слушал".to_owned(),
-        h if h >= total => format!("слышал все {total}"),
-        h => format!("слышал {h} из {total}"),
-    }
+    nikgob_core::i18n::streams_ui::album_tail(heard, total)
 }
 
 pub fn show(ui: &mut Ui, key: &str, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
@@ -56,7 +53,7 @@ pub fn show(ui: &mut Ui, key: &str, state: &ViewState, pages: &mut PageState, ou
         let wishlist = &state.downloads.wishlist;
         if let Some(a) = &v.new_album {
             ui.add_space(widgets::SECTION_GAP);
-            section(ui, grid, "Новое");
+            section(ui, grid, nikgob_core::i18n::streams_ui().new);
             let w = grid.tile(grid.cards_per_line());
             let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), w + cards::ALBUM_TEXT_H), Sense::hover());
             let cell = Rect::from_min_size(pos2(grid.left, row.top()), vec2(w, w + cards::ALBUM_TEXT_H));
@@ -71,7 +68,7 @@ pub fn show(ui: &mut Ui, key: &str, state: &ViewState, pages: &mut PageState, ou
         }
         if v.liked.len() >= 3 {
             ui.add_space(widgets::SECTION_GAP);
-            section(ui, grid, "Любимое");
+            section(ui, grid, nikgob_core::i18n::streams_ui().favorite);
             let ids = v.liked.iter().map(|t| t.id).collect();
             let mut list = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(grid.left, ui.cursor().top()), vec2(grid.width, f32::INFINITY))).id_salt("world-liked"));
             let r = widgets::track_list(
@@ -96,7 +93,7 @@ pub fn show(ui: &mut Ui, key: &str, state: &ViewState, pages: &mut PageState, ou
 /// «Миксы»: the mix cards of Главная, as many to a line as there (three on a
 /// narrow page), their menus without what only Главная's have.
 fn mixes(ui: &mut Ui, grid: Grid, v: &WorldView, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
-    section(ui, grid, "Миксы");
+    section(ui, grid, nikgob_core::i18n::streams_ui().mixes);
     let per = grid.cards_per_line();
     let cw = grid.tile(per);
     let h = cw + cards::MIX_TEXT_H;
@@ -167,7 +164,7 @@ fn header(ui: &mut Ui, grid: Grid, v: &WorldView, state: &ViewState, out: &mut V
     {
         out.push(worlds::play_primary(w));
     }
-    if b.add(Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Outlined).id_salt("world-shuffle")).clicked() {
+    if b.add(Button::new(nikgob_core::i18n::common().shuffle).icon(Icon::Shuffle).size(Size::M).style(Style::Outlined).id_salt("world-shuffle")).clicked() {
         out.push(Command::PlayTracks { tracks: w.shuffled.clone(), start: 0, context: nikgob_view::QueueOrigin::World(w.title.clone()) });
     }
     Theme::set(&ctx, page_theme);
@@ -177,7 +174,8 @@ fn header(ui: &mut Ui, grid: Grid, v: &WorldView, state: &ViewState, out: &mut V
 /// 52» under the title, a thin progress under them.
 fn albums(ui: &mut Ui, grid: Grid, v: &WorldView, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
-    section(ui, grid, if v.albums.len() == 1 { "Альбом" } else { "Альбомы" });
+    let t = nikgob_core::i18n::streams_ui();
+    section(ui, grid, if v.albums.len() == 1 { t.album } else { t.albums });
     let per = grid.cards_per_line();
     let cw = grid.tile(per);
     let h = cw + cards::ALBUM_TEXT_H + 12.0;
@@ -223,7 +221,7 @@ mod tests {
         assert_eq!(album_tail(5, 52), "слышал 5 из 52");
         assert_eq!(album_tail(20, 20), "слышал все 20");
         assert_eq!(album_tail(0, 30), "не слушал");
-        assert_eq!(worlds::heard_line(36, 134), "Ты слышал 36 из 134");
-        assert_eq!(worlds::heard_line(0, 160), "Ты ещё не слышал ни одного из 160");
+        assert_eq!(nikgob_core::i18n::streams_ui::heard_line(36, 134), "Ты слышал 36 из 134");
+        assert_eq!(nikgob_core::i18n::streams_ui::heard_line(0, 160), "Ты ещё не слышал ни одного из 160");
     }
 }

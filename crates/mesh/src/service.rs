@@ -13,7 +13,8 @@ use iroh::{EndpointAddr, PublicKey, SecretKey};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use nikgob_api::LocalApi;
 use nikgob_runtime::RuntimeHandle;
-use nikgob_view::{Command, MeshInvite, MeshKind, MeshNearbyView, MeshNodeView, MeshPairing, MeshScope, MeshSnapshot, MeshSnapshotNode};
+use nikgob_core::i18n::mesh::fmt_open_net_in;
+use nikgob_core::i18n::{Locale, locale, mesh, mesh_in};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
@@ -88,6 +89,13 @@ enum Ctl {
     Presence { presence: Presence },
     /// The ring changed (a device paired, renamed by the holder, forgotten).
     Ring { certs: Vec<Cert>, revoked: Vec<Revocation> },
+}
+
+/// Why pairing a nearby device failed: a wrong code (its window shakes,
+/// no word) or the words said.
+enum NearbyFail {
+    WrongCode,
+    Said(String),
 }
 
 /// A paired device as the links know it.
@@ -277,30 +285,31 @@ async fn join_ticket(ep: &Endpoint, me: &Me, t: &Ticket) -> Result<(Grant, Strin
 
 /// A ticket's text, checked, with only the addresses inside this device's
 /// home network subnets (none left: nothing is dialled).
-fn ticket_on_lan(text: &str) -> Result<Ticket, String> {
-    let mut t = ticket_of(text)?;
+fn ticket_on_lan(loc: Locale, text: &str) -> Result<Ticket, String> {
+    let mut t = ticket_of(loc, text)?;
     let subnets = discovery::lan_subnets();
     t.addrs.retain(|a| discovery::on_lan(a.ip(), &subnets));
     Ok(t)
 }
 
 /// A ticket's text, checked: decodes, not expired.
-fn ticket_of(text: &str) -> Result<Ticket, String> {
-    let t = Ticket::decode(text).map_err(|e| e.to_string())?;
+fn ticket_of(loc: Locale, text: &str) -> Result<Ticket, String> {
+    let t = Ticket::decode(text).map_err(|e| e.message_in(loc))?;
     if t.expired(now_ms()) {
-        return Err(ticket::TicketError::Expired.to_string());
+        return Err(ticket::TicketError::Expired.message_in(loc));
     }
     Ok(t)
 }
 
 /// `nikgobd pair <ticket>` with no instance running.
 pub(crate) async fn join_offline(paths: &MeshPaths, name: &str, kind: MeshKind, text: &str) -> Result<String, String> {
+    let s = mesh();
     let key = keys::node_key(paths).map_err(|e| e.to_string())?;
     if let Ok(Some(_)) = Ring::load(&paths.ring(), &key.public()) {
-        return Err("Это устройство уже привязано".to_owned());
+        return Err(s.already_paired.to_owned());
     }
-    let t = ticket_on_lan(text)?;
-    let ep = bind(&key, false).await.map_err(|e| format!("Не удалось открыть сеть: {e}"))?;
+    let t = ticket_on_lan(locale(), text)?;
+    let ep = bind(&key, false).await.map_err(|e| fmt_open_net_in(locale(), &e))?;
     let me = Me { id: key.public(), name: clean_name(name), kind };
     let out = join_ticket(&ep, &me, &t).await;
     ep.close().await;
@@ -316,7 +325,7 @@ const RESULT_FILE: &str = "join-result";
 /// `nikgobd pair <ticket>` with the instance running: the ticket goes to
 /// it through a file of its data dir, the answer comes back the same way.
 pub(crate) fn hand_over(paths: &MeshPaths, text: &str, wait: Duration) -> Result<String, String> {
-    ticket_of(text)?;
+    ticket_of(locale(), text)?;
     let request = paths.dir.join(REQUEST_FILE);
     let result = paths.dir.join(RESULT_FILE);
     let _ = std::fs::remove_file(&result);
@@ -331,7 +340,7 @@ pub(crate) fn hand_over(paths: &MeshPaths, text: &str, wait: Duration) -> Result
         std::thread::sleep(Duration::from_millis(250));
     }
     let _ = std::fs::remove_file(&request);
-    Err("Плеер не ответил: он запущен, и межсеть в нём включена?".to_owned())
+    Err(mesh().player_silent.to_owned())
 }
 
 impl Shared {
@@ -942,7 +951,8 @@ impl Shared {
                     let out = sh.pair_nearby(&nearby_id, &code).await;
                     sh.set_pairing(match out {
                         Ok(id) => MeshPairing::Done { node_id: id },
-                        Err(why) => MeshPairing::Failed(why),
+                        Err(NearbyFail::WrongCode) => MeshPairing::FailedWrongCode,
+                        Err(NearbyFail::Said(why)) => MeshPairing::Failed(why),
                     });
                 });
             }
@@ -982,29 +992,30 @@ impl Shared {
     }
 
     fn create_invite(&self, scope: MeshScope) {
+        let s = mesh_in(self.rt.state().prefs.resolved_locale());
         let node = self.node.lock().clone();
         let Some(node) = node else {
-            self.set_pairing(MeshPairing::Failed("Межсеть выключена".to_owned()));
+            self.set_pairing(MeshPairing::Failed(s.mesh_off.to_owned()));
             return;
         };
         let (Ok(a), Ok(b)) = (keys::random32(), keys::random32()) else {
-            self.set_pairing(MeshPairing::Failed("Не удалось создать приглашение".to_owned()));
+            self.set_pairing(MeshPairing::Failed(s.invite_not_made.to_owned()));
             return;
         };
         let made;
         {
-            let mut s = self.state.lock();
-            made = match self.ensure_ring(&mut s) {
+            let mut st = self.state.lock();
+            made = match self.ensure_ring(&mut st) {
                 Ok(m) => m,
                 Err(Refusal::NotHolder) => {
-                    s.pairing = MeshPairing::Failed("Добавлять устройства может только главное устройство".to_owned());
-                    drop(s);
+                    st.pairing = MeshPairing::Failed(s.only_holder_adds.to_owned());
+                    drop(st);
                     self.notify();
                     return;
                 }
                 Err(_) => {
-                    s.pairing = MeshPairing::Failed("Не удалось создать кольцо".to_owned());
-                    drop(s);
+                    st.pairing = MeshPairing::Failed(s.ring_not_made.to_owned());
+                    drop(st);
                     self.notify();
                     return;
                 }
@@ -1013,13 +1024,13 @@ impl Shared {
             id.copy_from_slice(&a[..8]);
             let mut secret = [0u8; 16];
             secret.copy_from_slice(&b[..16]);
-            let ip = s.lan.or_else(lan_ip).unwrap_or(IpAddr::from([127, 0, 0, 1]));
+            let ip = st.lan.or_else(lan_ip).unwrap_or(IpAddr::from([127, 0, 0, 1]));
             let expires_ms = now_ms() + ticket::LIFETIME_MS;
             let t = Ticket { holder: self.key.public(), invite: id, secret, expires_ms, addrs: vec![SocketAddr::new(ip, node.port)] };
             let ticket = t.encode();
             let key = nikgob_core::releases::download_key(&ticket);
-            s.invite = Some(Invite { id, secret, expires_ms, tries: 0, ticket, key, scope });
-            s.pairing = MeshPairing::Idle;
+            st.invite = Some(Invite { id, secret, expires_ms, tries: 0, ticket, key, scope });
+            st.pairing = MeshPairing::Idle;
         }
         if made {
             self.reannounce();
@@ -1028,29 +1039,32 @@ impl Shared {
         self.notify();
     }
 
-    /// «Подключить» with the code a nearby device shows. Its id.
-    async fn pair_nearby(self: &Arc<Self>, nearby_id: &str, code: &str) -> Result<String, String> {
-        let node = self.node.lock().clone().ok_or("Межсеть выключена")?;
-        let id = parse_id(nearby_id).ok_or("Нет такого устройства")?;
+    /// «Подключить» with the code a nearby device shows. Its id, or why it
+    /// would not (a wrong code apart from the words said).
+    async fn pair_nearby(self: &Arc<Self>, nearby_id: &str, code: &str) -> Result<String, NearbyFail> {
+        let loc = self.rt.state().prefs.resolved_locale();
+        let s = mesh_in(loc);
+        let node = self.node.lock().clone().ok_or_else(|| NearbyFail::Said(s.mesh_off.to_owned()))?;
+        let id = parse_id(nearby_id).ok_or_else(|| NearbyFail::Said(s.no_such_device.to_owned()))?;
         let code = code.trim();
         if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
-            return Err("Код — шесть цифр".to_owned());
+            return Err(NearbyFail::Said(s.code_six_digits.to_owned()));
         }
         {
-            let s = self.state.lock();
-            if s.ring.is_some() && s.ring_key.is_none() {
-                return Err(PairError::Refused(Refusal::NotHolder).user_message());
+            let st = self.state.lock();
+            if st.ring.is_some() && st.ring_key.is_none() {
+                return Err(NearbyFail::Said(PairError::Refused(Refusal::NotHolder).user_message_in(loc)));
             }
         }
         let addrs = {
-            let s = self.state.lock();
-            let on_lan = |a: &&SocketAddr| discovery::on_lan(a.ip(), &s.subnets);
-            s.table.by_id(&id).map(|x| x.addrs.iter().filter(on_lan).copied().collect::<Vec<SocketAddr>>()).filter(|a| !a.is_empty())
+            let st = self.state.lock();
+            let on_lan = |a: &&SocketAddr| discovery::on_lan(a.ip(), &st.subnets);
+            st.table.by_id(&id).map(|x| x.addrs.iter().filter(on_lan).copied().collect::<Vec<SocketAddr>>()).filter(|a| !a.is_empty())
         }
-        .ok_or("Устройство пропало из сети")?;
-        let conn = connect(&node.ep, id, &addrs, ALPN_PAIR).await.map_err(|e| PairError::Io(e).user_message())?;
+        .ok_or_else(|| NearbyFail::Said(s.device_gone.to_owned()))?;
+        let conn = connect(&node.ep, id, &addrs, ALPN_PAIR).await.map_err(|e| NearbyFail::Said(PairError::Io(e).user_message_in(loc)))?;
         let me = self.me();
-        let (mut send, mut recv) = conn.open_bi().await.map_err(|e| PairError::Io(e.to_string()).user_message())?;
+        let (mut send, mut recv) = conn.open_bi().await.map_err(|e| NearbyFail::Said(PairError::Io(e.to_string()).user_message_in(loc)))?;
         let host = HostRef(self.clone());
         let admit = |name: &str, kind: MeshKind| host.admit(&id, name, kind, None);
         let out = match tokio::time::timeout(PAIR_TIMEOUT, pair::offer(&mut recv, &mut send, &me, &id, code, admit)).await {
@@ -1065,24 +1079,29 @@ impl Shared {
             }
             Err(e) => {
                 log::info!("mesh: pairing {} failed: {e}", id.fmt_short());
-                Err(e.user_message())
+                Err(match e {
+                    PairError::Wrong | PairError::Refused(Refusal::WrongCode) => NearbyFail::WrongCode,
+                    other => NearbyFail::Said(other.user_message_in(loc)),
+                })
             }
         }
     }
 
     /// Joins the ring of a ticket's holder: its id and name.
     async fn join(self: &Arc<Self>, text: &str) -> Result<(String, String), String> {
-        let t = ticket_on_lan(text)?;
+        let loc = self.rt.state().prefs.resolved_locale();
+        let s = mesh_in(loc);
+        let t = ticket_on_lan(loc, text)?;
         if self.state.lock().ring.is_some() {
-            return Err("Это устройство уже привязано".to_owned());
+            return Err(s.already_paired.to_owned());
         }
-        let node = self.node.lock().clone().ok_or("Межсеть выключена")?;
+        let node = self.node.lock().clone().ok_or_else(|| s.mesh_off.to_owned())?;
         let me = self.me();
         let (grant, holder_name) = join_ticket(&node.ep, &me, &t).await.map_err(|e| {
             log::info!("mesh: joining failed: {e}");
-            e.user_message()
+            e.user_message_in(loc)
         })?;
-        self.accept_grant(grant).map_err(|e| e.user_message())?;
+        self.accept_grant(grant).map_err(|e| e.user_message_in(loc))?;
         log::info!("mesh: joined the ring of {holder_name}");
         Ok((t.holder.to_string(), holder_name))
     }
@@ -1090,11 +1109,12 @@ impl Shared {
     /// «Забыть» (holder): a revocation every member hears of, on disk before
     /// it counts. Why it could not be done, in words.
     fn forget(&self, node_id: &str) -> Result<(), String> {
-        let id = parse_id(node_id).ok_or_else(|| "нет такого устройства".to_owned())?;
+        let s = mesh_in(self.rt.state().prefs.resolved_locale());
+        let id = parse_id(node_id).ok_or_else(|| s.forget_no_device.to_owned())?;
         {
-            let mut s = self.state.lock();
-            let Some(rk) = s.ring_key.clone() else { return Err("забывать устройства может только главное устройство".to_owned()) };
-            let Some(current) = s.ring.as_ref() else { return Err("это устройство ни с кем не связано".to_owned()) };
+            let mut st = self.state.lock();
+            let Some(rk) = st.ring_key.clone() else { return Err(s.forget_only_holder.to_owned()) };
+            let Some(current) = st.ring.as_ref() else { return Err(s.forget_not_linked.to_owned()) };
             let mut ring = current.clone();
             if !ring.revoke(&rk, &id, now_ms()) {
                 // Not a member (forgotten already): nothing left to do.
@@ -1102,9 +1122,9 @@ impl Shared {
             }
             if let Err(e) = ring.save(&self.paths.ring()) {
                 log::error!("mesh: cannot write ring.json: {e}");
-                return Err("не удалось записать кольцо на диск".to_owned());
+                return Err(s.forget_ring_disk.to_owned());
             }
-            s.ring = Some(ring);
+            st.ring = Some(ring);
         }
         self.http.lock().remove(&id);
         log::info!("mesh: {} forgotten", id.fmt_short());
@@ -1672,7 +1692,7 @@ impl PairHost for HostRef {
             if spent {
                 log::warn!("mesh: an invite spent by wrong tries");
                 s.invite = None;
-                s.pairing = MeshPairing::Failed("Приглашение отменено: слишком много неверных попыток".to_owned());
+                s.pairing = MeshPairing::Failed(mesh_in(self.0.rt.state().prefs.resolved_locale()).invite_cancelled.to_owned());
             }
         }
         self.0.notify();
@@ -1830,7 +1850,7 @@ pub(crate) async fn run(sh: Arc<Shared>, mut cmds: mpsc::Receiver<Command>, mut 
                 Ok(()) => retry_at = None,
                 Err(e) => {
                     log::warn!("mesh: cannot start: {e}");
-                    sh.state.lock().error = Some(format!("Не удалось открыть сеть: {e}"));
+                    sh.state.lock().error = Some(fmt_open_net_in(sh.rt.state().prefs.resolved_locale(), &e));
                     sh.notify();
                     retry_at = Some(Instant::now() + RETRY);
                 }
@@ -1987,10 +2007,10 @@ mod tests {
     #[test]
     fn a_ticket_must_be_alive() {
         let t = Ticket { holder: key(2).public(), invite: [0; 8], secret: [1; 16], expires_ms: now_ms() - 1, addrs: Vec::new() };
-        assert_eq!(ticket_of(&t.encode()), Err("Приглашение истекло".to_owned()));
+        assert_eq!(ticket_of(locale(), &t.encode()), Err("Приглашение истекло".to_owned()));
         let alive = Ticket { expires_ms: now_ms() + 60_000, ..t };
-        assert!(ticket_of(&alive.encode()).is_ok());
-        assert!(ticket_of("nope").is_err());
+        assert!(ticket_of(locale(), &alive.encode()).is_ok());
+        assert!(ticket_of(locale(), "nope").is_err());
     }
 
     /// A ticket handed to a running instance that never answers: the
