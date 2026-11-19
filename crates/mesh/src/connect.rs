@@ -929,7 +929,7 @@ pub(crate) async fn finish(part: &Path, hash: &str, done: &Path) -> Result<(), S
     if sum != hash {
         let _ = tokio::fs::remove_file(part).await;
         let _ = tokio::fs::remove_file(part.with_extension("meta")).await;
-        return Err("the file arrived damaged".to_owned());
+        return Err(nikgob_core::i18n::mesh().file_damaged.to_owned());
     }
     tokio::fs::rename(part, done).await.map_err(|e| format!("cache: {e}"))?;
     let _ = tokio::fs::remove_file(part.with_extension("meta")).await;

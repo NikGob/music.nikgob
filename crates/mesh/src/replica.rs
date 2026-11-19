@@ -1251,7 +1251,7 @@ pub(crate) fn verify_part(part: &Path, meta: &Path, hash: &str) -> Result<(), St
     if sum != hash {
         let _ = std::fs::remove_file(part);
         let _ = std::fs::remove_file(meta);
-        return Err("the file arrived damaged".to_owned());
+        return Err(nikgob_core::i18n::mesh().file_damaged.to_owned());
     }
     Ok(())
 }

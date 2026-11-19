@@ -4,6 +4,8 @@ use super::{Locale, PluralForms, plural_forms};
 
 /// Static strings: mesh (devices, network, pairing, replicas) UI and errors.
 pub struct MeshStrings {
+    /// A copied file whose hash did not match.
+    pub file_damaged: &'static str,
     /// A device's kind in words: «Компьютер», «Raspberry Pi», «Телефон»…
     pub kind_pc: &'static str,
     pub kind_pi: &'static str,
@@ -91,6 +93,7 @@ pub struct MeshStrings {
 }
 
 pub static RU: MeshStrings = MeshStrings {
+    file_damaged: "файл пришёл повреждённым",
     kind_pc: "Компьютер",
     kind_pi: "Raspberry Pi",
     kind_phone: "Телефон",
@@ -170,6 +173,7 @@ pub static RU: MeshStrings = MeshStrings {
 };
 
 pub static EN: MeshStrings = MeshStrings {
+    file_damaged: "the file arrived damaged",
     kind_pc: "Computer",
     kind_pi: "Raspberry Pi",
     kind_phone: "Phone",
