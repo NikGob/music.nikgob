@@ -263,7 +263,7 @@ impl Chrome {
         if top.contains(&Act::Visualizer) {
             rows.insert(at + 1, own(Act::Visualizer));
         }
-        if let Some(file) = super::pages::widgets::sub_rows_mut(&mut rows, super::pages::FILE) {
+        if let Some(file) = super::pages::widgets::sub_rows_mut(&mut rows, super::pages::widgets::SubId::File) {
             if state.lyrics.track == Some(t.id) && super::lyrics_ui::can_edit(state) {
                 let at = file
                     .iter()
@@ -807,7 +807,7 @@ mod tests {
 
     use nikgob_view::TrackId;
 
-    use crate::screens::pages::{FILE, LibraryRowsOf, TrackAct as A, library_track_rows, widgets::{row_acts, row_items, sub_rows}};
+    use crate::screens::pages::{LibraryRowsOf, TrackAct as A, library_track_rows, widgets::{SubId, row_acts, row_items, sub_rows}};
 
     fn track(has_local: bool, liked: bool) -> TrackRow {
         TrackRow {
@@ -852,7 +852,7 @@ mod tests {
         let share = acts.iter().position(|a| *a == PlayerAct::Track(A::Share)).unwrap();
         assert_eq!(&acts[share..share + 5], [PlayerAct::Track(A::Share), eq, viz, PlayerAct::Track(A::Info), PlayerAct::Track(A::Fetch)]);
         // «Источник и качество» first in «Файл», the tags after it.
-        let file = row_acts(sub_rows(&np, FILE).unwrap());
+        let file = row_acts(sub_rows(&np, SubId::File).unwrap());
         assert_eq!(&file[..2], [PlayerAct::Track(A::Info), PlayerAct::Track(A::Fetch)]);
         assert_eq!(file.last(), Some(&PlayerAct::Own(Act::Trash)));
         let top = [Act::Like, Act::Lyrics, Act::Volume];
@@ -867,9 +867,9 @@ mod tests {
         // «Файл»), «Источник и качество» in «Файл».
         let rows = Chrome::player_rows(&ctx, &full(false), &state, &[Act::Visualizer], true, true);
         let fetch = rows.iter().position(|r| matches!(r, Row::Item(PlayerAct::Track(A::Fetch), _))).expect("«Скачать» on top");
-        let file_at = rows.iter().position(|r| matches!(r, Row::Sub(m, _) if m.label == FILE)).unwrap();
+        let file_at = rows.iter().position(|r| matches!(r, Row::Sub(SubId::File, ..))).unwrap();
         assert!(fetch < file_at);
-        let file = row_acts(sub_rows(&rows, FILE).unwrap());
+        let file = row_acts(sub_rows(&rows, SubId::File).unwrap());
         assert_eq!(file[0], PlayerAct::Track(A::Info));
         assert!(!file.contains(&PlayerAct::Track(A::Fetch)));
     }
@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(acts.len(), plain.len() - 1);
         assert_eq!(acts[0], PlayerAct::Own(Act::Like));
         assert!(!acts.contains(&PlayerAct::Track(A::Equalizer)));
-        let file = row_acts(sub_rows(&rows, FILE).unwrap());
+        let file = row_acts(sub_rows(&rows, SubId::File).unwrap());
         assert_eq!(file[..2], [PlayerAct::Own(Act::Visualizer), PlayerAct::Track(A::Fetch)]);
         assert_eq!(file.last(), Some(&PlayerAct::Own(Act::Trash)));
         let at = rows.iter().position(|r| matches!(r, Row::Sub(..))).unwrap();
@@ -968,7 +968,7 @@ mod tests {
         let edit = PlayerAct::Own(Act::EditLyrics);
         let file = |state: &ViewState| {
             let rows = Chrome::player_rows(&ctx, &t, state, &[], false, false);
-            row_acts(sub_rows(&rows, FILE).unwrap())
+            row_acts(sub_rows(&rows, SubId::File).unwrap())
         };
         assert!(!file(&state).contains(&edit));
         state.lyrics.track = Some(t.id);

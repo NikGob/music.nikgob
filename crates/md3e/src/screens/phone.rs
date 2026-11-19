@@ -179,7 +179,7 @@ fn flatten(rows: Vec<pages::widgets::Row<TrackAct>>, out: &mut Vec<TrackMenuEntr
     for r in rows {
         match r {
             Row::Item(act, item) => out.push(TrackMenuEntry { label: item.label, icon: item.icon, act }),
-            Row::Sub(_, inner) => flatten(inner, out),
+            Row::Sub(_, _, inner) => flatten(inner, out),
             Row::Divider | Row::Label(_) => {}
         }
     }

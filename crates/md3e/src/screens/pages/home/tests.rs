@@ -11,6 +11,11 @@ fn context() -> Context {
     ctx
 }
 
+/// «Музыки пока нет» as the empty Главная draws it.
+fn empty_line() -> &'static str {
+    nikgob_core::i18n::pages_in(nikgob_core::i18n::Locale::Ru).empty_line
+}
+
 fn song(title: &str) -> TrackRow {
     TrackRow {
         id: TrackId::new(),
@@ -222,7 +227,7 @@ fn an_empty_home_is_one_line_and_the_ways_in() {
     st.home.library_empty = true;
     for width in [1280.0, 720.0] {
         let page = texts(&st, width);
-        assert!(page.contains(EMPTY_LINE), "{width}");
+        assert!(page.contains(empty_line()), "{width}");
         for way in ["Spotify", "YouTube Music", "SoundCloud", "Добавить папку", "Найти музыку"] {
             assert!(page.contains(way), "«{way}» at {width}");
         }
@@ -238,7 +243,7 @@ fn a_library_with_music_but_no_rows_is_not_called_empty() {
     let st = ViewState::default();
     assert!(!st.home.library_empty);
     let page = texts(&st, 1280.0);
-    assert!(!page.contains(EMPTY_LINE));
+    assert!(!page.contains(empty_line()));
     assert!(page.contains("Добр") && page.contains("Добавить папку"));
 }
 
@@ -253,7 +258,7 @@ fn downloaded_only_with_nothing_keeps_the_chip_over_the_ways_in() {
         st.home.library_empty = empty;
         let page = texts(&st, 1280.0);
         assert!(page.contains("Только скачанное") && page.contains("Добавить папку"), "{empty}");
-        assert!(!page.contains(EMPTY_LINE), "{empty}");
+        assert!(!page.contains(empty_line()), "{empty}");
     }
 }
 

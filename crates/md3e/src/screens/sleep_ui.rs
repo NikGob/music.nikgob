@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use egui::{Color32, Id, Rect, Response, Sense, Ui, text::LayoutJob, vec2};
 use nikgob_view::{Command, SLEEP_MINUTES, SleepChoice, SleepContext, ViewState};
 
-use super::pages::widgets::Row;
+use super::pages::widgets::{Row, SubId};
 use crate::{
     Icon, Theme, TypeRole,
     components::{MenuItem, Radii, anim, paint, tooltip::tooltip},
@@ -70,7 +70,7 @@ pub fn rows<A>(state: &ViewState, wrap: impl Fn(SleepChoice) -> A) -> Vec<Row<A>
 /// The ⋮ row that opens the choices.
 pub fn submenu<A>(state: &ViewState, wrap: impl Fn(SleepChoice) -> A) -> Row<A> {
     let item = MenuItem::new(menu_label()).icon(Icon::Bedtime).selected(state.player.sleep.is_some());
-    Row::Sub(item, rows(state, wrap))
+    Row::Sub(SubId::Sleep, item, rows(state, wrap))
 }
 
 /// What the chip says now, while a timer runs (empty: not known how far

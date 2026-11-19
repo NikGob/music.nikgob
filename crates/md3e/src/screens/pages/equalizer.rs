@@ -45,9 +45,6 @@ const HALO_R: f32 = 16.0;
 /// names (one row of chips; a narrow window wraps them and takes more).
 pub(super) const EDITOR_H: f32 = 32.0 + 12.0 + FIELD_H + 24.0;
 
-// i18n: use band_names()
-pub(super) const BAND_NAMES: [&str; EQ_BANDS] = ["32", "64", "125", "250", "500", "1к", "2к", "4к", "8к", "16к"];
-
 /// The bands' names under the rails in the active locale.
 pub(super) fn band_names() -> [&'static str; EQ_BANDS] {
     nikgob_core::i18n::pages::band_names()

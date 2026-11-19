@@ -143,45 +143,6 @@ pub(crate) fn request_tracks_to_playlist(ctx: &Context, tracks: Vec<TrackId>, an
     ctx.data_mut(|d| d.insert_temp(picker_request_key(), (tracks, anchor)));
 }
 
-/// «Радио по треку» in the track menus.
-// i18n: use menus().radio_by_track
-pub(crate) const RADIO_BY_TRACK: &str = "Радио по треку";
-/// Right after the track playing.
-// i18n: use menus().play_next
-pub(crate) const PLAY_NEXT: &str = "Сыграть следующим";
-/// To the end of the queue.
-// i18n: use menus().to_queue
-pub(crate) const TO_QUEUE: &str = "В очередь";
-/// A song outside the library into it (no like, nothing downloads).
-// i18n: use menus().to_library
-pub(crate) const TO_LIBRARY: &str = "В библиотеку";
-/// A song in the library without a file or a like out of it.
-// i18n: use menus().out_of_library
-pub(crate) const OUT_OF_LIBRARY: &str = "Убрать из библиотеки";
-/// The like of a track or an album, and its undo.
-// i18n: use menus().like / menus().unlike
-pub(crate) const LIKE: &str = "Нравится";
-// i18n: use menus().unlike
-pub(crate) const UNLIKE: &str = "Убрать из любимого";
-/// The menu item of a track whose file holds another song.
-// i18n: use menus().wrong_file
-pub(crate) const WRONG_FILE: &str = "В файле другая песня";
-/// «Файл ▸» of a track whose lossless file surely holds an MP3.
-// i18n: use menus().to_mp3
-pub(crate) const TO_MP3: &str = "Превратить в MP3";
-/// A better copy of a file, through the download sources.
-// i18n: use menus().find_better
-pub(crate) const FIND_BETTER: &str = "Найти качество лучше";
-/// The indexer's search for a release of a track or an album, by hand.
-// i18n: use menus().pick_release
-pub(crate) const PICK_RELEASE: &str = "Выбрать раздачу…";
-/// A song of two albums is two songs: never linked again.
-// i18n: use menus().apart
-pub(crate) const APART: &str = "Разные песни";
-/// The submenu of a track's menu ([`track_rows`]).
-// i18n: use menus().file
-pub(crate) const FILE: &str = "Файл";
-
 /// The like of a track or an album as a menu item or a tooltip says it.
 pub(crate) fn like_label(liked: bool) -> &'static str {
     if liked { i18n::menus().unlike } else { i18n::menus().like }
@@ -343,7 +304,7 @@ pub(crate) fn retain_rows<A: Copy>(rows: Vec<widgets::Row<A>>, keep: &dyn Fn(A) 
     rows.into_iter()
         .filter_map(|r| match r {
             Row::Item(a, _) if !keep(a) => None,
-            Row::Sub(m, inner) => Some(Row::Sub(m, retain_rows(inner, keep))),
+            Row::Sub(id, m, inner) => Some(Row::Sub(id, m, retain_rows(inner, keep))),
             r => Some(r),
         })
         .collect()
@@ -547,7 +508,7 @@ pub fn track_rows(o: TrackMenuOf) -> Vec<widgets::Row<TrackAct>> {
             file.push(Row::Item(A::FindSong, MenuItem::new(f).icon(Icon::MusicNote)));
         }
     }
-    rows.push(Row::Sub(MenuItem::new(i18n::menus().file).icon(Icon::Folder), file));
+    rows.push(Row::Sub(widgets::SubId::File, MenuItem::new(i18n::menus().file).icon(Icon::Folder), file));
     rows.push(Row::Divider);
     rows.push(Row::Item(A::Dislike, o.dislike));
     rows.extend(o.ban.map(|b| Row::Item(A::Ban, b)));
@@ -561,7 +522,7 @@ pub fn track_rows(o: TrackMenuOf) -> Vec<widgets::Row<TrackAct>> {
 /// Where the rows of the sound go in a track's `rows`: right before «Файл».
 pub(crate) fn sound_at<A>(rows: &[widgets::Row<A>]) -> usize {
     rows.iter()
-        .position(|r| matches!(r, widgets::Row::Sub(item, _) if item.label == i18n::menus().file))
+        .position(|r| matches!(r, widgets::Row::Sub(widgets::SubId::File, _, _)))
         .unwrap_or(rows.len())
 }
 
@@ -588,8 +549,8 @@ pub(crate) fn placed<A: Copy>(
     let mut parent = None;
     for (i, r) in rows.into_iter().enumerate() {
         match r {
-            Row::Sub(m, inner) if i == at => {
-                parent = Some(m);
+            Row::Sub(id, m, inner) if i == at => {
+                parent = Some((id, m));
                 for r in inner {
                     match r {
                         Row::Item(a, m) => match place(a) {
@@ -618,7 +579,7 @@ pub(crate) fn placed<A: Copy>(
     drop(file.splice(deletes..deletes, tail));
     head.extend(file);
     before.extend(out);
-    before.extend(parent.map(|m| Row::Sub(m, head)));
+    before.extend(parent.map(|(id, m)| Row::Sub(id, m, head)));
     before.extend(after);
     before
 }
@@ -723,7 +684,7 @@ pub(crate) fn library_track_rows(track: &TrackRow, o: LibraryRowsOf<'_>) -> Vec<
     // A lossless file the check is sure holds an MP3 (its row says «FLAC
     // из MP3»): that MP3, right after the better copy. A doubt has none.
     let mp3 = track.has_local && track.quality.as_deref().is_some_and(nikgob_core::quality::row_label_mp3_inside);
-    if mp3 && let Some(file) = widgets::sub_rows_mut(&mut rows, i18n::menus().file) {
+    if mp3 && let Some(file) = widgets::sub_rows_mut(&mut rows, widgets::SubId::File) {
         let at = file
             .iter()
             .position(|r| matches!(r, widgets::Row::Item(TrackAct::Better, _)))
@@ -734,7 +695,7 @@ pub(crate) fn library_track_rows(track: &TrackRow, o: LibraryRowsOf<'_>) -> Vec<
     // song without an album has no cover of its own to refresh.
     if track.has_local
         && track.release_id.is_some()
-        && let Some(file) = widgets::sub_rows_mut(&mut rows, i18n::menus().file)
+        && let Some(file) = widgets::sub_rows_mut(&mut rows, widgets::SubId::File)
     {
         file.push(widgets::Row::Item(TrackAct::RefreshCover, MenuItem::new(i18n::menus().refresh_cover).icon(Icon::Refresh)));
     }
@@ -758,7 +719,7 @@ fn push_deletes(rows: &mut Vec<widgets::Row<TrackAct>>, track: &TrackRow) {
     if track.has_local {
         deletes.push(widgets::Row::Item(TrackAct::Purge, MenuItem::new(i18n::menus().purge_forever).icon(Icon::Delete)));
     }
-    match widgets::sub_rows_mut(rows, i18n::menus().file) {
+    match widgets::sub_rows_mut(rows, widgets::SubId::File) {
         Some(file) => file.extend(deletes),
         None => rows.extend(deletes),
     }
@@ -1254,7 +1215,7 @@ impl PageState {
         let can_download = f.result.is_some() && ready && n_sel > 0;
         let mut open = true;
         let sel = &mut self.files_sel;
-        let r = crate::components::Dialog::new("torrent-files", i18n::search().pick_files)
+        let r = crate::components::Dialog::new("torrent-files", i18n::search().pick_files_title)
             .supporting(if f.name.is_empty() { i18n::search().torrent_word } else { f.name.as_str() })
             .max_width(560.0)
             .action(i18n::common().cancel)
@@ -1910,7 +1871,7 @@ mod speed_tests {
 
     use nikgob_view::{SpeedVariant, TrackSpeeds};
 
-    use super::widgets::{Row, row_acts, row_items, shown_rows, sub_rows};
+    use super::widgets::{Row, SubId, row_acts, row_items, shown_rows, sub_rows};
     use super::*;
 
     fn rows() -> Vec<Row<TrackAct>> {
@@ -1955,10 +1916,21 @@ mod speed_tests {
     fn labels(rows: &[Row<TrackAct>]) -> Vec<String> {
         rows.iter()
             .filter_map(|r| match r {
-                Row::Item(_, item) | Row::Sub(item, _) => Some(item.label.clone()),
+                Row::Item(_, item) | Row::Sub(_, item, _) => Some(item.label.clone()),
                 Row::Divider | Row::Label(_) => None,
             })
             .collect()
+    }
+
+    /// A submenu is found by its id, never by its translated label: the
+    /// player's «Файл» keeps its own items under either locale's label.
+    #[test]
+    fn the_file_submenu_is_found_by_id_under_any_label() {
+        for label in [i18n::menus_in(i18n::Locale::Ru).file, i18n::menus_in(i18n::Locale::En).file] {
+            let mut rows: Vec<Row<()>> = vec![Row::Sub(SubId::File, MenuItem::new(label), Vec::new())];
+            assert!(widgets::sub_rows_mut(&mut rows, SubId::File).is_some(), "{label}");
+            assert!(widgets::sub_rows_mut(&mut rows, SubId::Sleep).is_none(), "{label}");
+        }
     }
 
     /// «Скорость…» is in the menu of the track playing, right before
@@ -1981,7 +1953,7 @@ mod speed_tests {
         assert_eq!(acts[share + 1..share + 3], [TrackAct::Fetch, TrackAct::Speed]);
         let at = on.iter().position(|r| matches!(r, Row::Item(TrackAct::Speed, _))).unwrap();
         assert!(matches!(on[at - 1], Row::Item(TrackAct::Fetch, _)));
-        assert!(matches!(&on[at + 1], Row::Sub(item, _) if item.label == FILE));
+        assert!(matches!(&on[at + 1], Row::Sub(SubId::File, item, _) if item.label == i18n::menus_in(i18n::Locale::Ru).file));
     }
 
     /// The row is the same whatever the track's speed: nothing marks it.
@@ -2003,15 +1975,16 @@ mod speed_tests {
     fn the_menu_is_in_its_groups_and_the_files_are_in_a_submenu() {
         let shown = shown_rows(rows());
         let top = labels(&shown);
-        assert_eq!(&top[..4], [PLAY_NEXT, TO_QUEUE, RADIO_BY_TRACK, "В плейлист…"]);
+        let ru = i18n::menus_in(i18n::Locale::Ru);
+        assert_eq!(&top[..4], [ru.play_next, ru.to_queue, ru.radio_by_track, ru.to_playlist]);
         assert!(matches!(shown[3], Row::Divider) && matches!(shown[5], Row::Divider));
         // «Файл» stays a submenu even with «Скачать альбом» alone.
-        assert_eq!(&top[top.len() - 5..], ["Поделиться", "Скачать", FILE, "Не нравится", "Не рекомендовать исполнителя"]);
-        assert_eq!(row_acts(sub_rows(&shown, FILE).unwrap()), [TrackAct::AlbumDownload]);
+        assert_eq!(&top[top.len() - 5..], [ru.share, ru.download, ru.file, ru.dislike, ru.ban_artist]);
+        assert_eq!(row_acts(sub_rows(&shown, SubId::File).unwrap()), [TrackAct::AlbumDownload]);
         // The speed stands in the menu itself, right before «Файл».
         let top = labels(&with_speed_row(rows(), &speeds(true, &[]), true));
         let at = top.iter().position(|l| l == "Скорость…").unwrap();
-        assert_eq!(top[at + 1], FILE);
+        assert_eq!(top[at + 1], ru.file);
         let shown = shown_rows(with_speed_row(rows(), &speeds(true, &[]), true));
         // What is shown stands for the same actions in the same order.
         assert_eq!(row_acts(&shown), row_acts(&with_speed_row(rows(), &speeds(true, &[]), true)));
@@ -2020,14 +1993,14 @@ mod speed_tests {
         let marks = nikgob_view::DislikesView::default();
         let mut library = library_track_rows(&t, of(&marks, true));
         push_deletes(&mut library, &t);
-        let file = row_acts(sub_rows(&library, FILE).unwrap());
+        let file = row_acts(sub_rows(&library, SubId::File).unwrap());
         assert_eq!(
             file,
             [TrackAct::Info, TrackAct::Fetch, TrackAct::Better, TrackAct::WrongFile, TrackAct::RefreshCover, TrackAct::Trash, TrackAct::Purge]
         );
         let top = labels(&library);
         let share = top.iter().position(|l| l == "Поделиться").unwrap();
-        assert_eq!(top[share + 1], FILE);
+        assert_eq!(top[share + 1], ru.file);
         let acts = row_acts(&library);
         assert_eq!(&acts[acts.len() - 2..], [TrackAct::Dislike, TrackAct::Ban]);
     }
@@ -2097,14 +2070,14 @@ mod speed_tests {
         let marks = nikgob_view::DislikesView::default();
         let file = |t: &TrackRow, torrents: bool| {
             let rows = library_track_rows(t, LibraryRowsOf { torrents, ..of(&marks, false) });
-            row_acts(sub_rows(&rows, FILE).unwrap())
+            row_acts(sub_rows(&rows, SubId::File).unwrap())
         };
         assert!(file(&track(true), true).contains(&TrackAct::Better));
         assert!(!file(&track(true), true).contains(&TrackAct::PickRelease));
         assert_eq!(file(&track(false), true), [TrackAct::AlbumDownload, TrackAct::PickRelease]);
         assert_eq!(file(&track(false), false), [TrackAct::AlbumDownload]);
         let rows = library_track_rows(&track(false), LibraryRowsOf { torrents: true, ..of(&marks, false) });
-        assert!(row_items(&rows).iter().any(|(a, i)| *a == TrackAct::PickRelease && i.label == PICK_RELEASE));
+        assert!(row_items(&rows).iter().any(|(a, i)| *a == TrackAct::PickRelease && i.label == i18n::menus_in(i18n::Locale::Ru).pick_release));
         assert_eq!(TrackAct::PickRelease.menu_item(false), Some(TrackMenuItem::PickRelease));
         assert_eq!(TrackAct::Better.menu_item(true), Some(TrackMenuItem::Torrents));
     }
@@ -2128,7 +2101,7 @@ mod speed_tests {
     fn only_a_sure_fake_offers_its_mp3() {
         let row = |quality: Option<&str>, has_local: bool| TrackRow { quality: quality.map(str::to_owned), ..track(has_local) };
         let marks = nikgob_view::DislikesView::default();
-        let file = |t: &TrackRow| row_acts(sub_rows(&library_track_rows(t, of(&marks, true)), FILE).unwrap());
+        let file = |t: &TrackRow| row_acts(sub_rows(&library_track_rows(t, of(&marks, true)), SubId::File).unwrap());
         let fake = file(&row(Some("FLAC из MP3 ~128"), true));
         let at = fake.iter().position(|a| *a == TrackAct::Better).unwrap();
         assert_eq!(fake[at + 1], TrackAct::ToMp3);
@@ -2142,7 +2115,7 @@ mod speed_tests {
     #[test]
     fn the_cover_of_a_files_album_is_refreshed_from_its_file_menu() {
         let marks = nikgob_view::DislikesView::default();
-        let file = |t: &TrackRow| row_acts(sub_rows(&library_track_rows(t, of(&marks, true)), FILE).unwrap());
+        let file = |t: &TrackRow| row_acts(sub_rows(&library_track_rows(t, of(&marks, true)), SubId::File).unwrap());
         assert_eq!(file(&track(true)).last(), Some(&TrackAct::RefreshCover));
         let loose = TrackRow { release_id: None, album: None, ..track(true) };
         assert!(!file(&loose).contains(&TrackAct::RefreshCover));
@@ -2151,7 +2124,7 @@ mod speed_tests {
         let full = track(true);
         let rows = library_track_rows(&full, of(&marks, true));
         let items = row_items(&rows);
-        assert!(items.iter().any(|(a, i)| *a == TrackAct::RefreshCover && i.label == widgets::REFRESH_COVER));
+        assert!(items.iter().any(|(a, i)| *a == TrackAct::RefreshCover && i.label == i18n::menus_in(i18n::Locale::Ru).refresh_cover));
     }
 
     /// «Меню трека»: an item sent to «Файл» joins the submenu in the menu's
@@ -2180,7 +2153,7 @@ mod speed_tests {
                 })
                 .collect()
         };
-        let file = |rows: &[Row<A>]| row_acts(sub_rows(rows, FILE).unwrap());
+        let file = |rows: &[Row<A>]| row_acts(sub_rows(rows, SubId::File).unwrap());
         assert_eq!(row_acts(&with(&[])), row_acts(&library()));
         let plain = (top(&library()), file(&library()));
         assert_eq!(plain.1[..3], [A::Info, A::Fetch, A::Better]);
@@ -2192,7 +2165,7 @@ mod speed_tests {
         let f = file(&rows);
         assert_eq!(f[..4], [A::Radio, A::Share, A::Info, A::Fetch]);
         assert_eq!(f[f.len() - 3..], [A::Ban, A::Trash, A::Purge]);
-        assert!(matches!(sub_rows(&rows, FILE).unwrap()[f.len() - 2], Row::Divider));
+        assert!(matches!(sub_rows(&rows, SubId::File).unwrap()[f.len() - 2], Row::Divider));
 
         // Hidden: not built at all.
         let rows = with(&[(I::Info, P::Hidden), (I::Torrents, P::Hidden)]);
@@ -2260,7 +2233,7 @@ mod speed_tests {
         // The album's download is no way to its page: it stays.
         let missing = track(false);
         let on_its_album = Here::of(&Route::Release(missing.release_id.unwrap()));
-        let file = |rows: Vec<Row<TrackAct>>| row_acts(sub_rows(&rows, FILE).unwrap());
+        let file = |rows: Vec<Row<TrackAct>>| row_acts(sub_rows(&rows, SubId::File).unwrap());
         assert!(file(on_its_album.trim(library_track_rows(&missing, of(&marks, false)), &missing, None, Some)).contains(&TrackAct::AlbumDownload));
 
         let on_artist = acts(&Here::of(&Route::Artist(artist)), &t);
@@ -2283,7 +2256,7 @@ mod speed_tests {
         use nikgob_view::{TrackMenuItem as I, TrackMenuPlace as P, TrackMenuSlot};
         let slots = [TrackMenuSlot { item: I::Album, place: P::File }];
         let rows = placed(library_track_rows(&t, of(&marks, false)), &slots, |a| a.menu_item(true));
-        assert!(row_acts(sub_rows(&rows, FILE).unwrap()).contains(&TrackAct::Album));
+        assert!(row_acts(sub_rows(&rows, SubId::File).unwrap()).contains(&TrackAct::Album));
         let rows = Here::of(&Route::Release(album)).trim(rows, &t, None, Some);
         assert!(!row_acts(&rows).contains(&TrackAct::Album));
 

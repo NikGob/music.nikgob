@@ -1005,7 +1005,7 @@ mod tests {
                 page = frame(&ctx, &mut ui, &mut state, f64::from(i) * 0.1, width, None);
             }
             assert!(page.contains("Откуда брать музыку?") && page.contains("Пропустить"), "{width}");
-            assert!(!page.contains(super::super::home::EMPTY_LINE), "nothing of the shell under it at {width}");
+            assert!(!page.contains(nikgob_core::i18n::pages_in(nikgob_core::i18n::Locale::Ru).empty_line), "nothing of the shell under it at {width}");
             // ✕ at the top right.
             let close = pos2(width - if width < 600.0 { 16.0 } else { 24.0 } - 20.0, 36.0);
             frame(&ctx, &mut ui, &mut state, 3.1, width, Some((close, true)));
@@ -1018,7 +1018,7 @@ mod tests {
             }
             assert!(!page.contains("Откуда брать музыку?"), "{width}");
             if width >= 600.0 {
-                assert!(page.contains(super::super::home::EMPTY_LINE), "the empty Главная at {width}");
+                assert!(page.contains(nikgob_core::i18n::pages_in(nikgob_core::i18n::Locale::Ru).empty_line), "the empty Главная at {width}");
             }
         }
     }
