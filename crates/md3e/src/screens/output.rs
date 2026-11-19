@@ -58,7 +58,9 @@ const VOLUME_H: f32 = 48.0;
 const FOOT_GAP: f32 = 4.0;
 const FOOT_H: f32 = 40.0;
 /// The name of this computer's sound device when none is chosen.
-const SYSTEM_DEVICE: &str = "Системное по умолчанию";
+fn system_device() -> &'static str {
+    nikgob_core::i18n::screens().system_device
+}
 
 /// There is somewhere else to play: another device in the ring, or this
 /// window drives one now.
@@ -230,7 +232,7 @@ pub(crate) fn button(ui: &mut Ui, state: &ViewState, salt: &str, look: Look, wan
     if !wanted {
         return;
     }
-    let tip = if look.collapsed && state.target.is_some() && !f.name.is_empty() { f.name.clone() } else { "Где играть".to_owned() };
+    let tip = if look.collapsed && state.target.is_some() && !f.name.is_empty() { f.name.clone() } else { nikgob_core::i18n::screens().play_where.to_owned() };
     let resp = tooltip(resp, &tip, None);
     if resp.middle_clicked() {
         chrome.output.close();
@@ -369,7 +371,7 @@ fn places(state: &ViewState) -> Vec<Place> {
     };
     let mut out = vec![Place {
         node: None,
-        name: "Этот компьютер".to_owned(),
+        name: nikgob_core::i18n::screens().this_computer.to_owned(),
         kind: MeshKind::Pc,
         avatar: Avatar { online: true, playing: target.is_none() && state.player.status == Status::Playing },
         guest: false,
@@ -518,12 +520,12 @@ fn place(ui: &mut Ui, id: Id, p: &Place, room: &Room, devices: &[String], chosen
     tui.spacing_mut().item_spacing.x = 4.0;
     let mut text_right = row.right() - SIDE;
     if let Some(open) = chevron {
-        let b = tui.add(IconButton::new(if open { Icon::ExpandLess } else { Icon::ExpandMore }).size(Size::Xs).tooltip("Устройства вывода").id_salt(id.with("chevron")));
+        let b = tui.add(IconButton::new(if open { Icon::ExpandLess } else { Icon::ExpandMore }).size(Size::Xs).tooltip(nikgob_core::i18n::screens().output_devices).id_salt(id.with("chevron")));
         hit.chevron = b.clicked();
         text_right = text_right.min(b.rect.left() - 8.0);
     }
     if p.swap {
-        let tip = if p.node.is_some() { "Перенести мою очередь сюда" } else { "Перенести сюда" };
+        let tip = if p.node.is_some() { nikgob_core::i18n::screens().move_queue_here } else { nikgob_core::i18n::screens().move_here };
         let b = tui.add(IconButton::new(Icon::SwapHoriz).size(Size::Xs).style(Style::Tonal).tooltip(tip).id_salt(id.with("swap")));
         hit.swap = b.clicked();
         text_right = text_right.min(b.rect.left() - 8.0);
@@ -534,7 +536,7 @@ fn place(ui: &mut Ui, id: Id, p: &Place, room: &Room, devices: &[String], chosen
     let x = row.left() + TEXT_X;
     let max_w = (text_right - x).max(8.0);
     let top = if p.second.is_some() { row.center().y - (HEADLINE_H + SUPPORT_H) / 2.0 } else { row.center().y - HEADLINE_H / 2.0 };
-    let badge = p.guest.then(|| line(ui, "Гость", TypeRole::LabelSmall.style(), s.on_tertiary_container, 80.0));
+    let badge = p.guest.then(|| line(ui, nikgob_core::i18n::screens().guest, TypeRole::LabelSmall.style(), s.on_tertiary_container, 80.0));
     let badge_w = badge.as_ref().map_or(0.0, |g| g.size().x + 12.0 + 8.0);
     let name = line(ui, &p.name, TypeRole::BodyLarge.style(), content, max_w - badge_w);
     let name_w = name.size().x;
@@ -567,7 +569,7 @@ fn place(ui: &mut Ui, id: Id, p: &Place, room: &Room, devices: &[String], chosen
         let mut sui = ui.new_child(UiBuilder::new().max_rect(sub).id_salt(id.with("sub")));
         sui.set_clip_rect(sub.intersect(ui.clip_rect()));
         sui.multiply_opacity(room.sub.clamp(0.0, 1.0));
-        for (i, name) in std::iter::once(SYSTEM_DEVICE).chain(devices.iter().map(String::as_str)).enumerate() {
+        for (i, name) in std::iter::once(system_device()).chain(devices.iter().map(String::as_str)).enumerate() {
             let r = Rect::from_min_size(pos2(row.left(), sub.top() + i as f32 * SUB_H), vec2(w, SUB_H));
             let shown = r.intersect(sub);
             if shown.height() < 1.0 {
@@ -609,7 +611,7 @@ fn place(ui: &mut Ui, id: Id, p: &Place, room: &Room, devices: &[String], chosen
             vui.disable();
         }
         let shown = if volume.muted { 0.0 } else { volume.value };
-        let mute = vui.add(IconButton::new(Icon::volume(shown, volume.muted)).size(Size::Xs).tooltip("Без звука").id_salt(id.with("mute"))).clicked();
+        let mute = vui.add(IconButton::new(Icon::volume(shown, volume.muted)).size(Size::Xs).tooltip(nikgob_core::i18n::screens().mute_tooltip).id_salt(id.with("mute"))).clicked();
         let label_w = 40.0;
         let slider_w = (vui.available_width() - label_w - 8.0).max(48.0);
         let track = if volume.duck { s.primary.gamma_multiply(0.45) } else { s.primary };
@@ -742,12 +744,12 @@ pub(crate) fn popover(chrome: &mut Chrome, ctx: &Context, state: &ViewState, out
             // The footer under the places, at the popover's foot.
             let foot = Rect::from_min_size(pos2(inner.left(), inner.bottom() - FOOT_H), vec2(inner.width(), FOOT_H));
             let mut left = col.new_child(UiBuilder::new().max_rect(foot).layout(Layout::left_to_right(Align::Center)).id_salt(id.with("foot-left")));
-            let add = left.add(Button::new("Добавить").icon(Icon::Add).style(Style::Text).size(Size::Xs).id_salt(id.with("add")));
+            let add = left.add(Button::new(nikgob_core::i18n::common().add).icon(Icon::Add).style(Style::Text).size(Size::Xs).id_salt(id.with("add")));
             if add.clicked() {
                 add_at = Some(add.rect);
             }
             let mut right = col.new_child(UiBuilder::new().max_rect(foot).layout(Layout::right_to_left(Align::Center)).id_salt(id.with("foot-right")));
-            to_map = right.add(Button::new("Карта сети").icon(Icon::OpenInNew).style(Style::Text).size(Size::Xs).id_salt(id.with("map"))).clicked();
+            to_map = right.add(Button::new(nikgob_core::i18n::screens().network_map).icon(Icon::OpenInNew).style(Style::Text).size(Size::Xs).id_salt(id.with("map"))).clicked();
         });
     let layer = area.response.layer_id;
     ctx.move_to_top(layer);

@@ -82,7 +82,7 @@ impl Rows {
 /// «Вернуть найденный», with the user's own text there.
 fn found_row(m: &mut Rows, state: &ViewState) {
     if super::has_own(&state.lyrics) {
-        m.item(MenuItem::new("Вернуть найденный"), Row::Found);
+        m.item(MenuItem::new(nikgob_core::i18n::lyrics().restore_found), Row::Found);
     }
 }
 
@@ -100,7 +100,7 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
     let mut m = Rows { menu: Some(Menu::new(("lyrics-menu", l.track)).align_center(left.is_none())), rows: Vec::new(), open: false, ended: false };
     if l.track.is_some() && !l.sources.is_empty() {
         // Says which text the player chose.
-        let mut auto = MenuItem::new("Автоматически").selected(!l.picked);
+        let mut auto = MenuItem::new(nikgob_core::i18n::lyrics().auto).selected(!l.picked);
         if let Some(src) = l.source.filter(|_| !l.picked) {
             auto = auto.shortcut(super::source_name(l, src));
         }
@@ -118,7 +118,7 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
         }
         // Every source asked again (not while one still answers).
         let searching = l.sources.iter().any(|o| o.state == LyricsAvail::Loading);
-        m.item(MenuItem::new("Искать текст заново").enabled(!searching), Row::Search);
+        m.item(MenuItem::new(nikgob_core::i18n::lyrics().search_again).enabled(!searching), Row::Search);
         m.split();
     }
     let busy = super::busy(state).is_some();
@@ -144,7 +144,7 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
             }
         }
         if busy {
-            m.item(MenuItem::new("Отменить подсветку"), Row::Cancel);
+            m.item(MenuItem::new(nikgob_core::i18n::lyrics().cancel_sync), Row::Cancel);
         }
         if let Some(why) = super::no_craft(state) {
             m.label(why);
@@ -153,9 +153,9 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
         // Everything else about the text is in the window or on the page,
         // which shows the timing being made too.
         let label = match (busy, l.savable) {
-            (true, _) => "Подсветка делается…",
-            (false, true) => "Подсветка и сохранение…",
-            (false, false) => "Подсветка…",
+            (true, _) => nikgob_core::i18n::lyrics().craft_busy,
+            (false, true) => nikgob_core::i18n::lyrics().craft_save,
+            (false, false) => nikgob_core::i18n::lyrics().craft,
         };
         m.item(MenuItem::new(label), Row::Craft);
         found_row(&mut m, state);
@@ -163,7 +163,7 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
     m.split();
     // Offered until it was picked once (the settings remember).
     if !state.prefs.lyrics_settings_seen {
-        m.item(MenuItem::new("Настройки текста…"), Row::Settings);
+        m.item(MenuItem::new(nikgob_core::i18n::lyrics().settings_menu), Row::Settings);
     }
     let Rows { menu, rows, .. } = m;
     // Nothing to offer (no text yet, settings seen): no empty menu.

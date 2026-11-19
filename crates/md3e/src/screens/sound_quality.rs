@@ -19,7 +19,7 @@ const RANGE_DB: f32 = 90.0;
 /// caller leaves the room above it).
 pub(super) fn section(ui: &mut Ui, d: &SoundDetails, track: Option<TrackId>, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
-    ui.label(TypeRole::TitleSmall.style().rich("Качество", s.on_surface_variant));
+    ui.label(TypeRole::TitleSmall.style().rich(nikgob_core::i18n::screens().quality, s.on_surface_variant));
     ui.add_space(8.0);
     if let Some(v) = &d.verdict {
         let color = if d.warning { s.error } else { s.on_surface };
@@ -27,7 +27,7 @@ pub(super) fn section(ui: &mut Ui, d: &SoundDetails, track: Option<TrackId>, out
         ui.add_space(4.0);
     }
     if let Some(b) = &d.band {
-        fact(ui, "Реальная полоса", b);
+        fact(ui, nikgob_core::i18n::screens().real_band, b);
     }
     // Under the verdict: the MP3 a sure fake holds, and a better copy (a
     // doubt gets only the search).
@@ -140,7 +140,7 @@ fn chart(ui: &mut Ui, p: &SpectrumPlot) {
     painter.text(
         pos2(rect.right(), rect.bottom() + 4.0),
         egui::Align2::RIGHT_TOP,
-        "кГц",
+        nikgob_core::i18n::sound_facts().khz,
         font.clone(),
         s.on_surface_variant,
     );

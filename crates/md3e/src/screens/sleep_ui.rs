@@ -5,16 +5,18 @@
 use std::time::{Duration, Instant};
 
 use egui::{Color32, Id, Rect, Response, Sense, Ui, text::LayoutJob, vec2};
-use nikgob_view::{Command, SLEEP_MINUTES, SleepChoice, SleepContext, ViewState, sleep_left_label};
+use nikgob_view::{Command, SLEEP_MINUTES, SleepChoice, SleepContext, ViewState};
 
-use super::{common::plural, pages::widgets::Row};
+use super::pages::widgets::Row;
 use crate::{
     Icon, Theme, TypeRole,
     components::{MenuItem, Radii, anim, paint, tooltip::tooltip},
 };
 
 /// The row of the player's ⋮ that opens the choices.
-pub const MENU_LABEL: &str = "Таймер сна";
+pub fn menu_label() -> &'static str {
+    nikgob_core::i18n::screens().sleep_timer
+}
 /// The timer's key.
 pub const KEY: &str = "T";
 
@@ -25,20 +27,22 @@ const GAP: f32 = 6.0;
 
 /// What a choice is called in the menu.
 pub fn choice_label(choice: SleepChoice, context: SleepContext) -> String {
+    let loc = nikgob_core::i18n::locale();
+    let s = nikgob_core::i18n::screens_in(loc);
     match choice {
         SleepChoice::Minutes(m) if m % 60 == 0 => {
             let h = u64::from(m / 60);
-            format!("{h} {}", plural(h, "час", "часа", "часов"))
+            format!("{h} {}", nikgob_core::i18n::plural_forms(loc, h, &s.hours))
         }
-        SleepChoice::Minutes(m) if m > 60 && m % 30 == 0 => format!("{},5 часа", m / 60),
-        SleepChoice::Minutes(m) => format!("{m} {}", plural(u64::from(m), "минута", "минуты", "минут")),
-        SleepChoice::TrackEnd => "До конца трека".to_owned(),
+        SleepChoice::Minutes(m) if m > 60 && m % 30 == 0 => nikgob_core::i18n::screens::fmt_half_hour_in(loc, u64::from(m / 60)),
+        SleepChoice::Minutes(m) => format!("{m} {}", nikgob_core::i18n::plural_forms(loc, u64::from(m), &s.minutes)),
+        SleepChoice::TrackEnd => s.sleep_track_end.to_owned(),
         SleepChoice::ContextEnd => match context {
-            SleepContext::Album => "До конца альбома".to_owned(),
-            SleepContext::Playlist => "До конца плейлиста".to_owned(),
-            SleepContext::Queue => "До конца очереди".to_owned(),
+            SleepContext::Album => s.sleep_album_end.to_owned(),
+            SleepContext::Playlist => s.sleep_playlist_end.to_owned(),
+            SleepContext::Queue => s.sleep_queue_end.to_owned(),
         },
-        SleepChoice::Off => "Выключить таймер".to_owned(),
+        SleepChoice::Off => s.sleep_off.to_owned(),
     }
 }
 
@@ -65,7 +69,7 @@ pub fn rows<A>(state: &ViewState, wrap: impl Fn(SleepChoice) -> A) -> Vec<Row<A>
 
 /// The ⋮ row that opens the choices.
 pub fn submenu<A>(state: &ViewState, wrap: impl Fn(SleepChoice) -> A) -> Row<A> {
-    let item = MenuItem::new(MENU_LABEL).icon(Icon::Bedtime).selected(state.player.sleep.is_some());
+    let item = MenuItem::new(menu_label()).icon(Icon::Bedtime).selected(state.player.sleep.is_some());
     Row::Sub(item, rows(state, wrap))
 }
 
@@ -73,7 +77,7 @@ pub fn submenu<A>(state: &ViewState, wrap: impl Fn(SleepChoice) -> A) -> Row<A> 
 /// its end is; the moon alone then).
 fn left_label(state: &ViewState) -> Option<String> {
     let s = state.player.sleep.as_ref()?;
-    Some(s.left(&state.player, Instant::now()).map(sleep_left_label).unwrap_or_default())
+    Some(s.left(&state.player, Instant::now()).map(|d| nikgob_core::i18n::screens::fmt_sleep_left(d.as_secs())).unwrap_or_default())
 }
 
 /// The chip's room in the row now (it grows in on a spring when a timer
@@ -163,7 +167,7 @@ pub fn chip(
     if state.player.sleep.is_none() {
         return;
     }
-    let tip = if collapsed && !label.is_empty() { format!("{MENU_LABEL}: {label}") } else { MENU_LABEL.to_owned() };
+    let tip = if collapsed && !label.is_empty() { nikgob_core::i18n::screens::fmt_sleep_tip(&label) } else { menu_label().to_owned() };
     let resp = tooltip(resp, &tip, Some(KEY));
     menu(&resp, state, salt, out);
 }

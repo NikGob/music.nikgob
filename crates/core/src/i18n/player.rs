@@ -21,6 +21,27 @@ pub struct PlayerStrings {
     pub queued_next: &'static str,
     pub added_to_queue: &'static str,
     pub queue_cleared: &'static str,
+    pub nothing_playing: &'static str,
+    pub wave_direction: &'static str,
+    pub shuffle_on_tip: &'static str,
+    pub shuffle_queue_tip: &'static str,
+    pub prev_tooltip: &'static str,
+    pub next_tooltip: &'static str,
+    pub buffering_tip: &'static str,
+    pub play_pause_tip: &'static str,
+    pub queue_ctrl_tooltip: &'static str,
+    pub volume_tip: &'static str,
+    pub sound_tip: &'static str,
+    pub volume_wheel_tip: &'static str,
+    pub dislike_tip: &'static str,
+    pub add_playlist_tip: &'static str,
+    pub sound_line_hint: &'static str,
+    pub repeat_off_tip: &'static str,
+    pub repeat_all_tip: &'static str,
+    pub repeat_one_tip: &'static str,
+    pub speed_tip: &'static str,
+    pub play_tip: &'static str,
+    pub volume_menu: &'static str,
 }
 
 impl PlayerStrings {
@@ -52,6 +73,27 @@ pub static RU: PlayerStrings = PlayerStrings {
     queued_next: "Сыграет следующим",
     added_to_queue: "Добавлено в очередь",
     queue_cleared: "Очередь очищена",
+    nothing_playing: "Ничего не играет",
+    wave_direction: "Сменить направление волны",
+    shuffle_on_tip: "Очередь перемешана — нажми, чтобы вернуть порядок",
+    shuffle_queue_tip: "Перемешать очередь",
+    prev_tooltip: "Назад (Ctrl+←)",
+    next_tooltip: "Далее (Ctrl+→)",
+    buffering_tip: "Загружается… (Space — пауза)",
+    play_pause_tip: "Пауза / играть (Space)",
+    queue_ctrl_tooltip: "Очередь (Ctrl+Q)",
+    volume_tip: "Громкость: наведи или крути колесо",
+    sound_tip: "Звук",
+    volume_wheel_tip: "Звук (колесо мыши — громкость)",
+    dislike_tip: "Не нравится",
+    add_playlist_tip: "В плейлист…",
+    sound_line_hint: "Откуда идёт звук и в каком качестве",
+    repeat_off_tip: "Повтор выключен — нажми, чтобы повторять очередь",
+    repeat_all_tip: "Повторяется вся очередь — нажми, чтобы повторять один трек",
+    repeat_one_tip: "Повторяется этот трек — нажми, чтобы выключить",
+    speed_tip: "Скорость",
+    play_tip: "Играть / пауза (Space)",
+    volume_menu: "Громкость…",
 };
 
 pub static EN: PlayerStrings = PlayerStrings {
@@ -65,6 +107,27 @@ pub static EN: PlayerStrings = PlayerStrings {
     queued_next: "Playing next",
     added_to_queue: "Added to queue",
     queue_cleared: "Queue cleared",
+    nothing_playing: "Nothing playing",
+    wave_direction: "Change wave direction",
+    shuffle_on_tip: "Queue shuffled — press to restore the order",
+    shuffle_queue_tip: "Shuffle the queue",
+    prev_tooltip: "Previous (Ctrl+←)",
+    next_tooltip: "Next (Ctrl+→)",
+    buffering_tip: "Loading… (Space to pause)",
+    play_pause_tip: "Pause / play (Space)",
+    queue_ctrl_tooltip: "Queue (Ctrl+Q)",
+    volume_tip: "Volume: hover or scroll to change",
+    sound_tip: "Sound",
+    volume_wheel_tip: "Sound (mouse wheel — volume)",
+    dislike_tip: "Don't recommend",
+    add_playlist_tip: "Add to playlist…",
+    sound_line_hint: "Where the sound comes from and its quality",
+    repeat_off_tip: "Repeat off — press to repeat the queue",
+    repeat_all_tip: "Repeating the queue — press to repeat one track",
+    repeat_one_tip: "Repeating this track — press to turn off",
+    speed_tip: "Speed",
+    play_tip: "Play / pause (Space)",
+    volume_menu: "Volume…",
 };
 
 locale_table! {
@@ -189,6 +252,19 @@ pub fn fmt_mb_in(loc: Locale, bytes: u64) -> String {
         Locale::Ru => val.replace('.', ","),
         Locale::En => val,
     }
+}
+
+/// Formats the speed mark's accessibility label (`"Скорость: ×1.2"` / `"Speed: ×1.2"`).
+pub fn fmt_speed_mark_in(loc: Locale, text: &str) -> String {
+    match loc {
+        Locale::Ru => format!("Скорость: {text}"),
+        Locale::En => format!("Speed: {text}"),
+    }
+}
+
+/// Formats the speed mark's accessibility label in the active locale.
+pub fn fmt_speed_mark(text: &str) -> String {
+    fmt_speed_mark_in(locale(), text)
 }
 
 /// Typed title for a running radio or autoplay queue, replacing raw Russian
@@ -662,4 +738,19 @@ fn parse_service_display(name: &str) -> Option<Service> {
         return None;
     }
     Service::ALL.iter().copied().find(|s| s.display_name().eq_ignore_ascii_case(name) || s.as_str().eq_ignore_ascii_case(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn speed_mark_label_translates() {
+        assert_eq!(fmt_speed_mark_in(Locale::Ru, "×1.2"), "Скорость: ×1.2");
+        assert_eq!(fmt_speed_mark_in(Locale::En, "×1.2"), "Speed: ×1.2");
+        assert_eq!(player_in(Locale::Ru).nothing_playing, "Ничего не играет");
+        assert_eq!(player_in(Locale::En).nothing_playing, "Nothing playing");
+        assert_eq!(player_in(Locale::Ru).repeat_one_tip, "Повторяется этот трек — нажми, чтобы выключить");
+        assert_eq!(player_in(Locale::En).repeat_one_tip, "Repeating this track — press to turn off");
+    }
 }

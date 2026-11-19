@@ -164,18 +164,18 @@ impl Chrome {
                 .icon(Icon::Favorite)
                 .selected(t.liked)
                 .shortcut("Ctrl+L"),
-            Act::Lyrics => MenuItem::new("Текст песни").icon(Icon::Lyrics),
+            Act::Lyrics => MenuItem::new(nikgob_core::i18n::lyrics().title).icon(Icon::Lyrics),
             Act::Volume | Act::Output => Self::bare_item(act, state).unwrap_or_else(|| MenuItem::new("")),
-            Act::Visualizer => MenuItem::new("Визуализатор")
+            Act::Visualizer => MenuItem::new(nikgob_core::i18n::screens().menu_visualizer)
                 .icon(Icon::GraphicEq)
                 .shortcut("F12"),
-            Act::EditLyrics => MenuItem::new("Изменить текст…").icon(Icon::Lyrics),
+            Act::EditLyrics => MenuItem::new(nikgob_core::i18n::lyrics().edit).icon(Icon::Lyrics),
             // Only what is in the library (a file, or a like) is offered.
-            Act::Trash => MenuItem::new("Удалить из библиотеки").icon(Icon::Delete),
-            Act::Youtube => MenuItem::new("Включить с YouTube")
+            Act::Trash => MenuItem::new(nikgob_core::i18n::screens().menu_trash).icon(Icon::Delete),
+            Act::Youtube => MenuItem::new(nikgob_core::i18n::screens().menu_youtube)
                 .icon(Icon::PlayArrow)
                 .shortcut("Y"),
-            Act::SleepMenu => MenuItem::new(super::sleep_ui::MENU_LABEL).icon(Icon::Bedtime),
+            Act::SleepMenu => MenuItem::new(super::sleep_ui::menu_label()).icon(Icon::Bedtime),
             Act::Sleep(c) => MenuItem::new(super::sleep_ui::choice_label(c, nikgob_view::SleepContext::of(&state.player))),
         }
     }
@@ -184,8 +184,8 @@ impl Chrome {
     /// играть».
     fn bare_item(act: Act, state: &ViewState) -> Option<MenuItem> {
         match act {
-            Act::Volume => Some(MenuItem::new("Громкость…").icon(super::output::volume_icon(state, state.player.volume, state.player.muted))),
-            Act::Output => Some(MenuItem::new("Где играть").icon(Icon::SpeakerGroup)),
+            Act::Volume => Some(MenuItem::new(nikgob_core::i18n::player().volume_menu).icon(super::output::volume_icon(state, state.player.volume, state.player.muted))),
+            Act::Output => Some(MenuItem::new(nikgob_core::i18n::screens().play_where).icon(Icon::SpeakerGroup)),
             _ => None,
         }
     }
@@ -258,7 +258,7 @@ impl Chrome {
             sound::Tab::Equalizer => (TrackAct::Equalizer, "E"),
         };
         let at = super::pages::sound_at(&rows);
-        let item = MenuItem::new("Скорость и эквалайзер").icon(Icon::Tune).shortcut(keys);
+        let item = MenuItem::new(nikgob_core::i18n::screens().sound_window).icon(Icon::Tune).shortcut(keys);
         rows.insert(at, Row::Item(PlayerAct::Track(act), item));
         if top.contains(&Act::Visualizer) {
             rows.insert(at + 1, own(Act::Visualizer));
@@ -477,12 +477,12 @@ impl Chrome {
             let mut open = true;
             let dialog = match &ask {
                 Ask::SaveQueue => {
-                    TextInputDialog::new("md3e-save-queue", "Сохранить очередь", "Название")
+                    TextInputDialog::new("md3e-save-queue", nikgob_core::i18n::screens().save_queue_title, nikgob_core::i18n::sound_facts().tag_title)
                         .icon(Icon::PlaylistAdd)
-                        .buttons("Сохранить", "Отмена")
+                        .buttons(nikgob_core::i18n::common().save, nikgob_core::i18n::common().cancel)
                 }
             }
-            .validate(|t| t.trim().is_empty().then(|| "Введи название".to_owned()));
+            .validate(|t| t.trim().is_empty().then(|| nikgob_core::i18n::screens().enter_name.to_owned()));
             match dialog.show(ctx, &mut open, &mut self.ask_text) {
                 Some(TextInputResult::Confirmed) => {
                     let name = self.ask_text.trim().to_owned();
@@ -733,7 +733,7 @@ impl Chrome {
                         ui.add(
                             IconButton::new(super::output::volume_icon(state, volume, state.player.muted))
                                 .size(Size::S)
-                                .tooltip("Без звука")
+                                .tooltip(nikgob_core::i18n::screens().mute_tooltip)
                                 .id_salt("md3e-volume-mute"),
                         )
                     })

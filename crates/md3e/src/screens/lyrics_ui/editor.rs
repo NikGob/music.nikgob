@@ -176,11 +176,11 @@ fn finish(ui: &mut Ui, d: &Draft, track: TrackId, out: &mut Vec<Command>) -> boo
     ui.spacing_mut().item_spacing.x = 8.0;
     let worth = d.changed() && d.lines.iter().any(|l| !l.text.trim().is_empty());
     let mut closed = false;
-    if ui.add(Button::new("Сохранить").style(Style::Filled).size(Size::S).enabled(worth).id_salt("lyrics-edit-save")).clicked() {
+    if ui.add(Button::new(nikgob_core::i18n::common().save).style(Style::Filled).size(Size::S).enabled(worth).id_salt("lyrics-edit-save")).clicked() {
         out.push(Command::SaveOwnLyrics { track, lines: d.to_lines(), timed: d.timed() });
         closed = true;
     }
-    if ui.add(Button::new("Отмена").style(Style::Text).size(Size::S).id_salt("lyrics-edit-cancel")).clicked() {
+    if ui.add(Button::new(nikgob_core::i18n::common().cancel).style(Style::Text).size(Size::S).id_salt("lyrics-edit-cancel")).clicked() {
         closed = true;
     }
     closed
@@ -204,7 +204,7 @@ fn window_body(ui: &mut Ui, inner: Rect, track: TrackId, state: &ViewState, out:
     let left = Rect::from_min_max(row.min + vec2(CARD_PAD, 0.0), pos2((right.min_rect().left() - 16.0).max(row.left()), row.bottom()));
     let mut left = ui.new_child(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)).id_salt("lyrics-edit-head-left"));
     left.spacing_mut().item_spacing.x = 12.0;
-    left.label(TypeRole::TitleLarge.style().rich("Изменить текст", s.on_surface));
+    left.label(TypeRole::TitleLarge.style().rich(nikgob_core::i18n::lyrics().edit_title, s.on_surface));
     if !here && !d.title.is_empty() {
         left.add(egui::Label::new(TypeRole::BodyMedium.style().rich(d.title.clone(), s.on_surface_variant)).truncate());
     }
@@ -295,10 +295,10 @@ fn tools(ui: &mut Ui, d: &mut Draft, here: bool, pos: Duration) {
     let cut = d.cursor.filter(|(i, c)| Some(*i) == sel && *c > 0 && *c < d.lines[*i].text.chars().count());
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-        if ui.add(Button::new("Отметить").style(Style::Filled).size(Size::S).enabled(here && sel.is_some()).id_salt("lyrics-edit-mark")).clicked() {
+        if ui.add(Button::new(nikgob_core::i18n::lyrics().mark).style(Style::Filled).size(Size::S).enabled(here && sel.is_some()).id_salt("lyrics-edit-mark")).clicked() {
             d.mark(pos);
         }
-        for (label, ms, salt) in [("−0,1 с", -NUDGE_MS, "lyrics-edit-earlier"), ("+0,1 с", NUDGE_MS, "lyrics-edit-later")] {
+        for (label, ms, salt) in [(nikgob_core::i18n::lyrics().nudge_earlier, -NUDGE_MS, "lyrics-edit-earlier"), (nikgob_core::i18n::lyrics().nudge_later, NUDGE_MS, "lyrics-edit-later")] {
             if ui.add(Button::new(label).style(Style::Tonal).size(Size::S).enabled(timed).id_salt(salt)).clicked()
                 && let Some(i) = sel
             {
@@ -306,21 +306,21 @@ fn tools(ui: &mut Ui, d: &mut Draft, here: bool, pos: Duration) {
             }
         }
         ui.add_space(16.0);
-        if ui.add(Button::new("Разделить").style(Style::Tonal).size(Size::S).enabled(cut.is_some()).id_salt("lyrics-edit-split")).clicked()
+        if ui.add(Button::new(nikgob_core::i18n::lyrics().split).style(Style::Tonal).size(Size::S).enabled(cut.is_some()).id_salt("lyrics-edit-split")).clicked()
             && let Some((i, c)) = cut
         {
             d.split(i, c);
         }
         let next = sel.is_some_and(|i| i + 1 < d.lines.len());
-        if ui.add(Button::new("Склеить").style(Style::Tonal).size(Size::S).enabled(next).id_salt("lyrics-edit-merge")).clicked()
+        if ui.add(Button::new(nikgob_core::i18n::lyrics().merge).style(Style::Tonal).size(Size::S).enabled(next).id_salt("lyrics-edit-merge")).clicked()
             && let Some(i) = sel
         {
             d.merge(i);
         }
-        if ui.add(Button::new("Строка ниже").icon(Icon::Add).style(Style::Tonal).size(Size::S).id_salt("lyrics-edit-add")).clicked() {
+        if ui.add(Button::new(nikgob_core::i18n::lyrics().add_line).icon(Icon::Add).style(Style::Tonal).size(Size::S).id_salt("lyrics-edit-add")).clicked() {
             d.add_below(sel);
         }
-        if ui.add(IconButton::new(Icon::Delete).tooltip("Удалить строку").enabled(sel.is_some()).id_salt("lyrics-edit-delete")).clicked()
+        if ui.add(IconButton::new(Icon::Delete).tooltip(nikgob_core::i18n::lyrics().delete_line).enabled(sel.is_some()).id_salt("lyrics-edit-delete")).clicked()
             && let Some(i) = sel
         {
             d.delete(i);
@@ -339,17 +339,17 @@ fn tool_groups(ui: &mut Ui, d: &mut Draft, here: bool, pos: Duration) {
     let next = sel.is_some_and(|i| i + 1 < d.lines.len());
     let timing = || -> Vec<Item> {
         vec![
-            Button::new("Отметить").style(Style::Filled).size(Size::S).enabled(here && sel.is_some()).into(),
-            Button::new("−0,1 с").style(Style::Tonal).size(Size::S).enabled(timed).into(),
-            Button::new("+0,1 с").style(Style::Tonal).size(Size::S).enabled(timed).into(),
+            Button::new(nikgob_core::i18n::lyrics().mark).style(Style::Filled).size(Size::S).enabled(here && sel.is_some()).into(),
+            Button::new(nikgob_core::i18n::lyrics().nudge_earlier).style(Style::Tonal).size(Size::S).enabled(timed).into(),
+            Button::new(nikgob_core::i18n::lyrics().nudge_later).style(Style::Tonal).size(Size::S).enabled(timed).into(),
         ]
     };
     let text = || -> Vec<Item> {
         vec![
-            Button::new("Разделить").style(Style::Tonal).size(Size::S).enabled(cut.is_some()).into(),
-            Button::new("Склеить").style(Style::Tonal).size(Size::S).enabled(next).into(),
-            Button::new("Строка ниже").icon(Icon::Add).style(Style::Tonal).size(Size::S).into(),
-            IconButton::new(Icon::Delete).size(Size::S).style(Style::Tonal).tooltip("Удалить строку").enabled(sel.is_some()).into(),
+            Button::new(nikgob_core::i18n::lyrics().split).style(Style::Tonal).size(Size::S).enabled(cut.is_some()).into(),
+            Button::new(nikgob_core::i18n::lyrics().merge).style(Style::Tonal).size(Size::S).enabled(next).into(),
+            Button::new(nikgob_core::i18n::lyrics().add_line).icon(Icon::Add).style(Style::Tonal).size(Size::S).into(),
+            IconButton::new(Icon::Delete).size(Size::S).style(Style::Tonal).tooltip(nikgob_core::i18n::lyrics().delete_line).enabled(sel.is_some()).into(),
         ]
     };
     // Their natural widths, with the room a pressed member takes.

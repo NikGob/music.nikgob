@@ -92,18 +92,24 @@ impl LyricsSource {
         Self::ALL.into_iter().find(|s| s.key() == key)
     }
 
-    /// Short name for the UI.
-    pub fn label(self) -> &'static str {
+    /// Short name for the UI in `loc`.
+    pub const fn label_in(self, loc: crate::i18n::Locale) -> &'static str {
+        use crate::i18n::lyrics_in;
         match self {
-            Self::Own => "Свой текст",
-            Self::File => "Файл",
+            Self::Own => lyrics_in(loc).src_own,
+            Self::File => lyrics_in(loc).src_file,
             Self::Lrclib => "LRCLIB",
             Self::LyricsPlus => "LyricsPlus",
             Self::LrcRed => "lrc.red",
             Self::BetterLyrics => "Better Lyrics",
             Self::Genius => "Genius",
-            Self::Recognized => "Распознан",
+            Self::Recognized => lyrics_in(loc).src_recognized,
         }
+    }
+
+    /// Short name for the UI in the active locale.
+    pub fn label(self) -> &'static str {
+        self.label_in(crate::i18n::locale())
     }
 }
 
@@ -117,13 +123,20 @@ pub enum LyricsSync {
 }
 
 impl LyricsSync {
-    pub fn label(self) -> &'static str {
+    /// Short name for the UI in `loc` («по строкам» / “by line”).
+    pub const fn label_in(self, loc: crate::i18n::Locale) -> &'static str {
+        use crate::i18n::lyrics_in;
         match self {
-            Self::Plain => "без синхронизации",
-            Self::Line => "по строкам",
-            Self::Word => "по словам",
-            Self::Syllable => "по слогам",
+            Self::Plain => lyrics_in(loc).sync_plain,
+            Self::Line => lyrics_in(loc).sync_line,
+            Self::Word => lyrics_in(loc).sync_word,
+            Self::Syllable => lyrics_in(loc).sync_syllable,
         }
+    }
+
+    /// Short name for the UI in the active locale.
+    pub fn label(self) -> &'static str {
+        self.label_in(crate::i18n::locale())
     }
 
     pub fn of(lines: &[LyricLine]) -> Option<Self> {

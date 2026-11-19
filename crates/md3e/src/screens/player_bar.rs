@@ -92,7 +92,7 @@ pub fn show(
                 }
             }
             None => {
-                common::label(&mut tui, "Ничего не играет", TypeRole::TitleSmall, on);
+                common::label(&mut tui, nikgob_core::i18n::player().nothing_playing, TypeRole::TitleSmall, on);
             }
         }
         if info.clicked() && current.is_some() {
@@ -111,7 +111,7 @@ pub fn show(
         if buttons.shuffle
             && super::wave_plays(state)
             && ui
-                .add(IconButton::new(Icon::Refresh).colors(item).tooltip("Сменить направление волны").id_salt("bar-vibe"))
+                .add(IconButton::new(Icon::Refresh).colors(item).tooltip(nikgob_core::i18n::player().wave_direction).id_salt("bar-vibe"))
                 .clicked()
         {
             out.push(Command::OtherVibe);
@@ -123,11 +123,7 @@ pub fn show(
                     IconButton::new(Icon::Shuffle)
                         .selected(p.shuffle)
                         .colors(toggle_colors(p.shuffle))
-                        .tooltip(if p.shuffle {
-                            "Очередь перемешана — нажми, чтобы вернуть порядок"
-                        } else {
-                            "Перемешать очередь"
-                        })
+                        .tooltip(if p.shuffle { nikgob_core::i18n::player().shuffle_on_tip } else { nikgob_core::i18n::player().shuffle_queue_tip })
                         .id_salt("bar-shuffle"),
                 )
                 .clicked()
@@ -135,7 +131,7 @@ pub fn show(
             out.push(Command::ToggleShuffle);
         }
         if ui
-            .add(IconButton::new(Icon::SkipPrevious).colors(item).tooltip("Назад (Ctrl+←)"))
+            .add(IconButton::new(Icon::SkipPrevious).colors(item).tooltip(nikgob_core::i18n::player().prev_tooltip))
             .clicked()
         {
             chrome::press_previous(ui.ctx(), state, out);
@@ -154,7 +150,7 @@ pub fn show(
                 .selected(playing || buffering)
                 .colors(play_colors)
                 .filled_icon(true)
-                .tooltip(if buffering { "Загружается… (Space — пауза)" } else { "Пауза / играть (Space)" })
+                .tooltip(if buffering { nikgob_core::i18n::player().buffering_tip } else { nikgob_core::i18n::player().play_pause_tip })
                 .id_salt("bar-play"),
         );
         if buffering {
@@ -164,7 +160,7 @@ pub fn show(
             out.push(Command::TogglePlay);
         }
         if ui
-            .add(IconButton::new(Icon::SkipNext).colors(item).tooltip("Далее (Ctrl+→)"))
+            .add(IconButton::new(Icon::SkipNext).colors(item).tooltip(nikgob_core::i18n::player().next_tooltip))
             .clicked()
         {
             out.push(Command::Next);
@@ -277,7 +273,7 @@ pub fn show(
                 .add(
                     IconButton::new(Icon::QueueMusic)
                         .colors(item)
-                        .tooltip("Очередь (Ctrl+Q)")
+                        .tooltip(nikgob_core::i18n::player().queue_ctrl_tooltip)
                         .id_salt("bar-queue"),
                 )
                 .clicked()
@@ -290,7 +286,7 @@ pub fn show(
                     IconButton::new(Icon::Lyrics)
                         .selected(pane == Some(PaneTab::Lyrics))
                         .colors(item)
-                        .tooltip("Текст песни")
+                        .tooltip(nikgob_core::i18n::lyrics().title)
                         .id_salt("bar-lyrics"),
                 )
                 .clicked()
@@ -304,7 +300,7 @@ pub fn show(
                 .colors(item)
                 .id_salt("bar-volume");
             if !chrome.volume_open() {
-                btn = btn.tooltip("Громкость: наведи или крути колесо");
+                btn = btn.tooltip(nikgob_core::i18n::player().volume_tip);
             }
             let vol = ui.add(btn);
             if !chrome.np_covering {
@@ -318,7 +314,7 @@ pub fn show(
         let more = ui.add(
             IconButton::new(Icon::MoreVert)
                 .colors(item)
-                .tooltip("Ещё")
+                .tooltip(nikgob_core::i18n::common().more)
                 .id_salt("bar-more"),
         );
         // What does not fit in the pill lives in the menu, before the
@@ -372,10 +368,11 @@ pub fn show(
 /// The repeat button's glyph: a "1" on it while one track repeats.
 /// What the repeat button does now and on the next press.
 pub fn repeat_tip(repeat: Repeat) -> &'static str {
+    let p = nikgob_core::i18n::player();
     match repeat {
-        Repeat::Off => "Повтор выключен — нажми, чтобы повторять очередь",
-        Repeat::All => "Повторяется вся очередь — нажми, чтобы повторять один трек",
-        Repeat::One => "Повторяется этот трек — нажми, чтобы выключить",
+        Repeat::Off => p.repeat_off_tip,
+        Repeat::All => p.repeat_all_tip,
+        Repeat::One => p.repeat_one_tip,
     }
 }
 
