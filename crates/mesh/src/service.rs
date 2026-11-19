@@ -215,6 +215,9 @@ pub(crate) struct Shared {
     library: Option<nikgob_library::Library>,
     /// This device's pull of the library's files and the pauses asked here.
     replica: replica::ReplicaShared,
+    /// What each device holds of the files the replica plan gives it
+    /// (bytes done, bytes planned), counted by [`replica::count_copies`].
+    copies: Mutex<HashMap<String, (u64, u64)>>,
 }
 
 /// Binds an endpoint with `key`: LAN only, every ALPN of the mesh; on
@@ -416,11 +419,29 @@ impl Shared {
             streams: Mutex::new(HashMap::new()),
             library: ctx.library,
             replica,
+            copies: Mutex::new(HashMap::new()),
         })
     }
 
     fn notify(&self) {
         self.changed.notify_one();
+    }
+
+    /// The map's numbers of what each device holds of its plan: kept for
+    /// the snapshot, the runtime told when they change.
+    fn set_copies(&self, copies: HashMap<String, (u64, u64)>) {
+        let changed = {
+            let mut c = self.copies.lock();
+            if *c == copies {
+                false
+            } else {
+                *c = copies;
+                true
+            }
+        };
+        if changed {
+            self.notify();
+        }
     }
 
     /// The ring changed: the links tell the others, and the tunnel
@@ -866,6 +887,7 @@ impl Shared {
     pub(crate) fn snapshot(&self) -> MeshSnapshot {
         let own = self.presence.borrow().clone();
         let s = self.state.lock();
+        let copies = self.copies.lock().clone();
         let me = self.key.public();
         let this = MeshNodeView {
             id: me.to_string(),
@@ -909,6 +931,7 @@ impl Shared {
                 storage: pres.and_then(|p| p.storage),
                 playing: if online { pres.and_then(|p| p.playing.clone()) } else { None },
                 transfer: if online { pres.and_then(|p| p.transfer) } else { None },
+                copy: copies.get(&id).copied(),
                 ..MeshNodeView::default()
             };
             nodes.push(MeshSnapshotNode { view, cert: serde_json::to_string(&c).unwrap_or_default() });
@@ -1839,6 +1862,7 @@ pub(crate) async fn run(sh: Arc<Shared>, mut cmds: mpsc::Receiver<Command>, mut 
     let syncer = tokio::spawn(sync::run(sh.clone()));
     let replicator = tokio::spawn(replica::run(sh.clone()));
     let auditor = tokio::spawn(replica::audit(sh.clone()));
+    let copier = tokio::spawn(replica::count_copies(sh.clone()));
     let mut retry_at: Option<Instant> = None;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1888,6 +1912,7 @@ pub(crate) async fn run(sh: Arc<Shared>, mut cmds: mpsc::Receiver<Command>, mut 
     syncer.abort();
     replicator.abort();
     auditor.abort();
+    copier.abort();
     sh.stop_node().await;
     publisher.abort();
     sh.rt.send(Command::MeshUpdate(Box::new(sh.snapshot())));

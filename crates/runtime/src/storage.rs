@@ -151,13 +151,17 @@ fn file_len(path: &Path) -> Option<u64> {
 }
 
 /// The bytes of the audio under `dir` (the sidecars beside the originals
-/// are not music). Links are not followed.
+/// are not music, nor are dot names: `.nikgob-backup`'s copies of the
+/// database and the like). Links are not followed.
 fn folder_size(dir: &Path) -> u64 {
     let mut total = 0u64;
     let mut todo = vec![dir.to_owned()];
     while let Some(d) = todo.pop() {
         let Ok(entries) = std::fs::read_dir(&d) else { continue };
         for e in entries.flatten() {
+            if e.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
             let Ok(kind) = e.file_type() else { continue };
             if kind.is_dir() {
                 todo.push(e.path());
@@ -360,6 +364,23 @@ mod tests {
         // A masters folder not made yet: nothing, and no second disk.
         let view = count(&lib, &root, &root, &dir.path().join("none")).unwrap();
         assert_eq!((view.masters, view.disks.len()), (0, 1));
+    }
+
+    /// The originals' folder keeps out its dot names: `.nikgob-backup` is
+    /// the database's own, not music, and a dot file or folder inside is
+    /// no original either.
+    #[test]
+    fn the_originals_folder_count_skips_dot_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let masters = dir.path().join("FLAC");
+        std::fs::create_dir_all(masters.join("ab")).unwrap();
+        std::fs::create_dir_all(masters.join(".nikgob-backup")).unwrap();
+        std::fs::create_dir_all(masters.join("ab").join(".hidden")).unwrap();
+        std::fs::write(masters.join("ab").join("x.flac"), vec![0u8; 5_000]).unwrap();
+        std::fs::write(masters.join("ab").join(".y.flac"), vec![0u8; 700]).unwrap();
+        std::fs::write(masters.join("ab").join(".hidden").join("z.flac"), vec![0u8; 900]).unwrap();
+        std::fs::write(masters.join(".nikgob-backup").join("library-1.sqlite"), vec![0u8; 12_000]).unwrap();
+        assert_eq!(folder_size(&masters), 5_000);
     }
 
     #[test]

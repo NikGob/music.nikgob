@@ -104,6 +104,12 @@ const ASK_WAIT: Duration = Duration::from_secs(120);
 const AUDIT_EVERY: Duration = Duration::from_secs(10 * 60);
 const AUDIT_RETRY: Duration = Duration::from_secs(2 * 60);
 const AUDIT_TICK: Duration = Duration::from_secs(60);
+/// What each device holds of its plan is counted again this often (the
+/// map's cards).
+const COPIES_EVERY: Duration = Duration::from_secs(60);
+/// The first count comes this soon after the mesh starts (the holder's
+/// word is out by then).
+const COPIES_FIRST: Duration = Duration::from_secs(10);
 /// Masters a second look asks a device about at once, and how long it may
 /// read them.
 const RECHECK_BATCH: usize = 10;
@@ -815,6 +821,66 @@ pub(crate) fn plan_masters(lists: &HashMap<String, (Instant, Vec<MasterItem>)>, 
         }
     }
     by_hash.into_values().collect()
+}
+
+// ------------------------------------------------- what a device is to hold
+
+/// The bytes the plan `keep` gives a device and, of them, the bytes the
+/// device holds: `offers` are the files the devices it pulls from have,
+/// `held` its own (as its catalog tells them). A file of a track makes
+/// the track's planned file unnecessary exactly as [`plan_tracks`] has
+/// it: the very hash, or a better quality.
+fn planned_bytes(keep: &Keep, offers: Vec<Offer>, held: &[Offer]) -> (u64, u64) {
+    let mut by_track: HashMap<TrackId, Vec<HeldFile>> = HashMap::new();
+    for o in held {
+        by_track.entry(o.track_id).or_default().push(HeldFile {
+            track_id: o.track_id,
+            file_hash: Some(o.file_hash.clone()),
+            size: o.size,
+            quality_score: o.quality_score,
+            locator: String::new(),
+        });
+    }
+    let none: Vec<HeldFile> = Vec::new();
+    let mut done = 0u64;
+    let mut goal = 0u64;
+    for w in plan_tracks(keep, offers, &HashMap::new(), &HashMap::new()) {
+        goal = goal.saturating_add(w.size);
+        // The best offer is the first (`want_of` sorts them).
+        if w.offers.first().is_some_and(|best| held_satisfies(best, by_track.get(&w.track_id).unwrap_or(&none))) {
+            done = done.saturating_add(w.size);
+        }
+    }
+    (done, goal)
+}
+
+/// The masters' bytes here and, of them, those a device holds a verified
+/// copy of (`verified`: its `replica` hashes); a file shared by several
+/// masters once.
+fn masters_bytes(masters: &[(String, u64)], verified: &HashSet<String>) -> (u64, u64) {
+    masters.iter().fold((0u64, 0u64), |(goal, done), (hash, size)| {
+        (goal.saturating_add(*size), if verified.contains(hash) { done.saturating_add(*size) } else { done })
+    })
+}
+
+/// What device `target` (profile `profile`) is to hold of this computer's
+/// music and how much of it it holds, in bytes: the planned file of every
+/// track (`peers`: the devices it pulls from, itself not among them) and,
+/// with «Полная копия», every master. Its holdings are what its catalog
+/// tells (`node_file` rows, synced here) and its `replica` rows for the
+/// masters. None: no such plan, or nothing counted.
+pub(crate) fn copy_stats(lib: &Library, target: &str, profile: MeshProfile, peers: &[String]) -> nikgob_library::Result<Option<(u64, u64)>> {
+    let keep = match profile {
+        MeshProfile::Full | MeshProfile::Library => Keep::All,
+        _ => return Ok(None),
+    };
+    let (mut done, mut goal) = planned_bytes(&keep, lib.replica_offers(peers)?, &lib.replica_offers(&[target.to_owned()])?);
+    if profile == MeshProfile::Full {
+        let (masters, held) = masters_bytes(&lib.master_sizes()?, &lib.replica_hashes(target)?);
+        done = done.saturating_add(held);
+        goal = goal.saturating_add(masters);
+    }
+    Ok((goal > 0).then_some((done, goal)))
 }
 
 /// A new plan: what `a` wants and this device lacks.
@@ -1695,9 +1761,49 @@ pub(crate) async fn recheck(sh: Arc<Shared>, card: u64, hashes: Vec<String>, nee
     sh.rt.send(Command::ReplicaRechecked { card, ok, failed });
 }
 
+// ------------------------------------------------ what the cards show
+
+/// Counts, now and then, what each device of the ring holds of the files
+/// its plan gives it ([`copy_stats`]), for the map's cards. The ring
+/// holder's word is what a device's profile is; the others have none to
+/// count here.
+pub(crate) async fn count_copies(sh: Arc<Shared>) {
+    let Some(lib) = sh.library.clone() else { return };
+    tokio::time::sleep(COPIES_FIRST).await;
+    loop {
+        if sh.node.lock().is_some()
+            && let Err(e) = count_copies_once(&sh, &lib).await
+        {
+            log::warn!("replica: the copies not counted: {e}");
+        }
+        tokio::time::sleep(COPIES_EVERY).await;
+    }
+}
+
+/// One count: every owner device the holder gave a storing profile, what
+/// it holds of its plan and the plan's bytes ([`copy_stats`]).
+async fn count_copies_once(sh: &Arc<Shared>, lib: &Library) -> Result<(), String> {
+    let me = sh.key.public().to_string();
+    let owners: Vec<String> = {
+        let s = sh.state.lock();
+        s.ring.as_ref().map(|r| r.others().filter(|c| c.scope == MeshScope::Owner).map(|c| c.node.clone()).collect()).unwrap_or_default()
+    };
+    let assign = sh.presence.borrow().assign.clone();
+    let mut copies: HashMap<String, (u64, u64)> = HashMap::new();
+    for a in assign.iter().filter(|a| owners.contains(&a.node)) {
+        let peers: Vec<String> = std::iter::once(me.clone()).chain(owners.iter().cloned()).filter(|p| *p != a.node).collect();
+        let (l, node, profile) = (lib.clone(), a.node.clone(), a.profile);
+        if let Some(c) = blocking(move || copy_stats(&l, &node, profile, &peers)).await? {
+            copies.insert(a.node.clone(), c);
+        }
+    }
+    sh.set_copies(copies);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use nikgob_core::model::{Artist, ArtistCredit, Master, Release, Track};
+    use nikgob_core::model::{Artist, ArtistCredit, DeviceId, Master, Release, Replica, Track};
 
     use super::*;
     use crate::presence::Presence;
@@ -2087,5 +2193,80 @@ mod tests {
             assert!(r.take(1));
         }
         assert!(!r.take(1));
+    }
+
+    fn offer(track: TrackId, node: &str, hash: &str, size: u64, quality: i32) -> Offer {
+        Offer {
+            track_id: track,
+            node_id: node.into(),
+            file_hash: hash.into(),
+            size,
+            codec: "opus".into(),
+            quality_score: quality,
+            bitrate: None,
+            sample_rate: None,
+            bit_depth: None,
+        }
+    }
+
+    /// A device's plan is the best file of every track; of those, the ones
+    /// it holds are its very hash, or a file of a better quality (as the
+    /// plan itself has it).
+    #[test]
+    fn a_devices_plan_is_the_best_file_of_every_track_and_what_it_holds() {
+        let (a, b) = (TrackId::new(), TrackId::new());
+        let offers = vec![
+            offer(a, "pc", "ha", 1_000, 70),
+            offer(a, "tv", "ha-low", 500, 40),
+            offer(b, "pc", "hb", 2_000, 50),
+        ];
+        let none: &[Offer] = &[];
+        assert_eq!(planned_bytes(&Keep::All, offers.clone(), none), (0, 3_000), "the whole plan");
+        let held = [offer(a, "pi", "ha", 1_000, 70), offer(b, "pi", "hb-old", 700, 30)];
+        assert_eq!(planned_bytes(&Keep::All, offers.clone(), &held), (1_000, 3_000), "the very file of one track");
+        let held = [offer(a, "pi", "hq", 900, 80), offer(b, "pi", "hb", 2_000, 50)];
+        assert_eq!(planned_bytes(&Keep::All, offers, &held), (3_000, 3_000), "a better file counts as the track");
+    }
+
+    /// The masters count once each, and a device's only when its copy is
+    /// noted.
+    #[test]
+    fn the_masters_count_once_and_only_the_ones_a_device_verified() {
+        let masters = [("ha".to_owned(), 1_000u64), ("hb".to_owned(), 2_000)];
+        let verified: HashSet<String> = ["hb".to_owned()].into();
+        assert_eq!(masters_bytes(&masters, &HashSet::new()), (3_000, 0));
+        assert_eq!(masters_bytes(&masters, &verified), (3_000, 2_000));
+    }
+
+    /// What a device of «Полная копия» is to hold comes from the plan: the
+    /// best file of every track from the devices it pulls from and every
+    /// master here, of which its verified copies count; nothing held: the
+    /// goal alone. The disk's use never enters it.
+    #[test]
+    fn a_devices_copies_are_counted_from_the_plan() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.set_device_id(DeviceId("pc".into())).unwrap();
+        let t = song(&lib);
+        let mut s = Source::new(t.id, SourceKind::LocalFile, "C:/Music/a.opus", Codec::Opus);
+        s.file_hash = Some("ha".into());
+        s.size_bytes = Some(1_000);
+        lib.add_source(&s).unwrap();
+        let master = Master {
+            track_id: t.id,
+            codec: Codec::Flac,
+            file_hash: "hm".into(),
+            size_bytes: 5_000,
+            origin: None,
+            file_path: None,
+            replicas: Vec::new(),
+        };
+        lib.put_master(&master).unwrap();
+        let peers = ["pc".to_owned()];
+        assert_eq!(copy_stats(&lib, "pi", MeshProfile::Full, &peers).unwrap(), Some((0, 6_000)), "the plan, nothing held");
+        lib.put_replica(&Replica { file_hash: "hm".into(), node_id: DeviceId("pi".into()), verified_at: Some(1) }).unwrap();
+        assert_eq!(copy_stats(&lib, "pi", MeshProfile::Full, &peers).unwrap(), Some((5_000, 6_000)), "its master");
+        assert_eq!(copy_stats(&lib, "pi", MeshProfile::Library, &peers).unwrap(), Some((0, 1_000)), "no masters");
+        assert_eq!(copy_stats(&lib, "pi", MeshProfile::SoundOnly, &peers).unwrap(), None, "no plan: the disk's use");
+        assert_eq!(copy_stats(&lib, "pi", MeshProfile::Favorites { cap_bytes: 8 << 30 }, &peers).unwrap(), None);
     }
 }

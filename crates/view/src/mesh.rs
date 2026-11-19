@@ -245,6 +245,12 @@ pub struct MeshNodeView {
     pub playing: Option<MeshPlaying>,
     pub profile: MeshProfile,
     pub transfer: Option<MeshTransfer>,
+    /// What the replica plan gives this device of this computer's music
+    /// and how much of it the device holds (bytes: done, goal), counted
+    /// here: the card's bar and line. None: no such plan (the profile
+    /// keeps no files), or not counted yet — the card falls back to the
+    /// device's disk.
+    pub copy: Option<(u64, u64)>,
     /// «Любимые» and the playlists it keeps with «Избранное» (chosen here).
     pub pins: MeshPins,
     /// The library's sync with it.

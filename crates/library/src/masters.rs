@@ -5,6 +5,8 @@
 //! masters/downloads are rebuilt from `.musiclib/masters` sidecars and the
 //! torrent client, so they stay out of the CRDT-synced user data.
 
+use std::collections::HashSet;
+
 use nikgob_core::model::{
     Codec, DeviceId, Download, DownloadStatus, Master, ReleaseId, Replica, SeedPolicy,
     SourceOrigin, TrackId, WishlistId, WishlistItem, WishlistOrigin, WishlistScope,
@@ -363,6 +365,25 @@ impl Library {
                 .query_map([limit as i64], master_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(masters)
+        })
+    }
+
+    /// Each master file here and its bytes: a file several masters share
+    /// (a disc image) once, by the largest size one of them tells.
+    pub fn master_sizes(&self) -> Result<Vec<(String, u64)>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached("SELECT file_hash, max(size_bytes) FROM master GROUP BY file_hash ORDER BY file_hash")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)?.max(0) as u64)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// The files a verified copy on device `node` is noted for.
+    pub fn replica_hashes(&self, node: &str) -> Result<HashSet<String>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached("SELECT file_hash FROM replica WHERE node_id = ?1")?;
+            let rows = stmt.query_map([node], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<HashSet<_>>>()?)
         })
     }
 
