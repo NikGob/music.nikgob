@@ -579,7 +579,7 @@ mod tests {
         let file = dir.path().join("Song.opus");
         opus(&file);
         let lines = to_millis(&timed());
-        let text = write_ttml(&file.with_extension("ttml"), &Keep::Lines(lines.clone())).unwrap();
+        let text = write_ttml(&file.with_extension("ttml"), &Keep::Lines(lines.clone()), nikgob_core::i18n::Locale::Ru).unwrap();
         write_tag(&file, &Keep::Lines(lines.clone())).unwrap();
         assert_eq!(text.lines, lines, "read back as saved");
         let (tags, _) = nikgob_import::tags::read_tags(&file).unwrap();
@@ -601,7 +601,7 @@ mod tests {
         let path = nikgob_import::layout::kept_text_path(root.path(), "LAZZY2WICE", "Summer 15/16");
         assert!(path.starts_with(root.path()));
         let lines = to_millis(&timed());
-        write_ttml(&path, &Keep::Lines(lines.clone())).unwrap();
+        write_ttml(&path, &Keep::Lines(lines.clone()), nikgob_core::i18n::Locale::Ru).unwrap();
         assert!(root.path().join("LAZZY2WICE").join("Summer 15-16.ttml").exists());
         let lib = nikgob_library::Library::open_in_memory().unwrap();
         let track = lib.upsert_track(&nikgob_core::model::Track::new("Summer 15/16", nikgob_core::model::ArtistCredit::single("LAZZY2WICE", None))).unwrap().id;
@@ -829,7 +829,7 @@ mod tests {
         play(&rt, song);
         wait(&rt, "savable", |s| s.lyrics.savable && s.lyrics.stream);
         let kept = nikgob_import::layout::kept_text_path(&cfg.library_dir, &artist_of(&row), &row.title);
-        write_ttml(&kept, &Keep::Lines(to_millis(&timed()))).unwrap();
+        write_ttml(&kept, &Keep::Lines(to_millis(&timed())), nikgob_core::i18n::Locale::Ru).unwrap();
         rt.send(nikgob_view::Command::SaveLyrics { track: song, source: LyricsSource::Genius });
         wait_until("the song's file", || file_of(&lib, &cfg, song).is_some());
         let src = lib.active_source(song).unwrap().unwrap();
@@ -854,18 +854,18 @@ mod tests {
         let file = dir.path().join("Song.opus");
         let ttml = file.with_extension("ttml");
         std::fs::write(file.with_extension("lrc"), "[00:01.00]Найденная строка").unwrap();
-        write_ttml(&ttml, &Keep::Plain("Найденный текст".into())).unwrap();
+        write_ttml(&ttml, &Keep::Plain("Найденный текст".into()), nikgob_core::i18n::Locale::Ru).unwrap();
         let s = Duration::from_secs;
         let own = Keep::own(vec![LyricLine::new(s(1), "Своя"), LyricLine::new(s(2), "строка")], true).to_millis();
-        let text = keep_own_at(&ttml, &trash, &own).unwrap();
+        let text = keep_own_at(&ttml, &trash, &own, nikgob_core::i18n::Locale::Ru).unwrap();
         assert_eq!(text.lines.len(), 2);
         assert_eq!(files(&trash).len(), 1, "the found one kept in the Trash");
         assert!(crate::lyrics::read_ttml(&ttml).unwrap().1, "marked as the user's");
         // Saved again: the own text is rewritten, nothing more goes.
-        keep_own_at(&ttml, &trash, &Keep::own(vec![LyricLine::new(s(1), "Своя"), LyricLine::new(s(2), "строка")], false)).unwrap();
+        keep_own_at(&ttml, &trash, &Keep::own(vec![LyricLine::new(s(1), "Своя"), LyricLine::new(s(2), "строка")], false), nikgob_core::i18n::Locale::Ru).unwrap();
         assert_eq!(files(&trash).len(), 1);
         assert_eq!(crate::lyrics::read_ttml(&ttml).unwrap().0.plain.as_deref(), Some("Своя\nстрока"));
-        assert!(keep_own_at(&ttml, &trash, &Keep::own(vec![LyricLine::new(s(1), " ")], true)).is_err(), "an empty text is not kept");
+        assert!(keep_own_at(&ttml, &trash, &Keep::own(vec![LyricLine::new(s(1), " ")], true), nikgob_core::i18n::Locale::Ru).is_err(), "an empty text is not kept");
         assert!(ttml.is_file());
 
         let lib = nikgob_library::Library::open_in_memory().unwrap();
@@ -882,9 +882,9 @@ mod tests {
         let tl = crate::lyrics::cached_lyrics(&lib, track, Some(&file), None, false, None);
         assert!(tl.texts_of(LyricsSource::Own).is_none());
         std::fs::write(&ttml, "x").unwrap();
-        assert!(restore_own_at(&at, &ttml).is_err(), "never over another file");
+        assert!(restore_own_at(&at, &ttml, nikgob_core::i18n::Locale::Ru).is_err(), "never over another file");
         std::fs::remove_file(&ttml).unwrap();
-        assert_eq!(restore_own_at(&at, &ttml).unwrap().plain.as_deref(), Some("Своя\nстрока"));
+        assert_eq!(restore_own_at(&at, &ttml, nikgob_core::i18n::Locale::Ru).unwrap().plain.as_deref(), Some("Своя\nстрока"));
         assert!(crate::lyrics::read_ttml(&ttml).unwrap().1);
         assert_eq!(files(&trash).len(), 1);
     }

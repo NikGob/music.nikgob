@@ -668,6 +668,7 @@ fn foot(ui: &mut Ui, rect: Rect, state: &ViewState, mem: &mut MeshUi, out: &mut 
         paint::container(fui.painter(), pill, Radii::all(22.0), s.surface, Stroke::new(1.0, s.outline_variant));
         mesh_ui::paint_avatar(&fui, pos2(pill.left() + 8.0 + 14.0, pill.center().y), 28.0, &format!("map-nearby-{}", n.id), n.kind, Look::default());
         fui.painter().galley(pos2(pill.left() + 44.0, pill.center().y - name_g.size().y * 0.5), name_g, s.on_surface);
+        let br = Rect::from_min_max(pos2(pill.right() - connect_w, pill.top()), pill.max);
         let mut b = fui.new_child(UiBuilder::new().max_rect(br).layout(Layout::right_to_left(Align::Center)).id_salt(("mesh-map-connect", &n.id)));
         let r = b.add(Button::new(nikgob_core::i18n::mesh().connect).style(Style::Text).size(Size::S).enabled(can).id_salt(("mesh-map-connect-btn", &n.id)));
         if r.clicked() {

@@ -480,7 +480,7 @@ mod signature {
         WTHelperProvDataFromStateData, WinVerifyTrust,
     };
 
-    pub fn check(exe: &Path) -> Result<(), String> {
+    pub fn check(exe: &Path) -> Result<(), nikgob_core::i18n::backend::SoloistSignatureFault> {
         let path: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
         let mut file = WINTRUST_FILE_INFO {
             cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,

@@ -598,10 +598,10 @@ impl Num {
         if self.plus && !t.starts_with('-') {
             t.insert(0, '+');
         }
-        let t = t.replace('.', i18n::settings_tabs::decimal_point_in(loc));
+        let t = t.replace('.', i18n::settings_tabs::decimal_point_in(loc).to_string().as_str());
         if let Some(u) = self.unit {
             let n = (v * self.mul).round().max(0.0) as u64;
-            return format!("{} {}", t, i18n::plural_forms(loc, n, u));
+            return format!("{} {}", t, i18n::plural_forms(loc, n, &u));
         }
         let suffix = if self.pct { i18n::settings_tabs_in(loc).suffix_pct } else { self.suffix };
         format!("{t}{suffix}")

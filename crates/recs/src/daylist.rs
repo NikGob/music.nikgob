@@ -154,6 +154,7 @@ pub fn daylist_title_in(loc: Locale, centre: Axes, part: DayPart, day: i64) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nikgob_core::i18n::home_recs::{DAYLIST_ADJECTIVES_EN as ADJECTIVES_EN, DayGender as Gender, agree_ru as agree, weekday_en};
     use crate::index::VectorIndex;
     use crate::pick::{Item, Reason, assert_diverse};
     use crate::taste::{Catalog, DAY_MS, HOUR_MS, Play, Taste, TasteInput};

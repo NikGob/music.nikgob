@@ -762,6 +762,7 @@ fn cards_row(
     let n = list.len().clamp(1, 3) as f32;
     let cw = (stage.width() - (n - 1.0) * gap) / n;
     let top = stage.bottom() - 72.0;
+    let mut go = None;
     for (k, c) in list.iter().take(3).enumerate() {
         let rect = Rect::from_min_size(pos2(stage.left() + k as f32 * (cw + gap), top), vec2(cw, 72.0));
         let (dy, a) = match rise {

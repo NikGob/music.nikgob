@@ -35,8 +35,8 @@ pub fn fmt_album_date(released: Option<ReleaseDay>, year: Option<i32>, how: Albu
     let m = usize::from(d.month.clamp(1, 12) - 1);
     Some(match (how, d.day) {
         (AlbumDate::Year, _) => d.year.to_string(),
-        (AlbumDate::Full, Some(day)) => format!("{day} {} {}", OF[m], d.year),
-        (AlbumDate::MonthYear | AlbumDate::Full, _) => format!("{} {}", MONTH[m], d.year),
+        (AlbumDate::Full, Some(day)) => format!("{day} {} {}", of[m], d.year),
+        (AlbumDate::MonthYear | AlbumDate::Full, _) => format!("{} {}", month[m], d.year),
     })
 }
 

@@ -23,6 +23,7 @@ use egui::{
     Ui, Vec2, pos2, text::LayoutJob, vec2,
 };
 use nikgob_core::i18n::Locale;
+use nikgob_view::{self as v, Prefs};
 use nikgob_core::i18n::settings::{
     fmt_days_in, fmt_gb_in, fmt_one_decimal_in, settings_choices_in, settings_misc, settings_misc_in, settings_row_help_in,
     settings_row_labels_in,

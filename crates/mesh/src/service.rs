@@ -15,6 +15,7 @@ use nikgob_api::LocalApi;
 use nikgob_runtime::RuntimeHandle;
 use nikgob_core::i18n::mesh::fmt_open_net_in;
 use nikgob_core::i18n::{Locale, locale, mesh, mesh_in};
+use nikgob_view::{Command, MeshInvite, MeshKind, MeshNearbyView, MeshNodeView, MeshPairing, MeshScope, MeshSnapshot, MeshSnapshotNode};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
