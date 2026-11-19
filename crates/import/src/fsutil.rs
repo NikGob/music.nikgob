@@ -196,7 +196,9 @@ pub fn move_new_verified(from: &Path, to: &Path, expected_hash: &str) -> std::io
         && hash_file(to).ok().is_some_and(|h| h.eq_ignore_ascii_case(expected_hash));
     if !same {
         let _ = fs::remove_file(&t);
-        return Err(std::io::Error::other(format!("hash verification failed for {}", to.display())));
+        // Typed, so the toast can localize it (message_in reads it back out
+        // of the io error); its Display is the Russian text for logs.
+        return Err(std::io::Error::other(ImportError::HashCheckFailed { path: to.to_path_buf() }));
     }
     if let Err(e) = fs::remove_file(&f) {
         let _ = fs::remove_file(&t);
@@ -562,6 +564,24 @@ mod tests {
         assert_eq!(placed, dir.path().join("a (2).flac"));
         assert_eq!(std::fs::read(&placed).unwrap(), b"master");
         assert!(!from.exists());
+    }
+
+    /// A hash that does not match is a typed error: Russian in the io
+    /// error's own text, localized when read back through `message_in`.
+    #[test]
+    fn a_wrong_hash_is_typed_and_localized() {
+        use nikgob_core::i18n::Locale;
+
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a.part");
+        let to = dir.path().join("a.flac");
+        std::fs::write(&from, b"master").unwrap();
+        let wrong = "0".repeat(64);
+        let e = move_new_verified(&from, &to, &wrong).unwrap_err();
+        assert_eq!(e.to_string(), format!("проверка хеша не прошла для {}", to.display()));
+        let wrapped = ImportError::io(&to, e);
+        assert_eq!(wrapped.message_in(Locale::Ru), format!("проверка хеша не прошла для {}", to.display()));
+        assert_eq!(wrapped.message_in(Locale::En), format!("hash verification failed for {}", to.display()));
     }
 
     /// Folders are made only under the root: one that leads out (a link)

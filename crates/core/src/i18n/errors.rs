@@ -152,6 +152,62 @@ impl ErrorStrings {
         }
     }
 
+    /// Formats a hash check failure of a moved file for `path`.
+    pub fn hash_check_failed_in(loc: Locale, path: &str) -> String {
+        match loc {
+            Locale::Ru => format!("проверка хеша не прошла для {path}"),
+            Locale::En => format!("hash verification failed for {path}"),
+        }
+    }
+
+    /// Formats a staged copy that did not match its original: `tmp` against `src`.
+    pub fn hash_copy_mismatch_in(loc: Locale, tmp: &str, src: &str) -> String {
+        match loc {
+            Locale::Ru => format!("проверка хеша не прошла для {tmp}: копия {src} не совпала с оригиналом"),
+            Locale::En => format!("hash verification failed for {tmp}: the copy {src} did not match the original"),
+        }
+    }
+
+    /// Formats the API listener's «Порт {port} занят» for the settings row.
+    pub fn api_port_busy_in(loc: Locale, port: u16) -> String {
+        match loc {
+            Locale::Ru => format!("Порт {port} занят"),
+            Locale::En => format!("Port {port} is busy"),
+        }
+    }
+
+    /// Formats «Порт {port} занят другой программой» (the sign-in's redirect port).
+    pub fn api_port_busy_other_in(loc: Locale, port: u16) -> String {
+        match loc {
+            Locale::Ru => format!("Порт {port} занят другой программой"),
+            Locale::En => format!("Port {port} is used by another program"),
+        }
+    }
+
+    /// Formats «У компьютера нет адреса {ip}» for the settings row.
+    pub fn api_no_address_in(loc: Locale, ip: &str) -> String {
+        match loc {
+            Locale::Ru => format!("У компьютера нет адреса {ip}"),
+            Locale::En => format!("The computer has no address {ip}"),
+        }
+    }
+
+    /// Formats «Нет доступа к порту {port}» for the settings row.
+    pub fn api_port_denied_in(loc: Locale, port: u16) -> String {
+        match loc {
+            Locale::Ru => format!("Нет доступа к порту {port}"),
+            Locale::En => format!("No access to port {port}"),
+        }
+    }
+
+    /// Formats «Не удалось открыть порт {port}: {e}» for the settings row.
+    pub fn api_port_failed_in(loc: Locale, port: u16, e: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Не удалось открыть порт {port}: {e}"),
+            Locale::En => format!("Could not open port {port}: {e}"),
+        }
+    }
+
     /// Formats `"Sync failed: {detail}"` / `"Синхронизация не удалась: {detail}"`.
     pub fn sync_failed_in(loc: Locale, detail: &str) -> String {
         match loc {
@@ -669,4 +725,33 @@ locale_table! {
     /// Returns error/toast strings for the active process locale.
     errors,
     { Ru => RU, En => EN }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_and_hash_errors_translate_both_locales() {
+        assert_eq!(ErrorStrings::api_port_busy_in(Locale::Ru, 47210), "Порт 47210 занят");
+        assert_eq!(ErrorStrings::api_port_busy_in(Locale::En, 47210), "Port 47210 is busy");
+        assert_eq!(ErrorStrings::api_port_busy_other_in(Locale::Ru, 8989), "Порт 8989 занят другой программой");
+        assert_eq!(ErrorStrings::api_port_busy_other_in(Locale::En, 8989), "Port 8989 is used by another program");
+        assert_eq!(ErrorStrings::api_no_address_in(Locale::Ru, "192.168.0.157"), "У компьютера нет адреса 192.168.0.157");
+        assert_eq!(ErrorStrings::api_no_address_in(Locale::En, "192.168.0.157"), "The computer has no address 192.168.0.157");
+        assert_eq!(ErrorStrings::api_port_denied_in(Locale::Ru, 80), "Нет доступа к порту 80");
+        assert_eq!(ErrorStrings::api_port_denied_in(Locale::En, 80), "No access to port 80");
+        assert_eq!(ErrorStrings::api_port_failed_in(Locale::Ru, 47210, "x"), "Не удалось открыть порт 47210: x");
+        assert_eq!(ErrorStrings::api_port_failed_in(Locale::En, 47210, "x"), "Could not open port 47210: x");
+        assert_eq!(ErrorStrings::hash_check_failed_in(Locale::Ru, "/a.flac"), "проверка хеша не прошла для /a.flac");
+        assert_eq!(ErrorStrings::hash_check_failed_in(Locale::En, "/a.flac"), "hash verification failed for /a.flac");
+        assert_eq!(
+            ErrorStrings::hash_copy_mismatch_in(Locale::Ru, "/t.flac", "/s.flac"),
+            "проверка хеша не прошла для /t.flac: копия /s.flac не совпала с оригиналом"
+        );
+        assert_eq!(
+            ErrorStrings::hash_copy_mismatch_in(Locale::En, "/t.flac", "/s.flac"),
+            "hash verification failed for /t.flac: the copy /s.flac did not match the original"
+        );
+    }
 }

@@ -96,7 +96,7 @@ fn demo_soloist(base: FakeService) -> FakeService {
         "pairing" => SoloistPhase::Pairing,
         "ready" => SoloistPhase::Ready,
         "off" => SoloistPhase::Off,
-        "failed" => SoloistPhase::Failed("Soloist остановился".into()),
+        "failed" => SoloistPhase::Failed(nikgob_core::i18n::backend().soloist_stopped.into()),
         _ => return base,
     };
     base.with_soloist(phase, mode == "offer")
@@ -242,7 +242,7 @@ fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
         "prompt" | "failed" => Arc::new(Shown {
             inner: base.logged_out(),
             account: if mode == "prompt" && service == Service::Youtube {
-                Account::LoggingIn(Some(LoginPrompt::Window(nikgob_runtime::WINDOW_HINT.into())))
+                Account::LoggingIn(Some(LoginPrompt::Window(nikgob_core::i18n::activity().window_hint.into())))
             } else if mode == "failed" && service == Service::Youtube {
                 Account::Failed(nikgob_runtime::WebLoginError::Refused.text())
             } else if mode == "prompt" {
@@ -251,7 +251,10 @@ fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
                     nikgob_spotify::WEB_REDIRECT_URI,
                 ))))
             } else {
-                Account::Failed("Порт 8989 занят другой программой".into())
+                Account::Failed(nikgob_core::i18n::ErrorStrings::api_port_busy_other_in(
+                    nikgob_core::i18n::locale(),
+                    nikgob_spotify::WEB_REDIRECT_PORT,
+                ))
             },
         }),
         _ => Arc::new(base),

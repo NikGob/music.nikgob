@@ -16,7 +16,7 @@ use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use nikgob_shapes::MaterialShape;
 use nikgob_view::{
     Command, FAVORITES_CAP_DEFAULT, FAVORITES_CAP_MAX_GB, FAVORITES_CAP_MIN_GB, LIKED_PLAYLIST, MeshKind, MeshNodeView, MeshPins,
-    MeshProfile, MeshScope, MeshView, PlaylistId, StorageView, ViewState, free_ru, kind_label, size_ru,
+    MeshProfile, MeshScope, MeshView, PlaylistId, StorageView, ViewState, free_in, size_in,
 };
 
 use crate::{
@@ -53,7 +53,11 @@ pub(crate) struct MeshUi {
 struct Rename {
     node: Option<String>,
     name: String,
-    placeholder: String,
+    /// This device's own name as the field's placeholder when it has one
+    /// (data, not text); with an empty name the placeholder is the
+    /// localized «Компьютер», drawn each frame.
+    placeholder: Option<String>,
+    empty_name: bool,
     focus: bool,
 }
 
@@ -177,9 +181,9 @@ pub(crate) fn text_line(painter: &egui::Painter, text: &str, role: TypeRole, col
     crate::typography::layout(painter, job)
 }
 
-/// «18,4 / 25 ГБ»: the unit once when both are in it.
-pub(crate) fn fraction_ru(used: u64, cap: u64) -> String {
-    let (u, c) = (size_ru(used), size_ru(cap));
+/// «18,4 / 25 ГБ» / "18.4 / 25 GB": the unit once when both are in it.
+pub(crate) fn fraction_in(loc: nikgob_core::i18n::Locale, used: u64, cap: u64) -> String {
+    let (u, c) = (size_in(loc, used), size_in(loc, cap));
     match (u.rsplit_once(' '), c.rsplit_once(' ')) {
         (Some((un, uu)), Some((_, cu))) if uu == cu => format!("{un} / {c}"),
         _ => format!("{u} / {c}"),
@@ -194,12 +198,13 @@ pub(crate) fn storage_line(n: &MeshNodeView) -> Option<(String, bool)> {
         return None;
     }
     let st = n.storage?;
+    let loc = nikgob_core::i18n::locale();
     if st.free < LOW_FREE {
-        return Some((nikgob_core::i18n::mesh::fmt_low_space_in(nikgob_core::i18n::locale(), &free_ru(st.free)), true));
+        return Some((nikgob_core::i18n::mesh::fmt_low_space_in(loc, &free_in(loc, st.free)), true));
     }
     Some(match n.profile {
-        MeshProfile::Favorites { cap_bytes } => (fraction_ru(st.used, cap_bytes), false),
-        _ => (size_ru(st.used), false),
+        MeshProfile::Favorites { cap_bytes } => (fraction_in(loc, st.used, cap_bytes), false),
+        _ => (size_in(loc, st.used), false),
     })
 }
 
@@ -210,7 +215,8 @@ pub(crate) fn this_storage_line(st: &StorageView) -> Option<String> {
     if !st.known {
         return None;
     }
-    Some(if st.masters > 0 { nikgob_core::i18n::mesh::fmt_masters_in(nikgob_core::i18n::locale(), &size_ru(st.music()), &size_ru(st.masters)) } else { size_ru(st.music()) })
+    let loc = nikgob_core::i18n::locale();
+    Some(if st.masters > 0 { nikgob_core::i18n::mesh::fmt_masters_in(loc, &size_in(loc, st.music()), &size_in(loc, st.masters)) } else { size_in(loc, st.music()) })
 }
 
 /// The share of a device's bar each part takes: (music, originals, rest)
@@ -343,10 +349,16 @@ pub(crate) fn act(ui: &Ui, m: &MeshView, node: Option<&MeshNodeView>, a: Act, me
     let now = anim::now(ui.ctx());
     match (a, node) {
         (Act::Rename, None) => {
-            let placeholder = if m.this.name.is_empty() { kind_label(m.this.kind).to_owned() } else { m.this.name.clone() };
-            mem.rename = Some(Rename { node: None, name: m.name_setting.clone(), placeholder, focus: true });
+            let empty_name = m.this.name.is_empty();
+            mem.rename = Some(Rename {
+                node: None,
+                name: m.name_setting.clone(),
+                placeholder: (!empty_name).then(|| m.this.name.clone()),
+                empty_name,
+                focus: true,
+            });
         }
-        (Act::Rename, Some(n)) => mem.rename = Some(Rename { node: Some(n.id.clone()), name: n.name.clone(), placeholder: String::new(), focus: true }),
+        (Act::Rename, Some(n)) => mem.rename = Some(Rename { node: Some(n.id.clone()), name: n.name.clone(), placeholder: None, empty_name: false, focus: true }),
         // Checked by the loop first (the originals only it holds): it asks
         // through the view when some would go.
         (Act::Forget, Some(n)) if m.ring_holder => out.push(Command::MeshForget { node_id: n.id.clone() }),
@@ -418,8 +430,10 @@ fn rename_dialog(ui: &mut Ui, mem: &mut MeshUi, out: &mut Vec<Command>) {
         .show_with(&ctx, &mut open, |ui| {
             ui.add_space(16.0);
             let mut f = TextField::new(&mut d.name, nikgob_core::i18n::mesh().name_label).width(ui.available_width()).request_focus(d.focus).id_salt("mesh-rename-field");
-            if !d.placeholder.is_empty() {
-                f = f.placeholder(d.placeholder.clone());
+            if d.empty_name {
+                f = f.placeholder(nikgob_core::i18n::mesh().kind_pc);
+            } else if let Some(p) = &d.placeholder {
+                f = f.placeholder(p.clone());
             }
             let f = f.show(ui);
             d.focus = false;
@@ -574,7 +588,8 @@ mod tests {
         let st = StorageView { known: true, library: 4 * GB + 4 * GB / 5, masters: 11 * GB, disks: Vec::new() };
         assert_eq!(this_storage_line(&st).as_deref(), Some("15,8 ГБ · оригиналы 11 ГБ"));
         assert_eq!(this_storage_line(&StorageView::default()), None);
-        assert_eq!(fraction_ru(512 << 20, 25 * GB), "512 МБ / 25 ГБ");
+        assert_eq!(fraction_in(nikgob_core::i18n::Locale::Ru, 512 << 20, 25 * GB), "512 МБ / 25 ГБ");
+        assert_eq!(fraction_in(nikgob_core::i18n::Locale::En, 512 << 20, 25 * GB), "512 MB / 25 GB");
     }
 
     #[test]

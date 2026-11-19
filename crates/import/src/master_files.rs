@@ -324,11 +324,7 @@ fn stage_temp(src: &Path, dir: &Path, size: u64, hash: Option<&str>) -> Result<P
         let got = fsutil::file_size(&tmp)?;
         let ok = got == size && hash.is_none_or(|h| fsutil::hash_file(&tmp).ok().is_some_and(|g| g.eq_ignore_ascii_case(h)));
         if !ok {
-            return Err(ImportError::Other(format!(
-                "hash verification failed for {}: the copy {} did not match the original",
-                tmp.display(),
-                src.display()
-            )));
+            return Err(ImportError::HashCopyMismatch { tmp: tmp.clone(), src: src.to_path_buf() });
         }
         Ok(())
     })();
@@ -1281,5 +1277,28 @@ mod tests {
         fs::create_dir_all(root.join(BACKUP_DIR).join("library-2026-11-16.sqlite")).unwrap();
         assert!(copy_database(&lib, &root, "2026-11-16", BACKUP_KEEP).is_err());
         assert!(root.join(BACKUP_DIR).join("library-2026-11-16.sqlite").is_dir());
+    }
+
+    /// A staged copy that does not match its original is a typed error,
+    /// localized through `message_in` (Russian by default in logs).
+    #[test]
+    fn a_staged_copy_that_differs_is_typed_and_localized() {
+        use nikgob_core::i18n::Locale;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.flac");
+        write(&src, b"the song");
+        let wrong = "0".repeat(64);
+        let err = stage_temp(&src, dir.path(), 8, Some(&wrong)).unwrap_err();
+        let ImportError::HashCopyMismatch { tmp, .. } = &err else { panic!("{err:?}") };
+        assert_eq!(
+            err.message_in(Locale::Ru),
+            format!("проверка хеша не прошла для {}: копия {} не совпала с оригиналом", tmp.display(), src.display())
+        );
+        assert_eq!(
+            err.message_in(Locale::En),
+            format!("hash verification failed for {}: the copy {} did not match the original", tmp.display(), src.display())
+        );
+        assert!(err.to_string().contains("не совпала с оригиналом"), "logs keep the Russian text");
     }
 }

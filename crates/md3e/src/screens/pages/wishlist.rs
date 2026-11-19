@@ -13,8 +13,8 @@ use std::collections::HashMap;
 
 use egui::{Id, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{
-    Command, Route, Transfer, TransferPhase, ViewState, WishlistAttach, WishlistGroup, WishlistId, WishlistRow,
-    WishlistScope, WishlistSelect, WishlistStatus as St,
+    Command, QueueOrigin, Route, Transfer, TransferPhase, ViewState, WishlistAttach, WishlistGroup, WishlistId,
+    WishlistRow, WishlistScope, WishlistSelect, WishlistStatus as St,
 };
 
 use super::{Ask, PageState, connected, widgets};
@@ -487,10 +487,10 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
             (Some(t), _) if r.scope == WishlistScope::Track => out.push(Command::PlayTracks {
                 tracks: vec![t],
                 start: 0,
-                context: d.play_context.into(),
+                context: QueueOrigin::Wishlist,
             }),
             (_, Some(rel)) => out.push(Command::PlayRelease { id: rel, start: None, shuffle: false }),
-            (Some(t), None) => out.push(Command::PlayTracks { tracks: vec![t], start: 0, context: d.play_context.into() }),
+            (Some(t), None) => out.push(Command::PlayTracks { tracks: vec![t], start: 0, context: QueueOrigin::Wishlist }),
             _ => {}
         }
     }

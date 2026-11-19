@@ -557,11 +557,12 @@ fn header(ui: &mut Ui, deep: bool) -> Option<bool> {
 
 /// The seven tabs: a connected group, or a menu chip where they do not fit.
 fn tabs(ui: &mut Ui, tab: usize) -> Option<usize> {
+    let labels = i18n::settings::tabs();
     if ui.available_width() < 660.0 {
-        let options: Vec<(String, bool)> = TABS.iter().enumerate().map(|(i, t)| ((*t).to_owned(), i == tab)).collect();
-        return rows::dropdown(ui, "set-tab-menu", TABS[tab], &options);
+        let options: Vec<(String, bool)> = labels.iter().enumerate().map(|(i, t)| ((*t).to_owned(), i == tab)).collect();
+        return rows::dropdown(ui, "set-tab-menu", labels[tab], &options);
     }
-    connected(ui, egui::Id::new("set-tab"), &TABS, tab, &[]).0
+    connected(ui, egui::Id::new("set-tab"), &labels, tab, &[]).0
 }
 
 /// The recommendations' preferences `p` changed from `before`, as

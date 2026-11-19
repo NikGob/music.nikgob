@@ -10,7 +10,8 @@ use egui::{Id, Rect, Ui, UiBuilder, pos2, vec2};
 use nikgob_md3e::components::{SearchBar, anim};
 use nikgob_core::i18n::{common, mobile};
 use nikgob_view::{
-    Command, Route, SearchAlbum, SearchAnswer, SearchArtist, SearchPlaylist, SearchTrack, SearchView, StreamPage, TopResult, ViewState,
+    Command, QueueOrigin, Route, SearchAlbum, SearchAnswer, SearchArtist, SearchPlaylist, SearchTrack, SearchView, StreamPage, TopResult,
+    ViewState,
 };
 
 use crate::parts::{self, PageOut, Picture};
@@ -157,7 +158,7 @@ impl Search {
                     TopResult::Track(t) => {
                         let (uri, sub) = track_face(t);
                         if parts::media_row(ui, Id::new("search-top"), uri.as_deref(), t.title(), &sub, Picture::Square).clicked() {
-                            out.push(Command::PlaySearch { tracks: vec![t.pick()], start: 0, context: "поиска".into() });
+                            out.push(Command::PlaySearch { tracks: vec![t.pick()], start: 0, context: QueueOrigin::Search { service: None } });
                         }
                     }
                     TopResult::Album(al) => {
@@ -182,7 +183,7 @@ impl Search {
                         let look = Look::list(t, state);
                         let o = rows::track(ui, r, Id::new(("search-track", i)), t, look, state);
                         if o.tap {
-                            out.push(Command::PlaySearch { tracks: picks.clone(), start: i, context: "поиска".into() });
+                            out.push(Command::PlaySearch { tracks: picks.clone(), start: i, context: QueueOrigin::Search { service: None } });
                         }
                         if o.play_next {
                             out.push(Command::PlayNext(vec![t.id]));
@@ -197,7 +198,7 @@ impl Search {
                             None => t.artist.clone(),
                         };
                         if rows::simple(ui, r, Id::new(("search-stream", i)), t.cover_url.as_deref(), &t.title, &sub) {
-                            out.push(Command::PlaySearch { tracks: picks.clone(), start: i, context: "поиска".into() });
+                            out.push(Command::PlaySearch { tracks: picks.clone(), start: i, context: QueueOrigin::Search { service: None } });
                         }
                     }
                 });

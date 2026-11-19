@@ -730,7 +730,7 @@ fn passport(ui: &mut Ui, state: &ViewState, d: &Dev<'_>, mem: &mut MeshUi, out: 
         && n.profile.stores()
         && st.free >= mesh_ui::LOW_FREE
     {
-        ui.label(TypeRole::BodyMedium.style().rich(nikgob_core::i18n::mesh::fmt_free_in(nikgob_core::i18n::locale(), &nikgob_view::free_ru(st.free)), s.on_surface_variant));
+        ui.label(TypeRole::BodyMedium.style().rich(nikgob_core::i18n::mesh::fmt_free_in(nikgob_core::i18n::locale(), &nikgob_view::free_in(nikgob_core::i18n::locale(), st.free)), s.on_surface_variant));
     }
     // What plays there.
     if let Some((title, artists, progress)) = &d.playing {

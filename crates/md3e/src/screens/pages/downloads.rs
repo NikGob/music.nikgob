@@ -107,7 +107,7 @@ fn storage(ui: &mut Ui, st: &nikgob_view::StorageView) {
     // No room for the free space: the music alone.
     let room = ui.available_width() - 24.0;
     if text.size().x > room {
-        text = layout(format!("Музыка {}", nikgob_view::size_ru(st.music())));
+        text = layout(nikgob_core::i18n::view::fmt_music_line_in(nikgob_core::i18n::locale(), st.music()));
         if text.size().x > room {
             return;
         }
