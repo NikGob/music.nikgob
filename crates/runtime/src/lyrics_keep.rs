@@ -442,7 +442,12 @@ impl Worker {
             Ok(path) => {
                 self.align.saved_audio.insert(path.clone(), track);
                 let targets = nikgob_import::ImportTargets { tracks: vec![track], force: true, ..Default::default() };
-                if !self.import_for(vec![path.clone()], activity_in(loc).save_from_yt.into(), nikgob_core::model::SourceOrigin::Stream, targets) {
+                if !self.import_for(
+                    vec![path.clone()],
+                    nikgob_core::i18n::status::StoredLine::SavingFromYoutube.encode(),
+                    nikgob_core::model::SourceOrigin::Stream,
+                    targets,
+                ) {
                     self.align.saved_audio.remove(&path);
                     self.align.after_import.remove(&track);
                     let _ = std::fs::remove_file(&path);

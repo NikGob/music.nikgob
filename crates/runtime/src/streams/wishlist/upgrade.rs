@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use nikgob_core::model::{
     ReleaseId, Source, TrackId, WishlistId, WishlistItem, WishlistOrigin, WishlistScope, WishlistStatus, score,
 };
+use nikgob_core::i18n::status::{MasterWords, QualityWords, StoredLine};
 use nikgob_core::i18n::{Locale, status_in};
 use nikgob_core::quality::CheckSummary;
 use nikgob_core::source::{Format, Offer};
@@ -75,11 +76,33 @@ pub(crate) fn below_bar(score: i32, bar: UpgradeBar) -> bool {
 
 /// A format in words: «MP3 128», «Opus 160», «FLAC», «FLAC 24/96».
 pub(crate) fn format_words(f: &Format) -> String {
-    let label = f.label();
-    let name = nikgob_core::quality::codec_name(&f.codec);
-    match label.split_once(' ') {
-        Some((_, rest)) => format!("{name} {rest}"),
-        None => name,
+    nikgob_core::i18n::status::format_words(f)
+}
+
+/// What an item's files are, for its row: the worst of them below the bar,
+/// and how many of the album's files are below it (an album some of whose
+/// files are good).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct HaveWords {
+    pub(crate) worst: QualityWords,
+    pub(crate) below: Option<(usize, usize)>,
+}
+
+/// A library file's format and rank, as the words of a better copy say it
+/// (kept as data: the labels are made in the reader's locale).
+pub(crate) fn file_words(src: &Source) -> QualityWords {
+    file_words_kept(src, None)
+}
+
+/// [`file_words`] with the archive's master the file was made from.
+pub(crate) fn file_words_kept(src: &Source, master: Option<MasterWords>) -> QualityWords {
+    QualityWords::File {
+        codec: src.codec.clone(),
+        bitrate_kbps: src.bitrate,
+        bit_depth: src.bit_depth,
+        sample_rate: src.sample_rate,
+        score: src.quality_score,
+        master,
     }
 }
 
@@ -94,54 +117,7 @@ pub(crate) fn file_label(src: &Source) -> String {
 
 /// [`file_label`] in `loc`.
 pub(crate) fn file_label_in(loc: Locale, src: &Source) -> String {
-    let strings = status_in(loc);
-    let label = format_words(&Format {
-        codec: src.codec.clone(),
-        bitrate_kbps: src.bitrate,
-        bit_depth: src.bit_depth,
-        sample_rate: src.sample_rate,
-    });
-    if !src.codec.is_lossless() || src.quality_score >= score::CD_LOSSLESS {
-        label
-    } else if src.quality_score > score::FAKE_LOSSLESS {
-        format!("{label}{}", strings.maybe_lossy)
-    } else {
-        format!("{label}{}", strings.from_lossy)
-    }
-}
-
-/// What a file is for the words of a better copy: a lossy copy ranked as
-/// lossless was made from a lossless master the archive keeps, and that is
-/// what improved: «FLAC 24/96 (в библиотеке Opus 158)». `master` is the
-/// master's format in words, when known.
-pub(crate) fn kept_label(src: &Source, master: Option<&str>) -> String {
-    kept_label_in(Locale::Ru, src, master)
-}
-
-/// [`kept_label`] in `loc`.
-pub(crate) fn kept_label_in(loc: Locale, src: &Source, master: Option<&str>) -> String {
-    let own = file_label_in(loc, src);
-    match master {
-        Some(m) if !src.codec.is_lossless() && src.quality_score >= score::CD_LOSSLESS => {
-            format!("{m} {}", nikgob_core::i18n::status::fmt_in_library_in(loc, &own))
-        }
-        _ => own,
-    }
-}
-
-/// The line of an import done for a better copy, in place of «добавлено 0
-/// · дублей 1»: what came of it, plainly. `dup` is what a copy that was not
-/// better really is («FLAC из MP3 ~128»). `loc` is the locale the line is
-/// written in (kept as [`crate::streams::upgrade_job_words`]).
-pub(crate) fn upgrade_job_words(
-    loc: Locale,
-    imported: usize,
-    duplicates: usize,
-    left_out: usize,
-    failed: usize,
-    dup: Option<&str>,
-) -> String {
-    nikgob_core::i18n::status::fmt_upgrade_job_words_in(loc, imported, duplicates, left_out, failed, dup)
+    nikgob_core::i18n::status::fmt_quality_words_in(loc, &file_words(src))
 }
 
 /// An offer's line in «Подтверди», saying what it improves: «FLAC вместо
@@ -153,16 +129,6 @@ pub(crate) fn offer_detail(offer: &Offer, have: Option<&str>) -> String {
 /// [`offer_detail`] in `loc`.
 pub(crate) fn offer_detail_in(loc: Locale, offer: &Offer, have: Option<&str>) -> String {
     nikgob_core::i18n::status::fmt_offer_improving_in(loc, offer, have)
-}
-
-/// The note (and «История» line) of an item whose file was replaced.
-pub(crate) fn done_words(from: Option<&str>, to: Option<&str>) -> String {
-    done_words_in(Locale::Ru, from, to)
-}
-
-/// [`done_words`] in `loc`.
-pub(crate) fn done_words_in(loc: Locale, from: Option<&str>, to: Option<&str>) -> String {
-    nikgob_core::i18n::status::fmt_replaced_in(loc, from, to)
 }
 
 /// Something for a track is on its way or waits in «Подтверди»: an item of
@@ -417,34 +383,39 @@ impl Worker {
 
     /// The worst of the item's files below the bar, in words: what a copy
     /// that comes replaces.
-    fn upgrade_worst(&self, item: &WishlistItem) -> Option<String> {
+    fn upgrade_worst(&self, item: &WishlistItem) -> Option<QualityWords> {
         let bar = self.upgrade_line(item);
-        let loc = self.locale();
         self.upgrade_files(item)
             .iter()
             .filter(|s| s.quality_score < bar)
             .min_by_key(|s| s.quality_score)
-            .map(|s| file_label_in(loc, s))
+            .map(file_words)
     }
 
-    /// What the item's files are, in words: «MP3 128», or «MP3 128 у 6 из
-    /// 10» for an album some of whose files are good; `None` once none is
-    /// below the bar. Kept until a file lands.
+    /// What the item's files are: the worst of them, and how many of how
+    /// many are below the bar («MP3 128», «MP3 128 у 6 из 10»); `None` once
+    /// none is. Kept until a file lands.
     pub(super) fn upgrade_have(&mut self, item: &WishlistItem) -> Option<String> {
+        let loc = self.locale();
+        let have = self.upgrade_have_words(item);
+        have.map(|h| match h.below {
+            Some((below, files)) => {
+                nikgob_core::i18n::status::fmt_how_many_of_in(loc, &file_label_in(loc, &h.worst), below, files)
+            }
+            None => file_label_in(loc, &h.worst),
+        })
+    }
+
+    fn upgrade_have_words(&mut self, item: &WishlistItem) -> Option<HaveWords> {
         if let Some(have) = self.streaming.wish.upgrade_have.get(&item.id) {
             return have.clone();
         }
         let bar = self.upgrade_line(item);
         let files = self.upgrade_files(item);
         let below: Vec<&Source> = files.iter().filter(|s| s.quality_score < bar).collect();
-        let loc = self.locale();
-        let have = below.iter().min_by_key(|s| s.quality_score).map(|worst| {
-            let label = file_label_in(loc, worst);
-            if item.scope == WishlistScope::Album && below.len() < files.len() {
-                nikgob_core::i18n::status::fmt_how_many_of_in(loc, &label, below.len(), files.len())
-            } else {
-                label
-            }
+        let have = below.iter().min_by_key(|s| s.quality_score).map(|worst| HaveWords {
+            worst: file_words(worst),
+            below: (item.scope == WishlistScope::Album && below.len() < files.len()).then_some((below.len(), files.len())),
         });
         self.streaming.wish.upgrade_have.insert(item.id, have.clone());
         have
@@ -462,7 +433,8 @@ impl Worker {
         };
         let loc = self.locale();
         let wanted = if item.better_than.is_some() { asked_wanted_in(loc) } else { bar_words_in(self.upgrade_prefs().1, loc) };
-        upgrade_words_in(loc, item.status, files_wait, have.as_deref(), wanted, next, item.note.as_deref())
+        let note = item.note.as_deref().map(|n| nikgob_core::i18n::status::line_words_in(loc, n));
+        upgrade_words_in(loc, item.status, files_wait, have.as_deref(), wanted, next, note.as_deref())
     }
 
     /// Searches for better copies, while the schedule and the pace allow:
@@ -803,11 +775,9 @@ impl Worker {
     /// Better copies wait in «Подтверди»: «История» says what was found.
     pub(super) fn upgrade_offered(&mut self, id: WishlistId, shown: &[Offer]) {
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
-        let loc = self.locale();
         let have = self.upgrade_worst(&item);
-        let found = shown.first().and_then(|o| o.format.as_ref()).map(Format::label);
-        let tab = nikgob_core::i18n::downloads_in(loc).tab_confirm;
-        let what = nikgob_core::i18n::status::fmt_found_instead_in(loc, found.as_deref(), have.as_deref(), tab);
+        let found = shown.first().and_then(|o| o.format.clone());
+        let what = StoredLine::FoundInstead { found, have }.encode();
         let title = self.item_title(id);
         self.wish_line(id, title, what, None);
     }
@@ -823,12 +793,12 @@ impl Worker {
         let worst = self.upgrade_files(item).into_iter().min_by_key(|s| s.quality_score);
         let to = worst.map(|s| {
             let master = self.streaming.wish.upgrade_came.remove(&s.track_id).or_else(|| self.master_words(&s));
-            kept_label_in(loc, &s, master.as_deref())
+            file_words_kept(&s, master)
         });
-        let words = done_words_in(loc, from.as_deref(), to.as_deref());
-        log::info!("upgrade: {} — {words}", item.title.as_deref().unwrap_or("?"));
+        let note = StoredLine::Replaced { from, to }.encode();
+        log::info!("upgrade: {} — {}", item.title.as_deref().unwrap_or("?"), nikgob_core::i18n::status::line_words_in(loc, &note));
         self.upgrade_forget(id);
-        let note = words.clone();
+        let words = note.clone();
         self.set_item(id, |i| {
             i.status = WishlistStatus::Done;
             i.next_try_at = None;
@@ -839,35 +809,26 @@ impl Worker {
         self.publish_wishlist();
     }
 
-    /// The master of a track's lossy copy in words, from what the archive
-    /// knows: its codec, and the rate the check of the copy saw.
-    fn master_words(&self, src: &Source) -> Option<String> {
+    /// The master of a track's lossy copy, from what the archive knows: its
+    /// codec, and the rate the check of the copy saw.
+    fn master_words(&self, src: &Source) -> Option<MasterWords> {
         let master = self.lib.get_master(src.track_id).ok().flatten()?;
         let rate = self.lib.quality_check(src.id).ok().flatten().map(|c| c.sample_rate).filter(|r| *r > 0);
-        let hi_res = src.quality_score >= score::HI_RES_LOSSLESS;
-        let name = nikgob_core::quality::codec_name(&master.codec);
-        let khz_word = match self.locale() {
-            Locale::Ru => "кГц",
-            Locale::En => "kHz",
-        };
-        Some(match rate {
-            Some(r) if hi_res && r > 48_000 => {
-                let khz = f64::from(r) / 1000.0;
-                if khz.fract() == 0.0 { format!("{name} {khz:.0} {khz_word}") } else { format!("{name} {khz:.1} {khz_word}") }
-            }
-            _ if hi_res => format!("{name} Hi-Res"),
-            _ => name,
+        Some(MasterWords::Archive {
+            codec: master.codec,
+            sample_rate: rate,
+            hi_res: src.quality_score >= score::HI_RES_LOSSLESS,
         })
     }
 
     /// What a copy that came for the item and was no better really is.
-    pub(crate) fn upgrade_dup(&self, id: WishlistId) -> Option<String> {
+    pub(crate) fn upgrade_dup(&self, id: WishlistId) -> Option<QualityWords> {
         self.streaming.wish.upgrade_dups.get(&id).cloned()
     }
 
     /// A file that came for the item was not better than the one there:
     /// what it really is, for the words once its import ended.
-    pub(crate) fn wish_duplicate(&mut self, id: WishlistId, quality: Option<String>) {
+    pub(crate) fn wish_duplicate(&mut self, id: WishlistId, quality: Option<QualityWords>) {
         if let Some(q) = quality
             && self.is_upgrade(id)
         {
@@ -885,7 +846,7 @@ impl Worker {
                 bit_depth: info.bit_depth,
                 sample_rate: info.sample_rate,
             };
-            self.streaming.wish.upgrade_came.insert(track, format_words(&f));
+            self.streaming.wish.upgrade_came.insert(track, MasterWords::Format(f));
         }
     }
 
@@ -923,20 +884,27 @@ impl Worker {
             // The import's own line says what else came of it (left out,
             // failed); a copy that was no better is said here too.
             let Some(dup) = dup else { return };
-            let loc = self.locale();
-            let strings = status_in(loc);
-            let why = upgrade_job_words(loc, 0, 1, 0, 0, Some(&dup));
-            let mut why = {
-                let mut c = why.chars();
-                c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
+            let summary = StoredLine::UpgradeSummary {
+                imported: 0,
+                duplicates: 1,
+                left_out: 0,
+                failed: 0,
+                pending: 0,
+                dup: Some(dup),
             };
-            match next {
-                Next::Offer(from) => why.push_str(&format!(" · {}", nikgob_core::i18n::status::fmt_next_offer_in(loc, &from))),
-                Next::Doubtful => why.push_str(&format!(" · {}", strings.next_doubtful)),
-                Next::Later(_) | Next::NotFound => {}
-            }
+            let line = match next {
+                Next::Offer(source) => StoredLine::Joined {
+                    a: Box::new(StoredLine::Capitalised { line: Box::new(summary) }),
+                    b: Box::new(StoredLine::NextOffer { source }),
+                },
+                Next::Doubtful => StoredLine::Joined {
+                    a: Box::new(StoredLine::Capitalised { line: Box::new(summary) }),
+                    b: Box::new(StoredLine::DoubtfulNext),
+                },
+                Next::Later(_) | Next::NotFound => StoredLine::Capitalised { line: Box::new(summary) },
+            };
             let title = self.item_title(id);
-            self.wish_line(id, title, why, None);
+            self.wish_line(id, title, line.encode(), None);
         }
     }
 
@@ -949,11 +917,11 @@ impl Worker {
         let offers = item.candidates_json.as_deref().map(offers_of_json).unwrap_or_default();
         let loc = self.locale();
         let strings = status_in(loc);
-        let have = self.upgrade_worst(item);
+        let have = self.upgrade_worst(item).map(|q| nikgob_core::i18n::status::fmt_quality_words_in(loc, &q));
         let what = match (&item.artist, &item.title) {
             (Some(a), Some(t)) => format!("{t} — {a}"),
             (_, Some(t)) => t.clone(),
-            _ => super::capitalised(strings.better_quality),
+            _ => nikgob_core::i18n::status::capitalised(strings.better_quality),
         };
         let album = item.scope == WishlistScope::Album;
         v::Confirm {
@@ -1035,6 +1003,16 @@ mod tests {
         assert!(!below_bar(score::CD_LOSSLESS, mp3));
     }
 
+    /// A file as the words of a better copy say it, in `loc`.
+    fn kept_in(loc: Locale, src: &Source, master: &MasterWords) -> String {
+        nikgob_core::i18n::status::fmt_quality_words_in(loc, &file_words_kept(src, Some(master.clone())))
+    }
+
+    /// What a better copy did to a file.
+    fn replaced_in(loc: Locale, from: Option<&str>, to: Option<&str>) -> String {
+        nikgob_core::i18n::status::fmt_replaced_in(loc, from, to)
+    }
+
     fn offer(format: Format) -> Offer {
         Offer {
             source: SourceKey::Torrents,
@@ -1082,9 +1060,9 @@ mod tests {
         assert_eq!(file_label(&fake), "FLAC, возможно из lossy");
         fake.quality_score = score::CD_LOSSLESS;
         assert_eq!(file_label(&fake), "FLAC");
-        assert_eq!(done_words(Some("MP3 128"), Some("FLAC")), "Было MP3 128 — теперь FLAC");
-        assert_eq!(done_words(None, Some("FLAC")), "Теперь FLAC");
-        assert_eq!(done_words_in(Locale::En, Some("MP3 128"), Some("FLAC")), "Was MP3 128 — now FLAC");
+        assert_eq!(replaced_in(Locale::Ru, Some("MP3 128"), Some("FLAC")), "Было MP3 128 — теперь FLAC");
+        assert_eq!(replaced_in(Locale::Ru, None, Some("FLAC")), "Теперь FLAC");
+        assert_eq!(replaced_in(Locale::En, Some("MP3 128"), Some("FLAC")), "Was MP3 128 — now FLAC");
     }
 
     /// «Treehouse»: the hi-res FLAC went to the archive, the library plays
@@ -1095,13 +1073,24 @@ mod tests {
         opus.bitrate = Some(158);
         opus.quality_score = score::HI_RES_LOSSLESS;
         assert_eq!(file_label(&opus), "Opus 158");
-        let to = kept_label(&opus, Some("FLAC 24/96"));
+        let master = MasterWords::Format(Format { codec: Codec::Flac, bitrate_kbps: None, bit_depth: Some(24), sample_rate: Some(96_000) });
+        let to = kept_in(Locale::Ru, &opus, &master);
         assert_eq!(to, "FLAC 24/96 (в библиотеке Opus 158)");
-        assert_eq!(done_words(Some("MP3 242"), Some(&to)), "Было MP3 242 — теперь FLAC 24/96 (в библиотеке Opus 158)");
-        assert_eq!(kept_label_in(Locale::En, &opus, Some("FLAC 24/96")), "FLAC 24/96 (library has Opus 158)");
+        assert_eq!(
+            replaced_in(Locale::Ru, Some("MP3 242"), Some(&to)),
+            "Было MP3 242 — теперь FLAC 24/96 (в библиотеке Opus 158)"
+        );
+        assert_eq!(kept_in(Locale::En, &opus, &master), "FLAC 24/96 (library has Opus 158)");
+        // The archive's own file, by what the check of the copy saw.
+        let archive = MasterWords::Archive { codec: Codec::Flac, sample_rate: Some(96_000), hi_res: true };
+        assert_eq!(kept_in(Locale::Ru, &opus, &archive), "FLAC 96 кГц (в библиотеке Opus 158)");
+        assert_eq!(
+            nikgob_core::i18n::status::fmt_master_words_in(Locale::En, &archive),
+            "FLAC 96 kHz"
+        );
         // An Opus that is all there is says so.
         opus.quality_score = score::OPUS_160;
-        assert_eq!(kept_label(&opus, Some("FLAC")), "Opus 158");
+        assert_eq!(kept_in(Locale::Ru, &opus, &master), "Opus 158");
         assert_eq!(format_words(&Format { codec: Codec::Flac, bitrate_kbps: None, bit_depth: Some(24), sample_rate: Some(96_000) }), "FLAC 24/96");
         // Ranked as its master: not below either bar, so not looked for again.
         assert!(!below_bar(score::HI_RES_LOSSLESS, UpgradeBar::Lossless));
@@ -1110,26 +1099,48 @@ mod tests {
     /// «добавлено 0 · дублей 1» said nothing; now the line says why.
     #[test]
     fn an_upgrade_import_says_plainly_what_came_of_it() {
-        let w = |imported, duplicates, left_out, failed, dup| {
-            upgrade_job_words(Locale::Ru, imported, duplicates, left_out, failed, dup)
+        use nikgob_core::quality::{CheckSummary, SoundOrigin, Verdict};
+        let dup = |check| {
+            Some(QualityWords::Label { codec: Codec::Flac, bitrate_kbps: None, check: Some(check) })
         };
+        let sure = CheckSummary {
+            verdict: Verdict::Transcoded,
+            origin: SoundOrigin::Lossy { kbps: 128 },
+            made_from: None,
+            cutoff_hz: Some(16_000),
+        };
+        let unsure = CheckSummary { origin: SoundOrigin::Lossy { kbps: 320 }, cutoff_hz: Some(20_000), ..sure.clone() };
+        let plain = |q| StoredLine::UpgradeSummary {
+            imported: 0,
+            duplicates: 1,
+            left_out: 0,
+            failed: 0,
+            pending: 0,
+            dup: q,
+        };
+        let w = |line: StoredLine| nikgob_core::i18n::status::line_words_in(Locale::Ru, &line.encode());
         assert_eq!(
-            w(0, 1, 0, 0, Some("FLAC из MP3 ~128")),
+            w(plain(dup(sure))),
             "скачанный FLAC оказался из MP3 ~128 — оставил прежний файл"
         );
-        assert_eq!(w(0, 1, 0, 0, Some("MP3 320")), "скачанный MP3 320 не лучше прежнего — оставил прежний файл");
+        let mp3 = Some(QualityWords::Label { codec: Codec::Mp3, bitrate_kbps: Some(320), check: None });
+        assert_eq!(w(plain(mp3)), "скачанный MP3 320 не лучше прежнего — оставил прежний файл");
+        assert_eq!(w(plain(dup(unsure))), "скачанный FLAC, возможно, из MP3 320 — оставил прежний файл");
+        let summary = |imported, duplicates, left_out| StoredLine::UpgradeSummary {
+            imported,
+            duplicates,
+            left_out,
+            failed: 0,
+            pending: 0,
+            dup: None,
+        };
+        assert_eq!(w(summary(1, 0, 0)), "заменено 1");
+        assert_eq!(w(summary(0, 0, 6)), "скачанное не из этого альбома — ничего не добавил");
+        assert_eq!(w(summary(3, 1, 2)), "заменено 3 · не лучше прежних 1 · не из этого альбома 2");
+        assert!(!w(summary(0, 1, 0)).contains("дублей"));
         assert_eq!(
-            w(0, 1, 0, 0, Some("FLAC, возможно из MP3 320")),
-            "скачанный FLAC, возможно, из MP3 320 — оставил прежний файл"
-        );
-        assert_eq!(w(1, 0, 0, 0, None), "заменено 1");
-        assert_eq!(w(0, 0, 6, 0, None), "скачанное не из этого альбома — ничего не добавил");
-        assert_eq!(w(3, 1, 2, 0, None), "заменено 3 · не лучше прежних 1 · не из этого альбома 2");
-        assert!(!w(0, 1, 0, 0, None).contains("дублей"));
-        assert_eq!(upgrade_job_words(Locale::En, 1, 0, 0, 0, None), "replaced 1");
-        assert_eq!(
-            upgrade_job_words(Locale::En, 0, 1, 0, 0, Some("FLAC from MP3 ~128")),
-            "the downloaded FLAC turned out to be from MP3 ~128 — kept the previous file"
+            nikgob_core::i18n::status::line_words_in(Locale::En, &summary(1, 0, 0).encode()),
+            "replaced 1"
         );
     }
 

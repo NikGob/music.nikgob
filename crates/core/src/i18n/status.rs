@@ -3,6 +3,8 @@
 //! The runtime keeps codes and numbers in its state and says them here, so
 //! a status is translated where it is drawn, not where it was made.
 
+use serde::{Deserialize, Serialize};
+
 use super::{Locale, PluralForms, plural_forms};
 
 /// Static strings: import, wishlist and torrent statuses rendered from runtime state.
@@ -102,18 +104,14 @@ pub struct StatusStrings {
     pub replaced_better: &'static str,
     /// `"FLAC"` + it: `"FLAC, возможно из lossy"`.
     pub maybe_lossy: &'static str,
-    /// The separator of a quality label whose source is another format
-    /// (`"FLAC, возможно из MP3 320"`).
-    pub maybe_from: &'static str,
     /// `"FLAC"` + it: `"FLAC из lossy"`.
     pub from_lossy: &'static str,
-    /// The separator a quality label uses for its source (`"FLAC из MP3
-    /// ~128"`); the generic one the importer's labels carry.
-    pub made_from: &'static str,
 
     // Torrents.
     pub seeders: PluralForms,
     pub files_plural: PluralForms,
+    /// The kilohertz unit of a master's rate: «кГц» / «kHz».
+    pub khz_unit: &'static str,
 }
 
 pub static RU: StatusStrings = StatusStrings {
@@ -204,12 +202,11 @@ pub static RU: StatusStrings = StatusStrings {
     replace: "Заменить",
     replaced_better: "Заменил на качество лучше",
     maybe_lossy: ", возможно из lossy",
-    maybe_from: ", возможно из ",
     from_lossy: " из lossy",
-    made_from: " из ",
 
     seeders: PluralForms { one: "сид.", few: "сид.", many: "сид." },
     files_plural: PluralForms { one: "файл", few: "файла", many: "файлов" },
+    khz_unit: "кГц",
 };
 
 pub static EN: StatusStrings = StatusStrings {
@@ -300,12 +297,11 @@ pub static EN: StatusStrings = StatusStrings {
     replace: "Replace",
     replaced_better: "Replaced with better quality",
     maybe_lossy: ", possibly from a lossy source",
-    maybe_from: ", possibly from ",
     from_lossy: " from a lossy source",
-    made_from: " from ",
 
     seeders: PluralForms { one: "seed", few: "seeds", many: "seeds" },
     files_plural: PluralForms { one: "file", few: "files", many: "files" },
+    khz_unit: "kHz",
 };
 
 locale_table! {
@@ -846,24 +842,7 @@ pub fn fmt_offer_improving_in(loc: Locale, offer: &crate::source::Offer, have: O
 
 /// `"FLAC 24/96 · 312 МБ · 14 сид. · RuTracker"`.
 pub fn fmt_offer_in(loc: Locale, offer: &crate::source::Offer) -> String {
-    let mut parts = Vec::new();
-    if let Some(f) = &offer.format {
-        parts.push(f.label());
-    }
-    if let Some(b) = offer.size_bytes {
-        parts.push(fmt_size_in(loc, b));
-    }
-    if let Some(s) = offer.seeders {
-        let word = plural_forms(loc, u64::from(s), &status_in(loc).seeders);
-        parts.push(format!("{s} {word}"));
-    }
-    let provider = if offer.provider.is_empty() {
-        offer.source.display_name_in(loc).to_owned()
-    } else {
-        offer.provider.clone()
-    };
-    parts.push(provider);
-    parts.join(" · ")
+    fmt_offer_words_in(loc, &OfferWords::of(offer))
 }
 
 /// `"312 МБ"`, `"1.4 ГБ"` (the units of the locale).
@@ -1013,16 +992,15 @@ pub fn fmt_doubtful_pick_in(loc: Locale, tab: &str) -> String {
 
 /// What an import done for a better copy came to, plainly, in place of
 /// `"добавлено 0 · дублей 1"`. `dup` is what a copy that was not better
-/// really is (`"FLAC из MP3 ~128"`, in the locale of the rules).
+/// really is (`QualityWords::Label`: «FLAC из MP3 ~128»).
 pub fn fmt_upgrade_job_words_in(
     loc: Locale,
     imported: usize,
     duplicates: usize,
     left_out: usize,
     failed: usize,
-    dup: Option<&str>,
+    dup: Option<&QualityWords>,
 ) -> String {
-    let s = status_in(loc);
     let mut parts: Vec<String> = Vec::new();
     if imported > 0 {
         parts.push(match loc {
@@ -1032,26 +1010,7 @@ pub fn fmt_upgrade_job_words_in(
     }
     if duplicates > 0 {
         parts.push(match (imported, duplicates, dup) {
-            // «FLAC, возможно из MP3 320»: a cut a real master may have too.
-            (0, 1, Some(q)) if q.contains(s.maybe_from) => {
-                let (codec, from) = q.split_once(s.maybe_from).unwrap_or((q, ""));
-                match loc {
-                    Locale::Ru => format!("скачанный {codec}, возможно, из {from} — оставил прежний файл"),
-                    Locale::En => format!("the downloaded {codec} may be from {from} — kept the previous file"),
-                }
-            }
-            // A quality label of the importer's own («FLAC из MP3 ~128»).
-            (0, 1, Some(q)) if q.contains(s.made_from) => {
-                let (codec, from) = q.split_once(s.made_from).unwrap_or((q, ""));
-                match loc {
-                    Locale::Ru => format!("скачанный {codec} оказался из {from} — оставил прежний файл"),
-                    Locale::En => format!("the downloaded {codec} turned out to be from {from} — kept the previous file"),
-                }
-            }
-            (0, 1, Some(q)) => match loc {
-                Locale::Ru => format!("скачанный {q} не лучше прежнего — оставил прежний файл"),
-                Locale::En => format!("the downloaded {q} is no better — kept the previous file"),
-            },
+            (0, 1, Some(q)) => fmt_no_better_in(loc, q),
             (0, 1, None) => match loc {
                 Locale::Ru => "скачанный файл не лучше прежнего — оставил прежний".to_owned(),
                 Locale::En => "the downloaded file is no better — kept the previous one".to_owned(),
@@ -1086,6 +1045,68 @@ pub fn fmt_upgrade_job_words_in(
         }
     } else {
         parts.join(" · ")
+    }
+}
+
+/// A copy that came and was no better, said by what it really is: «скачанный
+/// FLAC оказался из MP3 ~128 — оставил прежний файл».
+fn fmt_no_better_in(loc: Locale, q: &QualityWords) -> String {
+    use crate::quality::LabelKind;
+    let plain = |loc: Locale| {
+        let label = fmt_quality_words_in(loc, q);
+        match loc {
+            Locale::Ru => format!("скачанный {label} не лучше прежнего — оставил прежний файл"),
+            Locale::En => format!("the downloaded {label} is no better — kept the previous file"),
+        }
+    };
+    let QualityWords::Label { codec, bitrate_kbps, check } = q else {
+        return plain(loc);
+    };
+    let name = crate::quality::codec_name(codec);
+    // A lossy file's label says its bitrate: «MP3 320».
+    let with_rate = match bitrate_kbps.filter(|_| !codec.is_lossless()) {
+        Some(b) => format!("{name} {b}"),
+        None => name.clone(),
+    };
+    match crate::quality::label_kind(codec, check.as_ref()) {
+        LabelKind::Plain => plain(loc),
+        // «FLAC из MP3 ~128», «FLAC, возможно из MP3 320», «FLAC из сжатого».
+        LabelKind::Fake { kbps, sure } => match (loc, sure) {
+            (Locale::Ru, true) => {
+                let from = kbps.map_or_else(|| "сжатого".to_owned(), |k| format!("MP3 ~{k}"));
+                format!("скачанный {name} оказался из {from} — оставил прежний файл")
+            }
+            (Locale::En, true) => {
+                let from = kbps.map_or_else(|| "lossy".to_owned(), |k| format!("MP3 ~{k}"));
+                format!("the downloaded {name} turned out to be from {from} — kept the previous file")
+            }
+            (Locale::Ru, false) => {
+                let from = kbps.map_or_else(|| "сжатого".to_owned(), |k| format!("MP3 {k}"));
+                format!("скачанный {name}, возможно, из {from} — оставил прежний файл")
+            }
+            (Locale::En, false) => {
+                let from = kbps.map_or_else(|| "lossy".to_owned(), |k| format!("MP3 {k}"));
+                format!("the downloaded {name} may be from {from} — kept the previous file")
+            }
+        },
+        // «MP3 320 из поддельного FLAC», «MP3 320 из FLAC, возможно поддельного».
+        LabelKind::FromFake { from, sure } => {
+            let made = from.map(crate::quality::codec_name).unwrap_or_default();
+            match (loc, sure) {
+                (Locale::Ru, true) => {
+                    format!("скачанный {with_rate} оказался из поддельного {made} — оставил прежний файл")
+                }
+                (Locale::En, true) => {
+                    format!("the downloaded {with_rate} turned out to be from a fake {made} — kept the previous file")
+                }
+                (Locale::Ru, false) => {
+                    format!("скачанный {with_rate} оказался из {made}, возможно поддельного — оставил прежний файл")
+                }
+                (Locale::En, false) => {
+                    format!("the downloaded {with_rate} turned out to be from {made}, possibly fake — kept the previous file")
+                }
+            }
+        }
     }
 }
 
@@ -1212,6 +1233,526 @@ pub fn fmt_wish_note_in(loc: Locale, note: WishNote) -> &'static str {
         WishNote::KeptFiles => s.note_kept_files,
         WishNote::FilesBack => s.note_files_back,
         WishNote::Done => "",
+    }
+}
+
+/// The first letter capitalised (a line that stands alone).
+pub fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
+/// `"1.2 ГБ"`, `"312 МБ"`: a download's size, in the decimal units its row
+/// says it.
+pub fn fmt_bytes_in(loc: Locale, b: u64) -> String {
+    let (gb, mb, kb) = match loc {
+        Locale::Ru => ("ГБ", "МБ", "КБ"),
+        Locale::En => ("GB", "MB", "KB"),
+    };
+    let b = b as f64;
+    if b >= 1e9 {
+        format!("{:.1} {gb}", b / 1e9)
+    } else if b >= 1e6 {
+        format!("{:.1} {mb}", b / 1e6)
+    } else {
+        format!("{:.0} {kb}", b / 1e3)
+    }
+}
+
+/// A format in words: «MP3 128», «FLAC 24/96», «Opus 160».
+pub fn format_words(f: &crate::source::Format) -> String {
+    let label = f.label();
+    let name = crate::quality::codec_name(&f.codec);
+    match label.split_once(' ') {
+        Some((_, rest)) => format!("{name} {rest}"),
+        None => name,
+    }
+}
+
+/// «этот трек», «этот альбом», «остальное»: what a source could not give.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum What {
+    Track,
+    Album,
+    Rest,
+}
+
+impl What {
+    /// Its words in `loc`.
+    pub fn words_in(self, loc: Locale) -> &'static str {
+        let s = status_in(loc);
+        match self {
+            Self::Track => s.what_track,
+            Self::Album => s.what_album,
+            Self::Rest => s.what_rest,
+        }
+    }
+}
+
+/// A source's name in a sentence (the indexer behind «Торренты» is the one
+/// that answers or not).
+pub fn source_name_in(loc: Locale, key: crate::source::SourceKey) -> &'static str {
+    match key {
+        crate::source::SourceKey::Torrents => "Prowlarr",
+        k => k.display_name_in(loc),
+    }
+}
+
+/// Where an offer comes from, for the lines: the source (a Soulseek offer's
+/// provider is a user's name), a torrent as such.
+fn from_words_in(loc: Locale, key: crate::source::SourceKey) -> String {
+    match key {
+        crate::source::SourceKey::Torrents => status_in(loc).torrent_offer.to_owned(),
+        k => k.display_name_in(loc).to_owned(),
+    }
+}
+
+/// `"в 21:40"` / `"через 5 мин"`, kept so the words are made in any locale.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtWords {
+    /// The clock time (`"21:40"`), when it is known.
+    pub hm: Option<String>,
+    /// How long from the moment the line was written, in minutes.
+    pub mins: u64,
+}
+
+impl AtWords {
+    /// Its words in `loc`.
+    pub fn words_in(&self, loc: Locale) -> String {
+        fmt_at_time_in(loc, self.hm.as_deref(), self.mins)
+    }
+}
+
+/// Why a source turned an item away, in the words that name it and say what
+/// it said.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "r", rename_all = "snake_case")]
+pub enum Refusal {
+    /// «у Qobuz лимит на сегодня».
+    DayLimit { source: crate::source::SourceKey },
+    /// «Qobuz просит подождать до 03:00» (`until` is the clock time).
+    AsksToWait {
+        source: crate::source::SourceKey,
+        until: Option<String>,
+    },
+    /// «khinsider закрыт проверкой».
+    Check { source: crate::source::SourceKey },
+    /// «Soulseek не пускает».
+    Blocked { source: crate::source::SourceKey },
+    /// «Tidal находит, но не скачивает».
+    FindsOnly { source: crate::source::SourceKey },
+    /// «Tidal сейчас не отдаёт этот трек».
+    GivesNo {
+        source: crate::source::SourceKey,
+        what: What,
+    },
+    /// «сервер Qobuz недоступен».
+    ServerDown { source: crate::source::SourceKey },
+    /// «Tidal не дал скачать».
+    NoDownload { source: crate::source::SourceKey },
+}
+
+impl Refusal {
+    /// Its words in `loc`.
+    pub fn words_in(&self, loc: Locale) -> String {
+        match self {
+            Self::DayLimit { source } => fmt_source_limit_today_in(loc, source_name_in(loc, *source)),
+            Self::AsksToWait { source, until } => {
+                fmt_source_asks_to_wait_in(loc, source_name_in(loc, *source), until.as_deref())
+            }
+            Self::Check { source } => fmt_source_check_in(loc, source_name_in(loc, *source)),
+            Self::Blocked { source } => fmt_source_blocked_in(loc, source_name_in(loc, *source)),
+            Self::FindsOnly { source } => fmt_source_finds_only_in(loc, source_name_in(loc, *source)),
+            Self::GivesNo { source, what } => {
+                fmt_source_gives_no_in(loc, source_name_in(loc, *source), what.words_in(loc))
+            }
+            Self::ServerDown { source } => fmt_source_server_down_in(loc, source_name_in(loc, *source)),
+            Self::NoDownload { source } => fmt_source_no_download_in(loc, source_name_in(loc, *source)),
+        }
+    }
+}
+
+/// The archive's master a lossy copy was made from, in words.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "m", rename_all = "snake_case")]
+pub enum MasterWords {
+    /// A format in words: «FLAC 24/96».
+    Format(crate::source::Format),
+    /// The archive's file: its codec, and the rate the check of the copy saw.
+    Archive {
+        codec: crate::model::Codec,
+        sample_rate: Option<u32>,
+        hi_res: bool,
+    },
+}
+
+/// A master's words: «FLAC 24/96», «FLAC Hi-Res», «FLAC».
+pub fn fmt_master_words_in(loc: Locale, m: &MasterWords) -> String {
+    match m {
+        MasterWords::Format(f) => format_words(f),
+        MasterWords::Archive { codec, sample_rate, hi_res } => {
+            let name = crate::quality::codec_name(codec);
+            let unit = status_in(loc).khz_unit;
+            match sample_rate {
+                Some(r) if *hi_res && *r > 48_000 => {
+                    let khz = f64::from(*r) / 1000.0;
+                    if khz.fract() == 0.0 {
+                        format!("{name} {khz:.0} {unit}")
+                    } else {
+                        format!("{name} {khz:.1} {unit}")
+                    }
+                }
+                _ if *hi_res => format!("{name} Hi-Res"),
+                _ => name,
+            }
+        }
+    }
+}
+
+/// A quality label as data, so it says the same in any language.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "q", rename_all = "snake_case")]
+pub enum QualityWords {
+    /// A file as its check found it ([`crate::quality::label_in`]): «FLAC из
+    /// MP3 ~128», «MP3 320». A row's short label keeps the check only when
+    /// it is sure.
+    Label {
+        codec: crate::model::Codec,
+        bitrate_kbps: Option<u32>,
+        check: Option<crate::quality::CheckSummary>,
+    },
+    /// A library file as a better copy's words say it (`file_label_in`):
+    /// «MP3 128», «FLAC из lossy», «FLAC 24/96 (в библиотеке Opus 158)».
+    File {
+        codec: crate::model::Codec,
+        bitrate_kbps: Option<u32>,
+        bit_depth: Option<u8>,
+        sample_rate: Option<u32>,
+        /// Its `quality_score`: the rank says a lossless file is a fake.
+        score: i32,
+        /// The archive's master it was made from, when it is a copy.
+        master: Option<MasterWords>,
+    },
+}
+
+/// A quality label in `loc`'s words.
+pub fn fmt_quality_words_in(loc: Locale, q: &QualityWords) -> String {
+    let s = status_in(loc);
+    match q {
+        QualityWords::Label { codec, bitrate_kbps, check } => {
+            crate::quality::label_in(codec, *bitrate_kbps, check.as_ref(), loc)
+        }
+        QualityWords::File { codec, bitrate_kbps, bit_depth, sample_rate, score, master } => {
+            let label = format_words(&crate::source::Format {
+                codec: codec.clone(),
+                bitrate_kbps: *bitrate_kbps,
+                bit_depth: *bit_depth,
+                sample_rate: *sample_rate,
+            });
+            let own = if !codec.is_lossless() || *score >= crate::model::score::CD_LOSSLESS {
+                label
+            } else if *score > crate::model::score::FAKE_LOSSLESS {
+                format!("{label}{}", s.maybe_lossy)
+            } else {
+                format!("{label}{}", s.from_lossy)
+            };
+            match master {
+                Some(m) if !codec.is_lossless() && *score >= crate::model::score::CD_LOSSLESS => {
+                    format!("{} {}", fmt_master_words_in(loc, m), fmt_in_library_in(loc, &own))
+                }
+                _ => own,
+            }
+        }
+    }
+}
+
+/// What a file really is, as «Подтверди» kept it: the data of a label, or
+/// the words a version before it wrote (still read, never written).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SavedQuality {
+    Words(String),
+    Data(QualityWords),
+}
+
+impl SavedQuality {
+    /// Its words in `loc`.
+    pub fn words_in(&self, loc: Locale) -> String {
+        match self {
+            Self::Words(w) => w.clone(),
+            Self::Data(q) => fmt_quality_words_in(loc, q),
+        }
+    }
+}
+
+/// An offer's line, from the parts it is made of (the whole offer is not
+/// kept in a line: its handle belongs to the source).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OfferWords {
+    pub format: Option<crate::source::Format>,
+    pub size_bytes: Option<u64>,
+    pub seeders: Option<u32>,
+    pub provider: String,
+    pub source: crate::source::SourceKey,
+}
+
+impl OfferWords {
+    /// The parts of `offer` its line is made of.
+    pub fn of(offer: &crate::source::Offer) -> Self {
+        Self {
+            format: offer.format.clone(),
+            size_bytes: offer.size_bytes,
+            seeders: offer.seeders,
+            provider: offer.provider.clone(),
+            source: offer.source,
+        }
+    }
+}
+
+/// An offer's line: `"FLAC 24/96 · 312 МБ · 14 сид. · RuTracker"`.
+pub fn fmt_offer_words_in(loc: Locale, w: &OfferWords) -> String {
+    let mut parts = Vec::new();
+    if let Some(f) = &w.format {
+        parts.push(f.label());
+    }
+    if let Some(b) = w.size_bytes {
+        parts.push(fmt_size_in(loc, b));
+    }
+    if let Some(s) = w.seeders {
+        parts.push(crate::i18n::backend::fmt_seeders_in(loc, s));
+    }
+    parts.push(if w.provider.is_empty() { w.source.display_name_in(loc).to_owned() } else { w.provider.clone() });
+    parts.join(" · ")
+}
+
+/// The mark of a line kept as data.
+const LINE_MARK: &str = "@line:";
+
+/// A «Хочу скачать» note or a «История» line, kept as data (a kind and its
+/// arguments) and worded when it is read, in the reader's locale.
+///
+/// It is stored as [`LINE_MARK`] and the JSON of it; a row written before
+/// the lines were kept this way holds the words themselves and is shown as
+/// it was.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "k", content = "v", rename_all = "snake_case")]
+pub enum StoredLine {
+    /// «Скачано 3 из 10»: this much of the album is here.
+    DoneCount { have: usize, all: usize },
+    /// «Скачано · FLAC из MP3 ~320»: a file, as the check found it.
+    DoneQuality { quality: QualityWords },
+    /// «Раздача: Album (2020) FLAC».
+    Torrent { title: String },
+    /// «Смотрю, есть ли трек в раздаче: Album (2020) FLAC».
+    CheckingTorrent { title: String },
+    /// «FLAC · 312 МБ · 14 сид. · Album (2020) FLAC».
+    TorrentFound { format: Option<crate::source::Format>, size: u64, seeders: u32, title: String },
+    /// An offer's line and the item's name:
+    /// «FLAC 24/96 · 312 МБ · 14 сид. · RuTracker · Album».
+    Offer { offer: OfferWords, title: String },
+    /// «Поищу снова в 21:40».
+    SearchAgain { at: AtWords },
+    /// «Есть 1 из 10 · Tidal сейчас не отдаёт остальное · через 5 мин спрошу Tidal».
+    Later {
+        have: Option<(usize, usize)>,
+        why: Vec<Refusal>,
+        at: AtWords,
+        asked: Vec<crate::source::SourceKey>,
+    },
+    /// Why a source said no: «Tidal сейчас не отдаёт этот трек».
+    Refusal { why: Refusal },
+    /// The sources' reasons, or «Источники не дали скачать».
+    Reasons { why: Vec<Refusal> },
+    /// «Поищу снова через неделю».
+    Week,
+    /// «дальше — Qobuz».
+    NextOffer { source: crate::source::SourceKey },
+    /// «есть варианты под вопросом — выбери в «Хочу скачать»».
+    DoubtfulPick,
+    /// «есть другие варианты — в «Подтверди»».
+    DoubtfulNext,
+    /// «Скачано 3 из 10 · остальных 3 у Qobuz нет».
+    Partial { have: usize, all: usize, why: Box<StoredLine> },
+    /// «остальных 3 у Qobuz нет».
+    Absent { missing: usize, source: crate::source::SourceKey },
+    /// «Было MP3 128 — теперь FLAC».
+    Replaced { from: Option<QualityWords>, to: Option<QualityWords> },
+    /// «Нашёл FLAC вместо MP3 320 · подтверди замену в «Подтверди»».
+    FoundInstead { found: Option<crate::source::Format>, have: Option<QualityWords> },
+    /// «Нашёл качество лучше для 3 треков · подтверди замену в «Подтверди»».
+    BetterFound { count: usize },
+    /// «Скачанное не лучше прежних файлов — оставил их».
+    NothingBetter,
+    /// The file held another song's audio: «В файле от Soulseek другая
+    /// песня — «Song» · ищу дальше».
+    WrongAudio { from: Option<String>, sounds_like: Option<String>, looks: bool },
+    /// An import's title: «Импорт «a.flac»».
+    ImportOf { name: String, count: usize },
+    /// «Импорт для «Хочу скачать»».
+    ImportForWishlist,
+    /// «Сохранение с YouTube».
+    SavingFromYoutube,
+    /// «Качество лучше: Artist — Album».
+    BetterQualityTitle { title: String },
+    /// «Импорт из Spotify».
+    ImportFromService { service: crate::streaming::Service },
+    /// «Импорт выгрузки «x.json»».
+    ImportExport { name: String },
+    /// «Импорт из Inbox».
+    ImportFromInbox,
+    /// «Импорт»: a job that never said what it was.
+    ImportTitle,
+    /// «добавлено 3 · дублей 1 · ошибок 2 · отправлено на подтверждение 4».
+    ImportSummary { imported: usize, duplicates: usize, left_out: usize, failed: usize, pending: usize },
+    /// What an import done for a better copy came to.
+    UpgradeSummary {
+        imported: usize,
+        duplicates: usize,
+        left_out: usize,
+        failed: usize,
+        pending: usize,
+        dup: Option<QualityWords>,
+    },
+    /// «отменено — добавленное убрано».
+    Cancelled,
+    /// «Скачано 1.2 ГБ» / «Скачано 1.2 ГБ · импорт в библиотеку».
+    Downloaded { size: u64, importing: bool },
+    /// «Не удалось: 2», «В файле другая песня: «Song»».
+    FailedWords { failed: usize, wrong: Vec<String> },
+    /// A cold import's outcome: what it found, what was new, what it left
+    /// out, and what it could not do.
+    ColdSummary { found: [usize; 4], new: [usize; 4], skipped: usize, problems: Vec<String> },
+    /// «Импорт не удался: …».
+    ColdFailed { detail: String },
+    /// «Перенос архива FLAC».
+    MovedMastersTitle,
+    /// «перенесено 3 · проверено BLAKE3 → папка».
+    MovedMasters { moved: usize, dir: String },
+    /// Two of ours in one line: `a · b`.
+    Joined { a: Box<StoredLine>, b: Box<StoredLine> },
+    /// The same, its first letter capitalised.
+    Capitalised { line: Box<StoredLine> },
+}
+
+impl StoredLine {
+    /// The text kept in the database: the mark and the line's JSON.
+    pub fn encode(&self) -> String {
+        format!("{LINE_MARK}{}", serde_json::to_string(self).unwrap_or_default())
+    }
+
+    /// The line `s` stands for, when it is one of ours.
+    pub fn decode(s: &str) -> Option<Self> {
+        serde_json::from_str(s.strip_prefix(LINE_MARK)?).ok()
+    }
+
+    /// Its words in `loc`.
+    pub fn words_in(&self, loc: Locale) -> String {
+        use crate::i18n::{activity::fmt_import_counts_in, activity::fmt_import_skipped_in, activity_in};
+        match self {
+            Self::DoneCount { have, all } => fmt_done_note_in(loc, Some((*have, *all)), None),
+            Self::DoneQuality { quality } => fmt_done_note_in(loc, None, Some(&fmt_quality_words_in(loc, quality))),
+            Self::Torrent { title } => fmt_torrent_note_in(loc, title),
+            Self::CheckingTorrent { title } => fmt_checking_torrent_in(loc, title),
+            Self::TorrentFound { format, size, seeders, title } => {
+                let format = format.as_ref().map_or_else(|| "?".to_owned(), |f| f.label());
+                fmt_torrent_found_in(loc, &format, &fmt_bytes_in(loc, *size), *seeders, title)
+            }
+            Self::Offer { offer, title } => format!("{} · {title}", fmt_offer_words_in(loc, offer)),
+            Self::SearchAgain { at } => capitalised(&fmt_search_again_in(loc, &at.words_in(loc))),
+            Self::Later { have, why, at, asked } => {
+                let why: Vec<String> = why.iter().map(|r| r.words_in(loc)).collect();
+                let names: Vec<&str> = asked.iter().map(|k| source_name_in(loc, *k)).collect();
+                capitalised(&fmt_later_line_in(loc, *have, &why, &at.words_in(loc), &names))
+            }
+            Self::Refusal { why } => why.words_in(loc),
+            Self::Reasons { why } => {
+                if why.is_empty() {
+                    status_in(loc).sources_gave_nothing.to_owned()
+                } else {
+                    why.iter().map(|r| r.words_in(loc)).collect::<Vec<_>>().join(", ")
+                }
+            }
+            Self::Week => fmt_search_again_week_in(loc),
+            Self::NextOffer { source } => fmt_next_offer_in(loc, &from_words_in(loc, *source)),
+            Self::DoubtfulPick => fmt_doubtful_pick_in(loc, crate::i18n::downloads_in(loc).tab_wishlist),
+            Self::DoubtfulNext => status_in(loc).next_doubtful.to_owned(),
+            Self::Partial { have, all, why } => fmt_downloaded_of_in(loc, *have, *all, &why.words_in(loc)),
+            Self::Absent { missing, source } => fmt_others_absent_in(loc, *missing, source_name_in(loc, *source)),
+            Self::Replaced { from, to } => {
+                let from = from.as_ref().map(|q| fmt_quality_words_in(loc, q));
+                let to = to.as_ref().map(|q| fmt_quality_words_in(loc, q));
+                fmt_replaced_in(loc, from.as_deref(), to.as_deref())
+            }
+            Self::FoundInstead { found, have } => {
+                let found = found.as_ref().map(|f| f.label());
+                let have = have.as_ref().map(|q| fmt_quality_words_in(loc, q));
+                fmt_found_instead_in(loc, found.as_deref(), have.as_deref(), crate::i18n::downloads_in(loc).tab_confirm)
+            }
+            Self::BetterFound { count } => {
+                fmt_better_found_in(loc, *count as u64, crate::i18n::downloads_in(loc).tab_confirm)
+            }
+            Self::NothingBetter => fmt_nothing_better_in(loc),
+            Self::WrongAudio { from, sounds_like, looks } => {
+                fmt_wrong_audio_in(loc, from.as_deref(), sounds_like.as_deref(), *looks)
+            }
+            Self::ImportOf { name, count } => fmt_import_of_in(loc, name, *count),
+            Self::ImportForWishlist => fmt_import_for_wishlist_in(loc),
+            Self::SavingFromYoutube => fmt_saving_from_youtube_in(loc),
+            Self::BetterQualityTitle { title } => fmt_better_import_title_in(loc, title),
+            Self::ImportFromService { service } => format!("{} {}", activity_in(loc).import_from, service.display_name()),
+            Self::ImportExport { name } => {
+                format!("{} {}", activity_in(loc).import_export, crate::i18n::activity::fmt_quoted_in(loc, name))
+            }
+            Self::ImportFromInbox => status_in(loc).import_from_inbox.to_owned(),
+            Self::ImportTitle => status_in(loc).import_title.to_owned(),
+            Self::ImportSummary { imported, duplicates, left_out, failed, pending } => {
+                fmt_import_summary_in(loc, *imported, *duplicates, *left_out, *failed, *pending)
+            }
+            Self::UpgradeSummary { imported, duplicates, left_out, failed, pending, dup } => {
+                let mut s = fmt_upgrade_job_words_in(loc, *imported, *duplicates, *left_out, *failed, dup.as_ref());
+                if *pending > 0 {
+                    s.push_str(&format!(" · {}", fmt_parked_in(loc, *pending)));
+                }
+                s
+            }
+            Self::Cancelled => status_in(loc).cancelled_summary.to_owned(),
+            Self::Downloaded { size, importing } => fmt_downloaded_size_in(loc, &fmt_bytes_in(loc, *size), *importing),
+            Self::FailedWords { failed, wrong } => fmt_failed_words_in(loc, *failed, wrong).unwrap_or_default(),
+            Self::ColdSummary { found, new, skipped, problems } => {
+                let mut text = format!(
+                    "{}: {} · {}: {}",
+                    activity_in(loc).import_found,
+                    fmt_import_counts_in(loc, found[0], found[1], found[2], found[3]),
+                    activity_in(loc).import_new,
+                    fmt_import_counts_in(loc, new[0], new[1], new[2], new[3])
+                );
+                text.push_str(&fmt_import_skipped_in(loc, *skipped));
+                if !problems.is_empty() {
+                    text.push_str(&format!(" · {}: {}", activity_in(loc).import_not_all, problems.join("; ")));
+                }
+                text
+            }
+            Self::ColdFailed { detail } => format!("{}: {detail}", activity_in(loc).import_failed),
+            Self::MovedMastersTitle => status_in(loc).moved_masters_title.to_owned(),
+            Self::MovedMasters { moved, dir } => fmt_masters_move_line_in(loc, *moved, dir),
+            Self::Joined { a, b } => format!("{} · {}", a.words_in(loc), b.words_in(loc)),
+            Self::Capitalised { line } => capitalised(&line.words_in(loc)),
+        }
+    }
+}
+
+/// The words a kept line stands for in `loc`: a note code, a line kept as
+/// data, or the words a version before carried (which stay as they were
+/// read).
+pub fn line_words_in(loc: Locale, s: &str) -> String {
+    if let Some(line) = StoredLine::decode(s) {
+        return line.words_in(loc);
+    }
+    match wish_note_of(s) {
+        Some(WishNote::Done) => fmt_done_note_in(loc, None, None),
+        Some(note) => fmt_wish_note_in(loc, note).to_owned(),
+        None => s.to_owned(),
     }
 }
 
@@ -1387,23 +1928,139 @@ mod tests {
     /// before: a plain label, «из MP3 ~128», «возможно из MP3 320».
     #[test]
     fn a_copy_no_better_says_what_it_is() {
+        use crate::quality::{CheckSummary, SoundOrigin, Verdict};
+        let flac = |check| QualityWords::Label { codec: Codec::Flac, bitrate_kbps: None, check: Some(check) };
+        let sure = CheckSummary {
+            verdict: Verdict::Transcoded,
+            origin: SoundOrigin::Lossy { kbps: 128 },
+            made_from: None,
+            cutoff_hz: Some(16_000),
+        };
+        let unsure = CheckSummary { origin: SoundOrigin::Lossy { kbps: 320 }, cutoff_hz: Some(20_000), ..sure.clone() };
+        let lossy = CheckSummary { origin: SoundOrigin::Unknown, ..sure.clone() };
         assert_eq!(
-            fmt_upgrade_job_words_in(Locale::Ru, 0, 1, 0, 0, Some("FLAC из MP3 ~128")),
+            fmt_upgrade_job_words_in(Locale::Ru, 0, 1, 0, 0, Some(&flac(sure.clone()))),
             "скачанный FLAC оказался из MP3 ~128 — оставил прежний файл"
         );
         assert_eq!(
-            fmt_upgrade_job_words_in(Locale::Ru, 0, 1, 0, 0, Some("FLAC, возможно из MP3 320")),
+            fmt_upgrade_job_words_in(Locale::Ru, 0, 1, 0, 0, Some(&flac(unsure))),
             "скачанный FLAC, возможно, из MP3 320 — оставил прежний файл"
         );
         assert_eq!(
-            fmt_upgrade_job_words_in(Locale::Ru, 0, 1, 0, 0, Some("FLAC из lossy")),
-            "скачанный FLAC оказался из lossy — оставил прежний файл"
+            fmt_upgrade_job_words_in(Locale::Ru, 0, 1, 0, 0, Some(&flac(lossy))),
+            "скачанный FLAC оказался из сжатого — оставил прежний файл"
         );
+        let mp3 = QualityWords::Label { codec: Codec::Mp3, bitrate_kbps: Some(320), check: None };
         assert_eq!(
-            fmt_upgrade_job_words_in(Locale::Ru, 0, 1, 0, 0, Some("MP3 320")),
+            fmt_upgrade_job_words_in(Locale::Ru, 0, 1, 0, 0, Some(&mp3)),
             "скачанный MP3 320 не лучше прежнего — оставил прежний файл"
+        );
+        // A lossy copy of a fake lossless file.
+        let from_fake = QualityWords::Label {
+            codec: Codec::Mp3,
+            bitrate_kbps: Some(320),
+            check: Some(CheckSummary { made_from: Some(Codec::Flac), ..sure.clone() }),
+        };
+        assert_eq!(
+            fmt_upgrade_job_words_in(Locale::Ru, 0, 1, 0, 0, Some(&from_fake)),
+            "скачанный MP3 320 оказался из поддельного FLAC — оставил прежний файл"
         );
         assert_eq!(fmt_upgrade_job_words_in(Locale::Ru, 2, 1, 1, 0, None), "заменено 2 · не лучше прежних 1 · не из этого альбома 1");
         assert_eq!(fmt_upgrade_job_words_in(Locale::En, 1, 0, 0, 0, None), "replaced 1");
+        assert_eq!(
+            fmt_upgrade_job_words_in(Locale::En, 0, 1, 0, 0, Some(&flac(sure.clone()))),
+            "the downloaded FLAC turned out to be from MP3 ~128 — kept the previous file"
+        );
+    }
+
+    /// A note or a history line keeps its kind and arguments, not words: it
+    /// says the same in every locale, and a row written before it (words,
+    /// or a bare code) still reads as it was.
+    #[test]
+    fn a_kept_line_is_worded_when_it_is_read() {
+        let count = StoredLine::DoneCount { have: 2, all: 3 };
+        assert_eq!(line_words_in(Locale::Ru, &count.encode()), "Скачано 2 из 3");
+        assert_eq!(line_words_in(Locale::En, &count.encode()), "Downloaded 2 of 3");
+        assert_eq!(StoredLine::decode(&count.encode()), Some(count));
+        let torrent = StoredLine::Torrent { title: "Album (2020) FLAC".into() };
+        assert_eq!(line_words_in(Locale::Ru, &torrent.encode()), "Раздача: Album (2020) FLAC");
+        assert_eq!(line_words_in(Locale::En, &torrent.encode()), "Torrent: Album (2020) FLAC");
+        let found = StoredLine::TorrentFound {
+            format: Some(Format::new(Codec::Flac)),
+            size: 312_000_000,
+            seeders: 14,
+            title: "Album".into(),
+        };
+        assert_eq!(line_words_in(Locale::Ru, &found.encode()), "FLAC · 312.0 МБ · 14 сид. · Album");
+        assert_eq!(line_words_in(Locale::En, &found.encode()), "FLAC · 312.0 MB · 14 seeds · Album");
+        // No format in the torrent's name: `?`, as the note always said.
+        let unknown = StoredLine::TorrentFound { format: None, size: 820 << 20, seeders: 0, title: "Album".into() };
+        assert_eq!(line_words_in(Locale::Ru, &unknown.encode()), "? · 859.8 МБ · 0 сид. · Album");
+        let offer = StoredLine::Offer {
+            offer: OfferWords::of(&offer()),
+            title: "Album".into(),
+        };
+        assert_eq!(line_words_in(Locale::Ru, &offer.encode()), "FLAC · 312 МБ · 14 сид. · RuTracker · Album");
+        // A wait: its clock time and its sources are data.
+        let later = StoredLine::Later {
+            have: Some((1, 10)),
+            why: vec![Refusal::ServerDown { source: SourceKey::Qobuz }, Refusal::GivesNo { source: SourceKey::Tidal, what: What::Rest }],
+            at: AtWords { hm: None, mins: 30 },
+            asked: vec![SourceKey::Tidal, SourceKey::Soulseek],
+        };
+        assert_eq!(
+            line_words_in(Locale::Ru, &later.encode()),
+            "Есть 1 из 10 · сервер Qobuz недоступен, Tidal сейчас не отдаёт остальное · через 30 мин спрошу Tidal, Soulseek"
+        );
+        assert_eq!(
+            line_words_in(Locale::En, &later.encode()),
+            "1 of 10 here · the Qobuz server is down, Tidal cannot provide the rest right now · in 30 min asking Tidal, Soulseek"
+        );
+        let week = StoredLine::Capitalised {
+            line: Box::new(StoredLine::Joined {
+                a: Box::new(StoredLine::Reasons { why: vec![] }),
+                b: Box::new(StoredLine::Week),
+            }),
+        };
+        assert_eq!(line_words_in(Locale::Ru, &week.encode()), "Источники не дали скачать · поищу снова через неделю");
+        // Old rows: the words themselves, and the codes before them.
+        assert_eq!(line_words_in(Locale::Ru, "Скачано 3 из 10"), "Скачано 3 из 10");
+        assert_eq!(line_words_in(Locale::En, "Скачано 3 из 10"), "Скачано 3 из 10");
+        assert_eq!(line_words_in(Locale::Ru, "files_wait"), RU.note_files_wait);
+        assert_eq!(line_words_in(Locale::En, NOTE_DONE), "Downloaded");
+        assert_eq!(line_words_in(Locale::Ru, LEGACY_NOTE_FILES_WAIT), RU.note_files_wait);
+    }
+
+    /// A job's row keeps its kind and counts: the title, the summary and the
+    /// error say the same in every locale.
+    #[test]
+    fn a_kept_job_line_is_worded_when_it_is_read() {
+        let title = StoredLine::ImportForWishlist;
+        assert_eq!(line_words_in(Locale::Ru, &title.encode()), "Импорт для «Хочу скачать»");
+        assert_eq!(line_words_in(Locale::En, &title.encode()), "Import for Wishlist");
+        let service = StoredLine::ImportFromService { service: crate::streaming::Service::Spotify };
+        assert_eq!(line_words_in(Locale::Ru, &service.encode()), "Импорт из Spotify");
+        assert_eq!(line_words_in(Locale::En, &service.encode()), "Import from Spotify");
+        let export = StoredLine::ImportExport { name: "takeout.json".into() };
+        assert_eq!(line_words_in(Locale::Ru, &export.encode()), "Импорт выгрузки «takeout.json»");
+        assert_eq!(line_words_in(Locale::En, &export.encode()), "Import exported data “takeout.json”");
+        let summary = StoredLine::ImportSummary { imported: 3, duplicates: 1, left_out: 0, failed: 0, pending: 2 };
+        assert_eq!(line_words_in(Locale::Ru, &summary.encode()), "добавлено 3 · дублей 1 · отправлено на подтверждение 2");
+        let downloaded = StoredLine::Downloaded { size: 1_200_000_000, importing: true };
+        assert_eq!(line_words_in(Locale::Ru, &downloaded.encode()), "Скачано 1.2 ГБ · импорт в библиотеку");
+        assert_eq!(line_words_in(Locale::En, &downloaded.encode()), "Downloaded 1.2 GB · importing into the library");
+        let failed = StoredLine::FailedWords { failed: 2, wrong: vec!["Song".into()] };
+        assert_eq!(line_words_in(Locale::Ru, &failed.encode()), "В файле другая песня: «Song» · не удалось ещё: 1");
+        assert_eq!(line_words_in(Locale::En, &failed.encode()), "Wrong song in file: “Song” · 1 more failed");
+        let cold = StoredLine::ColdSummary {
+            found: [3, 2, 0, 1],
+            new: [1, 0, 0, 0],
+            skipped: 2,
+            problems: vec!["a playlist".into()],
+        };
+        assert_eq!(
+            line_words_in(Locale::Ru, &cold.encode()),
+            "Найдено: 3 прослушивания, 2 лайка, 1 плейлист · новых: 1 прослушивание · пропущено 2 плейлиста не с музыкой · не всё: a playlist"
+        );
     }
 }

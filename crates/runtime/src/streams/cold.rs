@@ -62,9 +62,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
-use nikgob_core::i18n::activity::{
-    fmt_import_counts_in, fmt_import_skipped_in, fmt_quoted_in, group_in,
-};
+use nikgob_core::i18n::activity::{fmt_import_counts_in, fmt_import_skipped_in, group_in};
+use nikgob_core::i18n::status::{self, StoredLine};
 use nikgob_core::i18n::{Locale, activity_in};
 use nikgob_core::model::{
     DeviceId, Event, EventContext, EventOrigin, EventType, LikeTarget, PlaylistId, TrackId, UnixMs, Uuid,
@@ -221,6 +220,18 @@ pub(crate) struct Counts {
     pub(crate) new_playlists: usize,
     /// Playlists of an export left out as not music.
     pub(crate) skipped_playlists: usize,
+}
+
+impl Counts {
+    /// What the export had: plays, likes, saved songs and playlists.
+    fn found(self) -> [usize; 4] {
+        [self.plays, self.likes, self.saved, self.playlists]
+    }
+
+    /// What was new of it.
+    fn found_new(self) -> [usize; 4] {
+        [self.new_plays, self.new_likes, self.new_saved, self.new_playlists]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1016,7 +1027,7 @@ impl Worker {
             return;
         }
         let loc = self.locale();
-        let title = format!("{} {}", activity_in(loc).import_from, service.display_name());
+        let title = StoredLine::ImportFromService { service }.encode();
         let Some(job) = self.cold_job(Origin::Service(service), title) else {
             return;
         };
@@ -1033,7 +1044,7 @@ impl Worker {
             .file_name()
             .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
         let loc = self.locale();
-        let title = format!("{} {}", activity_in(loc).import_export, fmt_quoted_in(loc, &name));
+        let title = StoredLine::ImportExport { name }.encode();
         let Some(job) = self.cold_job(Origin::Files(path.clone()), title) else {
             return;
         };
@@ -1383,33 +1394,22 @@ impl Worker {
 
     fn cold_finish(&mut self, job: u64, error: Option<String>) {
         let loc = self.locale();
-        let s = activity_in(loc);
         let Some(j) = self.streaming.cold.jobs.remove(&job) else { return };
         let text = match &error {
-            Some(e) => format!("{}: {e}", s.import_failed),
+            Some(e) => format!("{}: {e}", activity_in(loc).import_failed),
             None => summary_in(loc, &j.counts),
         };
-        let mut subtitle = if error.is_some() {
-            text.clone()
-        } else {
-            format!(
-                "{}: {} · {}: {}",
-                s.import_found,
-                fmt_import_counts_in(loc, j.counts.plays, j.counts.likes, j.counts.saved, j.counts.playlists),
-                s.import_new,
-                fmt_import_counts_in(
-                    loc,
-                    j.counts.new_plays,
-                    j.counts.new_likes,
-                    j.counts.new_saved,
-                    j.counts.new_playlists
-                )
-            ) + &fmt_import_skipped_in(loc, j.counts.skipped_playlists)
+        let subtitle = match &error {
+            Some(e) => StoredLine::ColdFailed { detail: e.clone() },
+            None => StoredLine::ColdSummary {
+                found: j.counts.found(),
+                new: j.counts.found_new(),
+                skipped: j.counts.skipped_playlists,
+                problems: j.problems.clone(),
+            },
         };
-        if !j.problems.is_empty() && error.is_none() {
-            subtitle.push_str(&format!(" · {}: {}", s.import_not_all, j.problems.join("; ")));
-        }
         let has_new = j.counts.new_plays + j.counts.new_likes + j.counts.new_saved + j.counts.new_playlists > 0;
+        let subtitle = subtitle.encode();
         let _ = self.lib.log_job("import", &j.title, &subtitle, error.as_deref());
         let cold = &mut self.streaming.cold;
         cold.history.push_front(v::Job {
@@ -1444,6 +1444,7 @@ impl Worker {
     /// The cold-start jobs into "Загрузки" (the importer's own jobs share the
     /// id space; see [`STREAM_JOB`]).
     pub(crate) fn publish_cold_jobs(&mut self) {
+        let loc = self.locale();
         let active: Vec<v::Job> = self
             .streaming
             .cold
@@ -1451,7 +1452,7 @@ impl Worker {
             .iter()
             .map(|(&id, j)| v::Job {
                 id,
-                title: j.title.clone(),
+                title: status::line_words_in(loc, &j.title),
                 subtitle: j.subtitle.clone(),
                 progress: j.progress,
                 rate: None,
@@ -1464,7 +1465,8 @@ impl Worker {
                 at: 0,
             })
             .collect();
-        let history: Vec<v::Job> = self.streaming.cold.history.iter().cloned().collect();
+        let history: Vec<v::Job> =
+            self.streaming.cold.history.iter().map(|j| crate::import::shown_job_in(loc, j)).collect();
         self.publish(|s| {
             crate::running::put_jobs(&mut s.downloads.active, crate::running::JobKind::Cold, active);
             s.downloads.history.retain(|j| j.id & STREAM_JOB == 0);

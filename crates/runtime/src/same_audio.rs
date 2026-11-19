@@ -879,13 +879,14 @@ mod tests {
     /// «Загрузки → История» says which file held another song, by title.
     #[test]
     fn a_refused_file_is_named_in_the_history() {
-        use crate::import::failed_words;
-        assert_eq!(failed_words(0, &[]), None);
-        assert_eq!(failed_words(2, &[]).as_deref(), Some("Не удалось: 2"));
+        use nikgob_core::i18n::Locale;
+        use nikgob_core::i18n::status::fmt_failed_words_in;
+        assert_eq!(fmt_failed_words_in(Locale::Ru, 0, &[]), None);
+        assert_eq!(fmt_failed_words_in(Locale::Ru, 2, &[]).as_deref(), Some("Не удалось: 2"));
         let wrong = vec!["Сфотографирую".to_owned()];
-        assert_eq!(failed_words(1, &wrong).as_deref(), Some("В файле другая песня: «Сфотографирую»"));
+        assert_eq!(fmt_failed_words_in(Locale::Ru, 1, &wrong).as_deref(), Some("В файле другая песня: «Сфотографирую»"));
         assert_eq!(
-            failed_words(3, &wrong).as_deref(),
+            fmt_failed_words_in(Locale::Ru, 3, &wrong).as_deref(),
             Some("В файле другая песня: «Сфотографирую» · не удалось ещё: 2")
         );
     }

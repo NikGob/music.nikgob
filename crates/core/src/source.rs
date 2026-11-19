@@ -263,23 +263,7 @@ impl Offer {
 
     /// "FLAC 24/96 · 312 МБ · 14 сид. · RuTracker" in `loc`.
     pub fn detail_in(&self, loc: crate::i18n::Locale) -> String {
-        let mut parts = Vec::new();
-        if let Some(f) = &self.format {
-            parts.push(f.label());
-        }
-        if let Some(b) = self.size_bytes {
-            parts.push(crate::i18n::backend::human_bytes_in(loc, b));
-        }
-        if let Some(s) = self.seeders {
-            parts.push(crate::i18n::backend::fmt_seeders_in(loc, s));
-        }
-        let provider = if self.provider.is_empty() {
-            self.source.display_name_in(loc).to_owned()
-        } else {
-            self.provider.clone()
-        };
-        parts.push(provider);
-        parts.join(" · ")
+        crate::i18n::status::fmt_offer_words_in(loc, &crate::i18n::status::OfferWords::of(self))
     }
 
     /// "FLAC 24/96 · 312 МБ · 14 сид. · RuTracker" in the active process locale.

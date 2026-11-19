@@ -72,8 +72,9 @@ pub struct ConfirmItem {
     pub options: Vec<ConfirmOption>,
     /// The «Хочу скачать» item the file was downloaded for.
     pub wishlist: Option<nikgob_core::model::WishlistId>,
-    /// What the file really is («FLAC из MP3 ~320», «MP3 320»).
-    pub quality: Option<String>,
+    /// What the file really is («FLAC из MP3 ~320», «MP3 320»), as data:
+    /// the words are made in the reader's locale.
+    pub quality: Option<nikgob_core::i18n::status::SavedQuality>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -98,12 +99,13 @@ pub enum ImportEvent {
         item: ConfirmItem,
     },
     /// Not better than what the library has; `kept` is the existing track,
-    /// `quality` what the file really is («FLAC из MP3 ~128», «MP3 320»).
+    /// `quality` what the file really is, as data («FLAC из MP3 ~128»,
+    /// «MP3 320», said in the reader's locale).
     Duplicate {
         job: JobId,
         path: PathBuf,
         kept: TrackId,
-        quality: Option<String>,
+        quality: Option<nikgob_core::i18n::status::QualityWords>,
     },
     Failed {
         job: JobId,

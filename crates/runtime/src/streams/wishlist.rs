@@ -38,7 +38,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nikgob_core::indexer::{Candidate, TorrentPayload};
-use nikgob_core::i18n::status::WishNote;
+use nikgob_core::i18n::status::{AtWords, MasterWords, OfferWords, QualityWords, Refusal, StoredLine, What, WishNote};
 use nikgob_core::i18n::{Locale, status_in};
 use nikgob_core::model::{
     ReleaseId, SourceKind, SourceOrigin, TrackId, WishlistId, WishlistItem, WishlistOrigin,
@@ -59,7 +59,6 @@ pub(super) mod album_better;
 mod backoff;
 mod upgrade;
 
-pub(crate) use upgrade::upgrade_job_words;
 
 /// Bit of the "Подтверди" ids of wishlist items (import ids use bit 48,
 /// torrent jobs small numbers).
@@ -214,15 +213,15 @@ pub(crate) struct WishState {
     /// when the worker first could start one,
     upgrade_since: Option<Instant>,
     /// what an item's file was before the copy on its way,
-    upgrade_from: HashMap<WishlistId, String>,
-    /// and what its files are now, in words (until a file lands),
-    upgrade_have: HashMap<WishlistId, Option<String>>,
+    upgrade_from: HashMap<WishlistId, QualityWords>,
+    /// and what its files are now (until a file lands),
+    upgrade_have: HashMap<WishlistId, Option<upgrade::HaveWords>>,
     /// what a copy that came and was no better really is («FLAC из MP3
     /// ~128»), until its import ended,
-    upgrade_dups: HashMap<WishlistId, String>,
+    upgrade_dups: HashMap<WishlistId, QualityWords>,
     /// and the format of the file that came for a track (its master's, when
     /// the library keeps an Opus of it), for the words once it is done.
-    upgrade_came: HashMap<TrackId, String>,
+    upgrade_came: HashMap<TrackId, MasterWords>,
     /// The offer an item's file comes from, as the importer notes a place
     /// that gave another song ([`offer_key`]), while it downloads.
     offer_keys: HashMap<WishlistId, String>,
@@ -251,17 +250,6 @@ pub(crate) fn offer_key(offer: &Offer) -> String {
 /// The code of an item's note, as `wishlist.note` keeps it.
 pub(crate) fn note_code(note: nikgob_core::i18n::status::WishNote) -> String {
     note.code().to_owned()
-}
-
-/// An item's stored note in `loc`'s words: a code becomes the text it
-/// stands for, an older version's words stay as they were read.
-fn note_words(loc: Locale, note: &str) -> String {
-    use nikgob_core::i18n::status;
-    match status::wish_note_of(note) {
-        Some(status::WishNote::Done) => status::fmt_done_note_in(loc, None, None),
-        Some(note) => status::fmt_wish_note_in(loc, note).to_owned(),
-        None => note.to_owned(),
-    }
 }
 
 /// Sources whose downloads turned us away: after [`ASIDE_AFTER`] in a row
@@ -359,8 +347,8 @@ fn files_wait_note(note: Option<&str>) -> bool {
 /// What an offer that did not work out led to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Next {
-    /// The next offer, of this provider.
-    Offer(String),
+    /// The next offer, of this source.
+    Offer(SourceKey),
     /// The doubtful offers (to «Подтверди», a track's torrents looked into first).
     Doubtful,
     /// Searched again at this unix ms.
@@ -498,66 +486,34 @@ fn fetch_down_text_in(loc: Locale, e: &SourceError, aside: Option<Duration>) -> 
     }
 }
 
-/// A source's name in a sentence (the indexer behind «Торренты» is the
-/// one that answers or not).
-fn source_name(key: SourceKey) -> &'static str {
-    match key {
-        SourceKey::Torrents => "Prowlarr",
-        k => k.display_name(),
-    }
-}
-
-/// Why `key` turned an item away, in plain words that name it: «Tidal
-/// сейчас не отдаёт этот трек», «сервер Qobuz недоступен», «Qobuz просит
-/// подождать до 03:00». `what`: «этот трек», «этот альбом», «остальное».
-fn why_words_in(loc: Locale, key: SourceKey, e: &SourceError, what: &str) -> String {
-    why_words_at_in(loc, key, e, what, unix_now())
-}
-
-fn why_words_at_in(loc: Locale, key: SourceKey, e: &SourceError, what: &str, now: u64) -> String {
-    use nikgob_core::i18n::status as st;
-    let name = source_name(key);
+/// Why `key` turned an item away, kept as data so the words are made in
+/// the reader's locale: «Tidal сейчас не отдаёт этот трек», «сервер Qobuz
+/// недоступен», «Qobuz просит подождать до 03:00». `what`: «этот трек»,
+/// «этот альбом», «остальное».
+fn refusal_at(key: SourceKey, e: &SourceError, what: What, now: u64) -> Refusal {
     match e {
         SourceError::RateLimited { retry_after: Some(d) } if *d >= WAIT_TOLD && day_limit(*d, now) => {
-            st::fmt_source_limit_today_in(loc, name)
+            Refusal::DayLimit { source: key }
         }
-        SourceError::RateLimited { retry_after: Some(d) } if *d >= WAIT_TOLD => {
-            st::fmt_source_asks_to_wait_in(loc, name, super::accounts::hm_after(*d).as_deref())
-        }
-        SourceError::RateLimited { .. } => st::fmt_source_asks_to_wait_in(loc, name, None),
-        e if nikgob_sources::http::is_check(e) => st::fmt_source_check_in(loc, name),
-        SourceError::Blocked(_) => st::fmt_source_blocked_in(loc, name),
-        SourceError::NothingToFetch => st::fmt_source_finds_only_in(loc, name),
+        SourceError::RateLimited { retry_after: Some(d) } if *d >= WAIT_TOLD => Refusal::AsksToWait {
+            source: key,
+            until: super::accounts::hm_after(*d),
+        },
+        SourceError::RateLimited { .. } => Refusal::AsksToWait { source: key, until: None },
+        e if nikgob_sources::http::is_check(e) => Refusal::Check { source: key },
+        SourceError::Blocked(_) => Refusal::Blocked { source: key },
+        SourceError::NothingToFetch => Refusal::FindsOnly { source: key },
         // A ban of the instance's account, a file it cannot give (DRM).
-        SourceError::Http { status: 401 | 403 } | SourceError::Parse(_) => st::fmt_source_gives_no_in(loc, name, what),
-        SourceError::Http { status } if *status >= 500 => st::fmt_source_server_down_in(loc, name),
-        SourceError::Unreachable(_) => st::fmt_source_server_down_in(loc, name),
-        _ => st::fmt_source_no_download_in(loc, name),
+        SourceError::Http { status: 401 | 403 } | SourceError::Parse(_) => Refusal::GivesNo { source: key, what },
+        SourceError::Http { status } if *status >= 500 => Refusal::ServerDown { source: key },
+        SourceError::Unreachable(_) => Refusal::ServerDown { source: key },
+        _ => Refusal::NoDownload { source: key },
     }
 }
 
-/// «в 21:40» (or «через N мин» when the clock is unknown).
-fn at_words_in(loc: Locale, wait: Duration) -> String {
-    nikgob_core::i18n::status::fmt_at_time_in(
-        loc,
-        super::accounts::hm_after(wait).as_deref(),
-        wait.as_secs().div_ceil(60),
-    )
-}
-
-/// The first letter capitalised (a line that stands alone).
-pub(super) fn capitalised(s: &str) -> String {
-    let mut c = s.chars();
-    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
-}
-
-/// Where an offer comes from, for the lines: the source (a Soulseek
-/// offer's provider is a user's name), a torrent as such.
-fn offer_from_in(loc: Locale, offer: &Offer) -> String {
-    match offer.source {
-        SourceKey::Torrents => status_in(loc).torrent_offer.to_owned(),
-        k => k.display_name().to_owned(),
-    }
+/// «в 21:40» (or «через N мин» when the clock is unknown), as data.
+fn at_words(wait: Duration) -> AtWords {
+    AtWords { hm: super::accounts::hm_after(wait), mins: wait.as_secs().div_ceil(60) }
 }
 
 /// When an item every offer of which was turned away is searched again,
@@ -590,15 +546,6 @@ fn plan_retry(n: u32, turned: &[(SourceKey, Option<Duration>)], others: &[(Sourc
         }
     }
     Retry { wait, ask }
-}
-
-/// The line of an item every offer of which was turned away: what is
-/// here of an album, why each source said no, and when which sources are
-/// asked again.
-fn later_line_in(loc: Locale, have: Option<(usize, usize)>, why: &[String], wait: Duration, next: &[SourceKey]) -> String {
-    let names: Vec<&str> = next.iter().map(|k| source_name(*k)).collect();
-    let at = at_words_in(loc, wait);
-    capitalised(&nikgob_core::i18n::status::fmt_later_line_in(loc, have, why, &at, &names))
 }
 
 /// The offers saved in an item, each on its own: one this build cannot
@@ -1560,11 +1507,10 @@ impl Worker {
             if let Err(at) = day {
                 let wait = Duration::from_millis((at - Self::now()).max(0) as u64);
                 log::info!("wishlist: {id} searched {} times today, again in {} min", backoff::DAY_TRIES, wait.as_secs() / 60);
-                let loc = self.locale();
                 self.set_item(id, |i| {
                     i.status = WishlistStatus::New;
                     i.next_try_at = Some(at);
-                    i.note = Some(capitalised(&nikgob_core::i18n::status::fmt_search_again_in(loc, &at_words_in(loc, wait))));
+                    i.note = Some(StoredLine::SearchAgain { at: at_words(wait) }.encode());
                 });
                 self.publish_wishlist();
                 return;
@@ -1939,7 +1885,7 @@ impl Worker {
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
         let want = self.want_of(&item);
         let dest = self.direct_dir(id);
-        let note = nikgob_core::i18n::status::fmt_checking_torrent_in(self.locale(), &offer.title);
+        let note = StoredLine::CheckingTorrent { title: offer.title.clone() }.encode();
         self.set_item(id, |i| i.note = Some(note));
         self.streaming.spawn(async move {
             let quiet: nikgob_core::source::Progress = Arc::new(|_, _| {});
@@ -2033,7 +1979,7 @@ impl Worker {
         self.streaming.wish.from.insert(id, from);
         self.streaming.wish.offer_keys.insert(id, offer_key(&offer));
         if torrent {
-            let note = nikgob_core::i18n::status::fmt_torrent_note_in(self.locale(), &offer.title);
+            let note = StoredLine::Torrent { title: offer.title.clone() }.encode();
             self.set_item(id, |i| i.note = Some(note));
         } else {
             let _ = std::fs::remove_dir_all(&dest);
@@ -2044,7 +1990,7 @@ impl Worker {
             }
             self.streaming.wish.direct.insert(id, dest.clone());
             self.streaming.wish.live.lock().insert(id, (0, offer.size_bytes));
-            let note = format!("{} · {}", nikgob_core::i18n::status::fmt_offer_in(self.locale(), &offer), offer.title);
+            let note = StoredLine::Offer { offer: OfferWords::of(&offer), title: offer.title.clone() }.encode();
             self.set_item(id, |i| {
                 i.status = WishlistStatus::Downloading;
                 i.note = Some(note);
@@ -2112,7 +2058,7 @@ impl Worker {
         // Named apart from the item's own line of «История» («Artist —
         // Title», [`Self::wish_line`]): the import leaves a line of its own.
         let title = format!("{}: {}", offer.provider, item.title.clone().unwrap_or_default());
-        let note = format!("{} · {}", offer.detail(), offer.title);
+        let note = StoredLine::Offer { offer: OfferWords::of(&offer), title: offer.title.clone() }.encode();
         if self.import_for(files, title, SourceOrigin::Inbox, targets) {
             self.set_item(id, |i| {
                 i.status = WishlistStatus::Downloading;
@@ -2192,16 +2138,14 @@ impl Worker {
             return;
         };
         let size: u64 = files.iter().filter(|(i, ..)| picked.contains(i)).map(|(.., s)| s).sum();
-        let format = offer.format.as_ref().map_or_else(|| "?".to_owned(), |f| f.label());
         let seeders = candidate_of(&offer).and_then(|c| c.seeders).unwrap_or(0);
-        let loc = self.locale();
-        let note = nikgob_core::i18n::status::fmt_torrent_found_in(
-            loc,
-            &format,
-            &crate::torrents::human_bytes_in(loc, size),
+        let note = StoredLine::TorrentFound {
+            format: offer.format.clone(),
+            size,
             seeders,
-            &offer.title,
-        );
+            title: offer.title.clone(),
+        }
+        .encode();
         self.set_item(id, |i| {
             i.status = WishlistStatus::Downloading;
             i.note = Some(note);
@@ -2296,9 +2240,9 @@ impl Worker {
         };
         match next {
             Some(c) => {
-                let from = offer_from_in(self.locale(), &c);
+                let source = c.source;
                 self.wish_fetch(id, c);
-                Next::Offer(from)
+                Next::Offer(source)
             }
             None => {
                 self.streaming.wish.cands.remove(&id);
@@ -2324,21 +2268,20 @@ impl Worker {
     fn wish_partial(&mut self, id: WishlistId, offer: Offer, files: Vec<PathBuf>, missing: usize, error: SourceError) {
         let all = files.len() + missing;
         log::warn!("wishlist: {} from {:?}: {} of {all} tracks, the rest: {error}", offer.title, offer.source, files.len());
-        let loc = self.locale();
-        let what_rest = status_in(loc).what_rest;
         let why = if error.is_refusal() {
             self.wish_turned_away(id, &offer, &error);
-            why_words_in(loc, offer.source, &error, what_rest)
+            StoredLine::Refusal { why: refusal_at(offer.source, &error, What::Rest, unix_now()) }
         } else {
             if self.streaming.wish.refusals.worked(offer.source) {
                 self.save_backoff();
             }
-            nikgob_core::i18n::status::fmt_others_absent_in(loc, missing, source_name(offer.source))
+            StoredLine::Absent { missing, source: offer.source }
         };
         // A better copy says only what it found and what came of it.
         if !self.is_upgrade(id) {
             let what = self.item_title(id);
-            self.wish_line(id, what, nikgob_core::i18n::status::fmt_downloaded_of_in(loc, files.len(), all, &why), None);
+            let line = StoredLine::Partial { have: files.len(), all, why: Box::new(why) }.encode();
+            self.wish_line(id, what, line, None);
         }
         self.streaming.wish.partial.insert(id);
         self.wish_files(id, offer, files);
@@ -2385,20 +2328,18 @@ impl Worker {
     /// what came of it (`next`): the next source, or the choice in
     /// «Подтверди». A wait has its line from [`Self::wish_later`].
     fn refusal_line(&mut self, id: WishlistId, offer: &Offer, e: &SourceError, next: &Next) {
-        let loc = self.locale();
         let then = match next {
-            Next::Offer(from) => nikgob_core::i18n::status::fmt_next_offer_in(loc, from),
-            Next::Doubtful => {
-                nikgob_core::i18n::status::fmt_doubtful_pick_in(loc, nikgob_core::i18n::downloads_in(loc).tab_wishlist)
-            }
+            Next::Offer(source) => StoredLine::NextOffer { source: *source },
+            Next::Doubtful => StoredLine::DoubtfulPick,
             Next::Later(_) | Next::NotFound => return,
         };
         if self.is_upgrade(id) {
             return;
         }
-        let why = why_words_in(loc, offer.source, e, self.item_what(id));
+        let why = StoredLine::Refusal { why: refusal_at(offer.source, e, self.item_what(id), unix_now()) };
+        let line = StoredLine::Capitalised { line: Box::new(StoredLine::Joined { a: Box::new(why), b: Box::new(then) }) }.encode();
         let title = self.item_title(id);
-        self.wish_line(id, title, capitalised(&format!("{why} · {then}")), None);
+        self.wish_line(id, title, line, None);
     }
 
     /// Every offer of the item was turned away (or a source could not be
@@ -2437,13 +2378,12 @@ impl Worker {
             WishlistScope::Track => None,
         };
         let loc = self.locale();
-        let strings = status_in(loc);
         let what = match (item.scope, partly) {
-            (_, Some(_)) => strings.what_rest,
-            (WishlistScope::Album, None) => strings.what_album,
-            (WishlistScope::Track, None) => strings.what_track,
+            (_, Some(_)) => What::Rest,
+            (WishlistScope::Album, None) => What::Album,
+            (WishlistScope::Track, None) => What::Track,
         };
-        let why: Vec<String> = seen.iter().map(|(k, e, _)| why_words_in(loc, *k, e, what)).collect();
+        let why: Vec<Refusal> = seen.iter().map(|(k, e, _)| refusal_at(*k, e, what, unix_now())).collect();
         let n = {
             let n = self.streaming.wish.later.entry(id).or_default();
             *n += 1;
@@ -2460,8 +2400,13 @@ impl Worker {
             if item.origin == WishlistOrigin::Upgrade {
                 return Next::NotFound;
             }
-            let reasons = if why.is_empty() { strings.sources_gave_nothing.to_owned() } else { why.join(", ") };
-            let line = capitalised(&format!("{reasons} · {}", nikgob_core::i18n::status::fmt_search_again_week_in(loc)));
+            let line = StoredLine::Capitalised {
+                line: Box::new(StoredLine::Joined {
+                    a: Box::new(StoredLine::Reasons { why }),
+                    b: Box::new(StoredLine::Week),
+                }),
+            }
+            .encode();
             if !copy {
                 self.set_item(id, |i| i.note = Some(line.clone()));
                 self.publish_wishlist();
@@ -2484,8 +2429,18 @@ impl Worker {
         let at = Self::now() + retry.wait.as_millis() as i64;
         self.streaming.wish.retry_only.insert(id, keys);
         self.save_backoff();
-        let note = later_line_in(loc, partly, &why, retry.wait, &retry.ask);
-        log::info!("wishlist: {id} was turned away ({}), again in {} min", why.join(", "), retry.wait.as_secs() / 60);
+        let note = StoredLine::Later {
+            have: partly,
+            why,
+            at: at_words(retry.wait),
+            asked: retry.ask.clone(),
+        }
+        .encode();
+        log::info!(
+            "wishlist: {id} was turned away ({}), again in {} min",
+            seen.iter().map(|(k, e, _)| refusal_at(*k, e, what, unix_now()).words_in(loc)).collect::<Vec<_>>().join(", "),
+            retry.wait.as_secs() / 60
+        );
         self.set_item(id, |i| {
             i.status = WishlistStatus::New;
             i.next_try_at = Some(at);
@@ -2499,12 +2454,11 @@ impl Worker {
         Next::Later(at)
     }
 
-    /// «этот трек» or «этот альбом», as the item is (in the active locale).
-    fn item_what(&self, id: WishlistId) -> &'static str {
-        let strings = status_in(self.locale());
+    /// «этот трек» or «этот альбом», as the item is.
+    fn item_what(&self, id: WishlistId) -> What {
         match self.lib.get_wishlist_item(id).ok().flatten().map(|i| i.scope) {
-            Some(WishlistScope::Album) => strings.what_album,
-            _ => strings.what_track,
+            Some(WishlistScope::Album) => What::Album,
+            _ => What::Track,
         }
     }
 
@@ -2886,12 +2840,7 @@ impl Worker {
                     force: true,
                     ..ImportTargets::default()
                 };
-                if !self.import_for(
-                    vec![path],
-                    nikgob_core::i18n::status::fmt_saving_from_youtube_in(self.locale()),
-                    SourceOrigin::Stream,
-                    targets,
-                ) {
+                if !self.import_for(vec![path], StoredLine::SavingFromYoutube.encode(), SourceOrigin::Stream, targets) {
                     self.set_item(id, |i| i.status = WishlistStatus::NoTorrent);
                 }
             }
@@ -2921,21 +2870,11 @@ impl Worker {
             v::WishlistAttach::Files(paths) => {
                 let force = paths.len() == 1 && item.scope == WishlistScope::Track && tracks == 1;
                 let targets = self.item_targets(&item, force);
-                self.import_for(
-                    paths,
-                    nikgob_core::i18n::status::fmt_import_for_wishlist_in(loc),
-                    SourceOrigin::Inbox,
-                    targets,
-                )
+                self.import_for(paths, StoredLine::ImportForWishlist.encode(), SourceOrigin::Inbox, targets)
             }
             v::WishlistAttach::Folder(dir) => {
                 let targets = self.item_targets(&item, false);
-                self.import_for(
-                    vec![dir],
-                    nikgob_core::i18n::status::fmt_import_for_wishlist_in(loc),
-                    SourceOrigin::Inbox,
-                    targets,
-                )
+                self.import_for(vec![dir], StoredLine::ImportForWishlist.encode(), SourceOrigin::Inbox, targets)
             }
             v::WishlistAttach::TorrentFile(path) => match std::fs::read(&path) {
                 Ok(bytes) => {
@@ -3114,7 +3053,6 @@ impl Worker {
             return;
         }
         let partial = self.streaming.wish.partial.remove(&id);
-        let loc = self.locale();
         let (status, note) = match item.scope {
             WishlistScope::Album => match self.album_files(&item) {
                 // Every track of the album has a file: the plain «Скачано»
@@ -3127,7 +3065,7 @@ impl Worker {
                 // A part of it is here: how much, and the rest searched for.
                 (have, all) if have > 0 => (
                     WishlistStatus::Done,
-                    nikgob_core::i18n::status::fmt_done_note_in(loc, Some((have, all)), None),
+                    StoredLine::DoneCount { have, all }.encode(),
                 ),
                 // Nothing of the album landed: still on its way, or left
                 // with nothing bringing it (searched again).
@@ -3177,10 +3115,15 @@ impl Worker {
                 let got = item
                     .track_id
                     .and_then(|t| self.lib.get_track_row(t).ok().flatten())
-                    .and_then(|r| r.codec.as_ref().map(|c| nikgob_core::quality::row_label_in(c, r.check.as_ref(), loc)));
-                let note = got.map_or_else(|| note_code(WishNote::Done), |q| {
-                    nikgob_core::i18n::status::fmt_done_note_in(loc, None, Some(&q))
-                });
+                    .and_then(|r| r.codec.map(|c| (c, r.check)))
+                    .map(|(codec, check)| QualityWords::Label {
+                        codec,
+                        bitrate_kbps: None,
+                        // A row's short label says the doubt only in the
+                        // quality panel.
+                        check: check.filter(|c| c.sure()),
+                    });
+                let note = got.map_or_else(|| note_code(WishNote::Done), |q| StoredLine::DoneQuality { quality: q }.encode());
                 (WishlistStatus::Done, note)
             }
         };
@@ -3280,7 +3223,7 @@ impl Worker {
         }
         let what = self.item_title(id);
         let from = self.streaming.wish.from.get(&id).cloned();
-        let text = nikgob_core::i18n::status::fmt_wrong_audio_in(self.locale(), from.as_deref(), sounds_like.as_deref(), looks);
+        let text = StoredLine::WrongAudio { from, sounds_like, looks }.encode();
         self.wish_line(id, what, text, None);
     }
 
@@ -3593,7 +3536,7 @@ impl Worker {
                 status: item.status,
                 scope: item.scope,
                 origin: item.origin,
-                note: item.note.as_deref().map(|n| note_words(loc, n)),
+                note: item.note.as_deref().map(|n| nikgob_core::i18n::status::line_words_in(loc, n)),
                 next_try,
                 attempts: item.attempts,
                 can_save_from_youtube: youtube
@@ -3876,28 +3819,34 @@ mod tests {
     /// The reasons in words a listener understands, the source named.
     #[test]
     fn why_a_source_said_no_in_plain_words() {
-        fn w(key: SourceKey, e: &SourceError, what: &str) -> String {
-            why_words_in(Locale::Ru, key, e, what)
+        fn w(loc: Locale, key: SourceKey, e: &SourceError, what: What) -> String {
+            refusal_at(key, e, what, unix_now()).words_in(loc)
         }
-        let t = status_in(Locale::Ru).what_track;
-        assert_eq!(w(SourceKey::Tidal, &SourceError::Http { status: 403 }, t), "Tidal сейчас не отдаёт этот трек");
-        assert_eq!(w(SourceKey::Tidal, &SourceError::Parse("a DASH manifest".into()), t), "Tidal сейчас не отдаёт этот трек");
-        assert_eq!(w(SourceKey::Qobuz, &SourceError::Unreachable("dns error".into()), t), "сервер Qobuz недоступен");
-        assert_eq!(w(SourceKey::Qobuz, &SourceError::Http { status: 522 }, t), "сервер Qobuz недоступен");
-        assert_eq!(w(SourceKey::Khinsider, &SourceError::Blocked("a bot check".into()), t), "khinsider закрыт проверкой");
-        assert_eq!(w(SourceKey::Soulseek, &SourceError::Blocked("login refused".into()), t), "Soulseek не пускает");
-        assert_eq!(w(SourceKey::Torrents, &SourceError::Unreachable("x".into()), t), "сервер Prowlarr недоступен");
+        fn w_at(loc: Locale, key: SourceKey, e: &SourceError, what: What, now: u64) -> String {
+            refusal_at(key, e, what, now).words_in(loc)
+        }
+        let t = What::Track;
+        assert_eq!(w(Locale::Ru, SourceKey::Tidal, &SourceError::Http { status: 403 }, t), "Tidal сейчас не отдаёт этот трек");
+        assert_eq!(
+            w(Locale::Ru, SourceKey::Tidal, &SourceError::Parse("a DASH manifest".into()), t),
+            "Tidal сейчас не отдаёт этот трек"
+        );
+        assert_eq!(w(Locale::Ru, SourceKey::Qobuz, &SourceError::Unreachable("dns error".into()), t), "сервер Qobuz недоступен");
+        assert_eq!(w(Locale::Ru, SourceKey::Qobuz, &SourceError::Http { status: 522 }, t), "сервер Qobuz недоступен");
+        assert_eq!(w(Locale::Ru, SourceKey::Khinsider, &SourceError::Blocked("a bot check".into()), t), "khinsider закрыт проверкой");
+        assert_eq!(w(Locale::Ru, SourceKey::Soulseek, &SourceError::Blocked("login refused".into()), t), "Soulseek не пускает");
+        assert_eq!(w(Locale::Ru, SourceKey::Torrents, &SourceError::Unreachable("x".into()), t), "сервер Prowlarr недоступен");
         let short = SourceError::RateLimited { retry_after: Some(MIN) };
-        assert_eq!(w(SourceKey::Qobuz, &short, t), "Qobuz просит подождать");
+        assert_eq!(w(Locale::Ru, SourceKey::Qobuz, &short, t), "Qobuz просит подождать");
         // 01:00 UTC: five hours is a wait it named, 23 hours its day's limit.
         let one_am = 86_400 * 20_000 + 3_600;
         let long = SourceError::RateLimited { retry_after: Some(300 * MIN) };
-        assert!(why_words_at_in(Locale::Ru, SourceKey::Qobuz, &long, t, one_am).starts_with("Qobuz просит подождать до "));
+        assert!(w_at(Locale::Ru, SourceKey::Qobuz, &long, t, one_am).starts_with("Qobuz просит подождать до "));
         let day = SourceError::RateLimited { retry_after: Some(23 * 60 * MIN) };
-        assert_eq!(why_words_at_in(Locale::Ru, SourceKey::Qobuz, &day, t, one_am), "у Qobuz лимит на сегодня");
-        assert_eq!(w(SourceKey::Tidal, &SourceError::NothingToFetch, t), "Tidal находит, но не скачивает");
+        assert_eq!(w_at(Locale::Ru, SourceKey::Qobuz, &day, t, one_am), "у Qobuz лимит на сегодня");
+        assert_eq!(w(Locale::Ru, SourceKey::Tidal, &SourceError::NothingToFetch, t), "Tidal находит, но не скачивает");
         assert_eq!(
-            why_words_in(Locale::En, SourceKey::Qobuz, &SourceError::Unreachable("dns".into()), status_in(Locale::En).what_track),
+            w(Locale::En, SourceKey::Qobuz, &SourceError::Unreachable("dns".into()), t),
             "the Qobuz server is down"
         );
     }
@@ -3960,15 +3909,40 @@ mod tests {
     /// One line says it all: what is here, why, when and whom it asks.
     #[test]
     fn the_line_of_a_wait() {
-        let why = ["Tidal сейчас не отдаёт остальное".to_owned(), "сервер Qobuz недоступен".to_owned()];
-        let line = later_line_in(Locale::Ru, Some((1, 10)), &why, 30 * MIN, &[SourceKey::Tidal, SourceKey::Soulseek]);
-        assert!(line.starts_with("Есть 1 из 10 · Tidal сейчас не отдаёт остальное, сервер Qobuz недоступен · "), "{line}");
-        assert!(line.ends_with(" спрошу Tidal, Soulseek"), "{line}");
-        let line = later_line_in(Locale::Ru, None, &["сервер Qobuz недоступен".to_owned()], 5 * MIN, &[]);
-        assert!(line.starts_with("Сервер Qobuz недоступен · попробую снова "), "{line}");
-        let line = later_line_in(Locale::En, Some((1, 10)), &["the Qobuz server is down".to_owned()], 5 * MIN, &[SourceKey::Tidal]);
-        assert!(line.starts_with("1 of 10 here · the Qobuz server is down · "), "{line}");
-        assert!(line.ends_with(" asking Tidal"), "{line}");
+        let why = vec![
+            Refusal::GivesNo { source: SourceKey::Tidal, what: What::Rest },
+            Refusal::ServerDown { source: SourceKey::Qobuz },
+        ];
+        let line = StoredLine::Later {
+            have: Some((1, 10)),
+            why: why.clone(),
+            at: AtWords { hm: None, mins: 30 },
+            asked: vec![SourceKey::Tidal, SourceKey::Soulseek],
+        };
+        assert_eq!(
+            line.words_in(Locale::Ru),
+            "Есть 1 из 10 · Tidal сейчас не отдаёт остальное, сервер Qobuz недоступен · через 30 мин спрошу Tidal, Soulseek"
+        );
+        let line = StoredLine::Later {
+            have: None,
+            why: vec![Refusal::ServerDown { source: SourceKey::Qobuz }],
+            at: AtWords { hm: Some("21:40".into()), mins: 5 },
+            asked: vec![],
+        };
+        assert_eq!(
+            line.words_in(Locale::Ru),
+            "Сервер Qobuz недоступен · попробую снова в 21:40"
+        );
+        let line = StoredLine::Later {
+            have: Some((1, 10)),
+            why: vec![Refusal::ServerDown { source: SourceKey::Qobuz }],
+            at: AtWords { hm: None, mins: 5 },
+            asked: vec![SourceKey::Tidal],
+        };
+        assert_eq!(
+            line.words_in(Locale::En),
+            "1 of 10 here · the Qobuz server is down · in 5 min asking Tidal"
+        );
     }
 
     #[test]

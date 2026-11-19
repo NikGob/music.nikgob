@@ -165,7 +165,9 @@ fn import_retag_trash_undo() {
     assert!(!expected.parent().unwrap().exists(), "the empty album folder goes too");
 
     // The finished import is in the persistent history.
-    assert!(lib.job_log(Some("import"), 10).unwrap().iter().any(|e| e.subtitle.contains("добавлено 1")));
+    assert!(lib.job_log(Some("import"), 10).unwrap().iter().any(|e| {
+        nikgob_core::i18n::status::line_words_in(nikgob_core::i18n::Locale::Ru, &e.subtitle).contains("добавлено 1")
+    }));
 
     // With the Trash off, deleting erases at once.
     let wav2 = root.join("other.wav");

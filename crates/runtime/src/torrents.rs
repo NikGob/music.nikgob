@@ -132,24 +132,6 @@ fn config(p: &v::Prefs, downloads: &Path, state: &Path) -> TorrentConfig {
     }
 }
 
-/// A payload's size in decimal units: `"1.2 ГБ"`, `"820 МБ"` in `loc`'s
-/// units.
-pub(crate) fn human_bytes_in(loc: nikgob_core::i18n::Locale, b: u64) -> String {
-    use nikgob_core::i18n::Locale;
-    let (gb, mb, kb) = match loc {
-        Locale::Ru => ("ГБ", "МБ", "КБ"),
-        Locale::En => ("GB", "MB", "KB"),
-    };
-    let b = b as f64;
-    if b >= 1e9 {
-        format!("{:.1} {gb}", b / 1e9)
-    } else if b >= 1e6 {
-        format!("{:.1} {mb}", b / 1e6)
-    } else {
-        format!("{:.0} {kb}", b / 1e3)
-    }
-}
-
 fn complete(t: &TorrentStatus) -> bool {
     t.completed_at.is_some()
 }
@@ -628,8 +610,7 @@ impl Worker {
                 .get(&t.info_hash)
                 .is_some_and(|d| matches!(d.status, DownloadStatus::Seeding | DownloadStatus::Done));
             if done && !t.name.is_empty() && !self.torrents.history.iter().any(|j| j.title == t.name) {
-                let loc = self.locale();
-                let subtitle = nikgob_core::i18n::status::fmt_downloaded_size_in(loc, &human_bytes_in(loc, t.total), false);
+                let subtitle = nikgob_core::i18n::status::StoredLine::Downloaded { size: t.total, importing: false }.encode();
                 if let Err(e) = self.lib.log_job("torrent", &t.name, &subtitle, None) {
                     log::warn!("job log: {e}");
                 }
@@ -701,7 +682,8 @@ impl Worker {
         if changed {
             self.torrents.last_shape = Some(shape(&active, &seeding));
             self.torrents.last_view = Some(view);
-            let history: Vec<v::Job> = self.torrents.history.iter().cloned().collect();
+            let loc = self.locale();
+            let history: Vec<v::Job> = self.torrents.history.iter().map(|j| crate::import::shown_job_in(loc, j)).collect();
             self.publish(|s| {
                 crate::running::put_jobs(&mut s.downloads.active, crate::running::JobKind::Torrent, active);
                 s.downloads.seeding = seeding;
@@ -737,8 +719,10 @@ impl Worker {
             .map(|e| crate::import::logged_job(e, 0))
             .collect();
         self.torrents.history.extend(logged.iter().cloned());
+        let loc = self.locale();
+        let shown: Vec<v::Job> = logged.iter().map(|j| crate::import::shown_job_in(loc, j)).collect();
         self.publish(|s| {
-            s.downloads.history.extend(logged);
+            s.downloads.history.extend(shown);
             crate::import::sort_history(&mut s.downloads.history);
         });
     }
@@ -746,7 +730,7 @@ impl Worker {
     fn import_torrent(&mut self, t: &TorrentStatus) {
         let files: Vec<PathBuf> = t.selected_files.iter().filter(|p| p.is_file()).cloned().collect();
         let loc = self.locale();
-        let subtitle = nikgob_core::i18n::status::fmt_downloaded_size_in(loc, &human_bytes_in(loc, t.total), true);
+        let subtitle = nikgob_core::i18n::status::StoredLine::Downloaded { size: t.total, importing: true }.encode();
         if let Err(e) = self.lib.log_job("torrent", &t.name, &subtitle, None) {
             log::warn!("job log: {e}");
         }
@@ -788,7 +772,7 @@ impl Worker {
         let targets = item.map(|item| self.wish_targets(item)).unwrap_or_default();
         self.import_for(
             files,
-            nikgob_core::i18n::status::fmt_import_of_in(loc, &t.name, 1),
+            nikgob_core::i18n::status::StoredLine::ImportOf { name: t.name.clone(), count: 1 }.encode(),
             SourceOrigin::Torrent {
                 info_hash: t.info_hash.clone(),
                 path_in_torrent: String::new(),

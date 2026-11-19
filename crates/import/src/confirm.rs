@@ -125,9 +125,10 @@ pub(crate) struct TagView {
     pub year: Option<i32>,
     pub track_no: Option<u32>,
     pub duration_ms: Option<u32>,
-    /// What the file really is («FLAC из MP3 ~320»).
+    /// What the file really is («FLAC из MP3 ~320»), as data; a row kept
+    /// before it was holds the words themselves.
     #[serde(default)]
-    pub quality: Option<String>,
+    pub quality: Option<nikgob_core::i18n::status::SavedQuality>,
 }
 
 /// The json of a `confirm_item` row.
