@@ -978,7 +978,7 @@ impl Worker {
             self.toast_open(
                 v::ToastKind::Success,
                 nikgob_core::i18n::ErrorStrings::fmt_downloads_with_source_in(loc, &text),
-                nikgob_core::i18n::downloads_in(loc).set_up,
+                nikgob_core::i18n::downloads_in(loc).configure,
                 v::Link::Setting(v::SettingLink::Torrents),
             );
         }

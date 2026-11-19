@@ -737,7 +737,7 @@ impl Worker {
             self.toast_open(
                 v::ToastKind::Error,
                 strings.need_download_source,
-                nikgob_core::i18n::downloads_in(self.locale()).set_up,
+                nikgob_core::i18n::downloads_in(self.locale()).configure,
                 v::Link::Setting(v::SettingLink::Torrents),
             );
             return;

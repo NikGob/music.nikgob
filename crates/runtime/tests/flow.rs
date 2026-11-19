@@ -1723,7 +1723,7 @@ fn stream_resolve_rate_limit_pause_and_missing_youtube_localize_in_en() {
     // Long lookup rate limit stops playback with localized resolve-limited toast.
     yt.rate_limit_next("search_kind", 1, Some(Duration::from_secs(600)));
     rt.send(Command::PlayTracks { tracks: vec![t_lim], start: 0, context: QueueOrigin::Library });
-    let prefix = format!("{}: YouTube Music asks to wait until ", stream_track.title);
+    let prefix = format!("{}: YouTube Music is asking you to wait until ", stream_track.title);
     wait_for(&rt, "resolve rate-limited toast in En", |s| {
         s.toasts.iter().any(|toast| toast.text.starts_with(&prefix) && toast.text.ends_with(" — try playing this track later"))
     });

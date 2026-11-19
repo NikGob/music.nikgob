@@ -377,7 +377,8 @@ fn saved_from_youtube_is_a_low_quality_file_of_the_same_track() {
         wish_status(&lib, track) == Some(WishlistStatus::NoTorrent)
     });
     let item = lib.get_wishlist_item(item.id).unwrap().unwrap();
-    assert!(item.note.unwrap().contains("YouTube"));
+    // Kept as a code, rendered in the UI's language («Есть копия с YouTube…»).
+    assert_eq!(item.note.as_deref(), Some("has_copy"));
     assert!(!r.cfg.downloads_dir.join(".youtube").join("yt-gruppa-2.wav").exists(), "temp file gone");
 }
 

@@ -254,7 +254,7 @@ impl Worker {
             self.toast_open(
                 v::ToastKind::Error,
                 nikgob_core::i18n::errors_in(loc).need_download_source,
-                nikgob_core::i18n::downloads_in(loc).set_up,
+                nikgob_core::i18n::downloads_in(loc).configure,
                 v::Link::Setting(v::SettingLink::Torrents),
             );
             return;
