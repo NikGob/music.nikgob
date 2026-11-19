@@ -232,23 +232,10 @@ pub fn visit_whole(ctx: &egui::Context, id: ReleaseId) -> Option<bool> {
     })
 }
 
-/// «Добавить в библиотеку» of an album: the whole album, nothing
-/// downloads.
-// i18n: use menus().add_album
-pub const ADD_ALBUM: &str = "Добавить в библиотеку";
-/// The album added to the library back to the user's songs of it (they
-/// stay).
-// i18n: use menus().keep_mine
-pub const KEEP_MINE: &str = "Оставить только мои треки";
-
 /// The like of an album: into (or out of) «Любимые альбомы».
 pub fn album_like_label(liked: bool) -> &'static str {
     super::like_label(liked)
 }
-
-/// «Обновить обложку» of an album, the library's or a service's.
-// i18n: use menus().refresh_cover
-pub const REFRESH_COVER: &str = "Обновить обложку";
 
 //// What the menu of an album does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -433,6 +420,16 @@ pub fn playlist_card_with(
     }
 }
 
+/// The stable identity of a row that opens a submenu: the code finds the
+/// submenu by this, never by its translated label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubId {
+    /// «Файл» of a track's menu.
+    File,
+    /// «Таймер сна» of the player's menu.
+    Sleep,
+}
+
 /// One row of a menu built from actions: an item standing for `A`, a
 /// divider, a group label (not an item: nothing to pick), or a row that
 /// opens a submenu of rows (one level).
@@ -441,7 +438,7 @@ pub enum Row<A> {
     Item(A, MenuItem),
     Divider,
     Label(String),
-    Sub(MenuItem, Vec<Row<A>>),
+    Sub(SubId, MenuItem, Vec<Row<A>>),
 }
 
 impl<A> Row<A> {
@@ -451,7 +448,7 @@ impl<A> Row<A> {
             Row::Item(a, item) => Row::Item(f(a), item),
             Row::Divider => Row::Divider,
             Row::Label(l) => Row::Label(l),
-            Row::Sub(item, rows) => Row::Sub(item, rows.into_iter().map(|r| r.map(&mut *f)).collect()),
+            Row::Sub(id, item, rows) => Row::Sub(id, item, rows.into_iter().map(|r| r.map(&mut *f)).collect()),
         }
     }
 }
@@ -464,7 +461,7 @@ pub fn row_acts<A: Copy>(rows: &[Row<A>]) -> Vec<A> {
         match r {
             Row::Item(a, _) => acts.push(*a),
             Row::Divider | Row::Label(_) => {}
-            Row::Sub(_, rows) => acts.extend(row_acts(rows)),
+            Row::Sub(_, _, rows) => acts.extend(row_acts(rows)),
         }
     }
     acts
@@ -479,25 +476,25 @@ pub fn row_items<A: Copy>(rows: &[Row<A>]) -> Vec<(A, &MenuItem)> {
         match r {
             Row::Item(a, item) => items.push((*a, item)),
             Row::Divider | Row::Label(_) => {}
-            Row::Sub(_, rows) => items.extend(row_items(rows)),
+            Row::Sub(_, _, rows) => items.extend(row_items(rows)),
         }
     }
     items
 }
 
-/// The rows of the submenu `label` of `rows`.
+/// The rows of the submenu `id` of `rows`.
 #[cfg(test)]
-pub fn sub_rows<'a, A>(rows: &'a [Row<A>], label: &str) -> Option<&'a [Row<A>]> {
+pub fn sub_rows<'a, A>(rows: &'a [Row<A>], id: SubId) -> Option<&'a [Row<A>]> {
     rows.iter().find_map(|r| match r {
-        Row::Sub(item, rows) if item.label == label => Some(rows.as_slice()),
+        Row::Sub(k, _, rows) if *k == id => Some(rows.as_slice()),
         _ => None,
     })
 }
 
-/// The rows of the submenu `label` of `rows`, to add to.
-pub fn sub_rows_mut<'a, A>(rows: &'a mut [Row<A>], label: &str) -> Option<&'a mut Vec<Row<A>>> {
+/// The rows of the submenu `id` of `rows`, to add to.
+pub fn sub_rows_mut<'a, A>(rows: &'a mut [Row<A>], id: SubId) -> Option<&'a mut Vec<Row<A>>> {
     rows.iter_mut().find_map(|r| match r {
-        Row::Sub(item, rows) if item.label == label => Some(rows),
+        Row::Sub(k, _, rows) if *k == id => Some(rows),
         _ => None,
     })
 }
@@ -509,12 +506,12 @@ pub fn shown_rows<A>(rows: Vec<Row<A>>) -> Vec<Row<A>> {
     let mut shown = Vec::with_capacity(rows.len());
     for r in rows {
         match r {
-            Row::Sub(parent, rows) => {
+            Row::Sub(id, parent, rows) => {
                 let rows = shown_rows(rows);
                 match rows.iter().filter(|r| matches!(r, Row::Item(..))).count() {
                     0 => {}
-                    1 if parent.label != i18n::menus().file => shown.extend(rows.into_iter().filter(|r| matches!(r, Row::Item(..)))),
-                    _ => shown.push(Row::Sub(parent, rows)),
+                    1 if id != SubId::File => shown.extend(rows.into_iter().filter(|r| matches!(r, Row::Item(..)))),
+                    _ => shown.push(Row::Sub(id, parent, rows)),
                 }
             }
             r => shown.push(r),
@@ -541,7 +538,7 @@ fn fill<A>(mut menu: Menu, rows: Vec<Row<A>>) -> Menu {
                 menu = menu.item(item);
                 after_divider = false;
             }
-            Row::Sub(item, rows) => {
+            Row::Sub(_, item, rows) => {
                 menu = menu.item(item.submenu(fill(Menu::new("submenu"), rows)));
                 after_divider = false;
             }

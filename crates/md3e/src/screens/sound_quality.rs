@@ -35,11 +35,11 @@ pub(super) fn section(ui: &mut Ui, d: &SoundDetails, track: Option<TrackId>, out
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-            let mp3 = Button::new(super::pages::TO_MP3).icon(Icon::Sync).style(Style::Tonal).size(Size::S);
+            let mp3 = Button::new(nikgob_core::i18n::menus().to_mp3).icon(Icon::Sync).style(Style::Tonal).size(Size::S);
             if d.to_mp3 && ui.add(mp3.id_salt("quality-to-mp3")).clicked() {
                 out.push(Command::FakeToMp3(track));
             }
-            let better = Button::new(super::pages::FIND_BETTER).icon(Icon::Search).style(Style::Outlined).size(Size::S);
+            let better = Button::new(nikgob_core::i18n::menus().find_better).icon(Icon::Search).style(Style::Outlined).size(Size::S);
             if d.better && ui.add(better.id_salt("quality-better")).clicked() {
                 out.push(Command::FindBetter(track));
             }

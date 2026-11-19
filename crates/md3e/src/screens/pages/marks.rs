@@ -11,10 +11,6 @@ use nikgob_view::{Command, RecTarget, Route, TrackId, ViewState};
 use super::{PageState, widgets};
 use crate::components::{Button, ListItem, Style};
 
-/// The page's title (and its button's name in Settings).
-// i18n: use pages().marks_title
-pub const TITLE: &str = "Не нравится и скорость";
-
 pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     super::detail::with_bar(ui, i18n::pages().marks_title, pages, |ui, _| {
         let d = &state.dislikes;

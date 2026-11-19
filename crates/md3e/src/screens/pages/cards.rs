@@ -271,7 +271,7 @@ pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize
             let n = u64::from(p.track_count);
             (
                 p.display_name().to_owned(),
-                format!("{} · {}", i18n::library().tab_playlists, i18n::tracks_count(n)),
+                format!("{} · {}", i18n::library().playlist_label, i18n::tracks_count(n)),
                 Route::Playlist(p.id),
                 Command::PlayPlaylist { id: p.id, start: None, shuffle: false },
             )
@@ -1166,8 +1166,8 @@ pub fn of_day_rows() -> [OfDayItem; 4] {
 fn of_day_menu(key: Id) -> Menu {
     Menu::new(key)
         .item(MenuItem::new(i18n::common().play).icon(Icon::PlayArrow))
-        .item(MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic))
-        .item(MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic))
+        .item(MenuItem::new(i18n::menus().play_next).icon(Icon::QueueMusic))
+        .item(MenuItem::new(i18n::menus().to_queue).icon(Icon::QueueMusic))
         .divider()
         .item(MenuItem::new(i18n::menus().download_missing).icon(Icon::Download))
 }

@@ -11,9 +11,6 @@ use super::super::{PageState, SettingId};
 use super::{Grid, entering};
 use crate::{Icon, Theme, TypeRole};
 
-// i18n: use pages().empty_line
-pub const EMPTY_LINE: &str = "Музыки пока нет";
-
 /// A tile's side and the space between tiles.
 const TILE_W: f32 = 152.0;
 const TILE_MIN_W: f32 = 120.0;

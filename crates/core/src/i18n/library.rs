@@ -38,6 +38,7 @@ pub struct LibraryStrings {
     pub source_downloaded: &'static str,
     pub source_stream: &'static str,
     pub new_playlist: &'static str,
+    pub playlist_label: &'static str,
     pub tracks_empty: &'static str,
     pub artists_empty: &'static str,
     pub downloaded_empty: &'static str,
@@ -87,6 +88,7 @@ pub static RU: LibraryStrings = LibraryStrings {
     source_downloaded: "Скачанные",
     source_stream: "Стрим",
     new_playlist: "Новый плейлист",
+    playlist_label: "Плейлист",
     tracks_empty: "Треков пока нет",
     artists_empty: "Исполнителей пока нет",
     downloaded_empty: "Пока ничего",
@@ -136,6 +138,7 @@ pub static EN: LibraryStrings = LibraryStrings {
     source_downloaded: "Downloaded",
     source_stream: "Streaming",
     new_playlist: "New playlist",
+    playlist_label: "Playlist",
     tracks_empty: "No tracks yet",
     artists_empty: "No artists yet",
     downloaded_empty: "Nothing yet",
@@ -213,10 +216,12 @@ pub fn fmt_in_trash(count: &str) -> String {
 /// Formats a trash row's tail (`«… · удалено 12.11 · осталось 5 дн.»` /
 /// `«… · deleted 12.11 · 5 days left»`).
 pub fn fmt_trash_line_in(loc: Locale, deleted: &str, days_left: u32) -> String {
-    let unit = plural_forms(loc, u64::from(days_left), &library_in(loc).days);
     match loc {
-        Locale::Ru => format!("удалено {deleted} · осталось {days_left} {unit}"),
-        Locale::En => format!("deleted {deleted} · {days_left} {unit} left"),
+        Locale::Ru => format!("удалено {deleted} · осталось {days_left} дн."),
+        Locale::En => {
+            let unit = plural_forms(loc, u64::from(days_left), &library_in(loc).days);
+            format!("deleted {deleted} · {days_left} {unit} left")
+        }
     }
 }
 
@@ -238,6 +243,8 @@ mod tests {
         assert_eq!(plural_forms(ru, 5, &RU.albums), "альбомов");
         assert_eq!(plural_forms(en, 1, &EN.albums), "album");
         assert_eq!(plural_forms(en, 2, &EN.albums), "albums");
+        assert_eq!(RU.playlist_label, "Плейлист");
+        assert_eq!(EN.playlist_label, "Playlist");
         assert_eq!(fmt_sort_tooltip_in(ru, "По году"), "Сортировка: по году");
         assert_eq!(fmt_sort_tooltip_in(en, "By year"), "Sort: By year");
         assert_eq!(fmt_all_count_in(ru, 7), "Все 7");
@@ -246,8 +253,9 @@ mod tests {
         assert_eq!(fmt_found_in(en, "5 tracks"), "Found: 5 tracks");
         assert_eq!(fmt_in_trash_in(ru, "2 трека"), "2 трека в корзине");
         assert_eq!(fmt_in_trash_in(en, "2 tracks"), "2 tracks in trash");
-        assert_eq!(fmt_trash_line_in(ru, "12.11", 1), "удалено 12.11 · осталось 1 день");
-        assert_eq!(fmt_trash_line_in(ru, "12.11", 5), "удалено 12.11 · осталось 5 дней");
+        assert_eq!(fmt_trash_line_in(ru, "12.11", 1), "удалено 12.11 · осталось 1 дн.");
+        assert_eq!(fmt_trash_line_in(ru, "12.11", 2), "удалено 12.11 · осталось 2 дн.");
+        assert_eq!(fmt_trash_line_in(ru, "12.11", 5), "удалено 12.11 · осталось 5 дн.");
         assert_eq!(fmt_trash_line_in(en, "12.11", 1), "deleted 12.11 · 1 day left");
         assert_eq!(fmt_trash_line_in(en, "12.11", 5), "deleted 12.11 · 5 days left");
     }

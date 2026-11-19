@@ -460,7 +460,10 @@ pub fn fmt_ed_what(names: &str, artist: &str) -> String {
 pub fn fmt_ed_same_in(loc: Locale, n: u32) -> String {
     match loc {
         Locale::Ru => format!(" Одинаковых песен: {n} — останется по одной, файл получше будет играть."),
-        Locale::En => format!(" {n} identical songs — one copy stays, the better file plays."),
+        Locale::En => {
+            let noun = if n == 1 { "song" } else { "songs" };
+            format!(" {n} identical {noun} — one copy stays, the better file plays.")
+        }
     }
 }
 
@@ -563,6 +566,9 @@ mod tests {
         assert_eq!(fmt_synced_in(en, "12:00"), "synced 12:00");
         assert_eq!(fmt_ed_what_in(ru, "«A» и «B»", "X"), "«A» и «B» — издания одного альбома (X).");
         assert_eq!(fmt_ed_what_in(en, "“A” and “B”", "X"), "“A” and “B” — editions of one album (X).");
+        assert_eq!(fmt_ed_same_in(ru, 1), " Одинаковых песен: 1 — останется по одной, файл получше будет играть.");
+        assert_eq!(fmt_ed_same_in(en, 1), " 1 identical song — one copy stays, the better file plays.");
+        assert_eq!(fmt_ed_same_in(en, 2), " 2 identical songs — one copy stays, the better file plays.");
         assert_eq!(fmt_ed_new_in(ru, 3, "A"), " Ещё 3 добавится в «A».");
         assert_eq!(fmt_ed_new_in(en, 3, "A"), " 3 more will be added to “A”.");
         assert_eq!(fmt_size_in(ru, 500), "500 Б");

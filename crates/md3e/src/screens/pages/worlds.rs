@@ -703,8 +703,8 @@ fn world_menu(key: impl egui::AsId, items: &[WorldItem]) -> Menu {
         }
         m = m.item(match item {
             WorldItem::Open => MenuItem::new(nikgob_core::i18n::streams_ui().open_world).icon(Icon::Album),
-            WorldItem::PlayNext => MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic),
-            WorldItem::Enqueue => MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic),
+            WorldItem::PlayNext => MenuItem::new(nikgob_core::i18n::menus().play_next).icon(Icon::QueueMusic),
+            WorldItem::Enqueue => MenuItem::new(nikgob_core::i18n::menus().to_queue).icon(Icon::QueueMusic),
             WorldItem::HideWorld => MenuItem::new(nikgob_core::i18n::streams_ui().hide_world).icon(Icon::Block),
             WorldItem::HideCard => MenuItem::new(nikgob_core::i18n::streams_ui().hide_card).icon(Icon::Close),
         });

@@ -537,18 +537,19 @@ pub fn stream_album_rows(o: StreamAlbumMenuOf) -> Vec<widgets::Row<StreamAlbumAc
     use widgets::Row;
     let c = nikgob_core::i18n::common();
     let s = nikgob_core::i18n::streams_ui();
+    let m = nikgob_core::i18n::menus();
     let mut rows = Vec::new();
     if !o.on_page {
         rows.push(Row::Item(A::Play, MenuItem::new(c.play).icon(Icon::PlayArrow)));
         rows.push(Row::Item(A::Shuffle, MenuItem::new(c.shuffle).icon(Icon::Shuffle)));
     }
     rows.push(Row::Item(A::Radio, MenuItem::new(s.album_radio).icon(Icon::Radio)));
-    rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
-    rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Next, MenuItem::new(m.play_next).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Queue, MenuItem::new(m.to_queue).icon(Icon::QueueMusic)));
     rows.push(Row::Divider);
     if !o.on_page {
         // Liking is not downloading: there whatever the library has of it.
-        rows.push(Row::Item(A::Like, MenuItem::new(super::LIKE).icon(Icon::Favorite)));
+        rows.push(Row::Item(A::Like, MenuItem::new(m.like).icon(Icon::Favorite)));
     }
     rows.push(Row::Item(A::Playlist, MenuItem::new(s.to_playlist).icon(Icon::PlaylistAdd)));
     rows.push(Row::Divider);
@@ -560,7 +561,7 @@ pub fn stream_album_rows(o: StreamAlbumMenuOf) -> Vec<widgets::Row<StreamAlbumAc
     }
     rows.push(Row::Item(A::Share, MenuItem::new(s.share).icon(Icon::Share)));
     if o.on_page || o.refresh {
-        rows.push(Row::Item(A::RefreshCover, MenuItem::new(widgets::REFRESH_COVER).icon(Icon::Refresh)));
+        rows.push(Row::Item(A::RefreshCover, MenuItem::new(m.refresh_cover).icon(Icon::Refresh)));
     }
     if !o.on_page && o.can_download {
         rows.push(Row::Divider);
@@ -681,6 +682,7 @@ pub fn stream_artist_rows(a: &StreamArtistCard, marks: &nikgob_view::DislikesVie
     use widgets::Row;
     let c = nikgob_core::i18n::common();
     let s = nikgob_core::i18n::streams_ui();
+    let m = nikgob_core::i18n::menus();
     let mut rows = Vec::new();
     if a.artist.is_some() {
         rows.push(Row::Item(A::Play, MenuItem::new(s.play_mix).icon(Icon::PlayArrow)));
@@ -689,8 +691,8 @@ pub fn stream_artist_rows(a: &StreamArtistCard, marks: &nikgob_view::DislikesVie
     } else {
         rows.push(Row::Item(A::Play, MenuItem::new(c.play).icon(Icon::PlayArrow)));
     }
-    rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
-    rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Next, MenuItem::new(m.play_next).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Queue, MenuItem::new(m.to_queue).icon(Icon::QueueMusic)));
     rows.push(Row::Divider);
     let ban = match a.artist {
         Some(id) => super::ban_item(id, marks),
@@ -751,19 +753,20 @@ pub fn stream_playlist_rows(on_page: bool, followed: bool) -> Vec<widgets::Row<S
     use widgets::Row;
     let c = nikgob_core::i18n::common();
     let s = nikgob_core::i18n::streams_ui();
+    let m = nikgob_core::i18n::menus();
     let mut rows = Vec::new();
     if on_page {
         rows.push(Row::Item(A::Radio, MenuItem::new(s.playlist_radio).icon(Icon::Radio)));
-        rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
-        rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
+        rows.push(Row::Item(A::Next, MenuItem::new(m.play_next).icon(Icon::QueueMusic)));
+        rows.push(Row::Item(A::Queue, MenuItem::new(m.to_queue).icon(Icon::QueueMusic)));
         rows.push(Row::Divider);
         rows.push(Row::Item(A::Playlist, MenuItem::new(s.to_playlist).icon(Icon::PlaylistAdd)));
     } else {
         rows.push(Row::Item(A::Play, MenuItem::new(c.play).icon(Icon::PlayArrow)));
         rows.push(Row::Item(A::Shuffle, MenuItem::new(c.shuffle).icon(Icon::Shuffle)));
         rows.push(Row::Item(A::Radio, MenuItem::new(s.playlist_radio).icon(Icon::Radio)));
-        rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
-        rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
+        rows.push(Row::Item(A::Next, MenuItem::new(m.play_next).icon(Icon::QueueMusic)));
+        rows.push(Row::Item(A::Queue, MenuItem::new(m.to_queue).icon(Icon::QueueMusic)));
         rows.push(Row::Divider);
         rows.push(if followed {
             Row::Item(A::Library, MenuItem::new(s.open_in_library).icon(Icon::LibraryMusic))
@@ -1173,8 +1176,8 @@ mod menu_tests {
     /// «Скачать» in the menu itself, «Скачать альбом» in «Файл».
     #[test]
     fn a_service_song_keeps_the_album_download_in_its_file_menu() {
-        use crate::screens::pages::{FILE, TrackAct};
-        use crate::screens::pages::widgets::{shown_rows, sub_rows};
+        use crate::screens::pages::TrackAct;
+        use crate::screens::pages::widgets::{SubId, shown_rows, sub_rows};
         let remote = |id: &str| nikgob_view::RemoteId::new(nikgob_view::Service::Spotify, id);
         let t = nikgob_view::StreamTrackRow {
             remote: remote("t"),
@@ -1199,7 +1202,7 @@ mod menu_tests {
         let shown = shown_rows(super::stream_track_rows(&t, None, &nikgob_view::DislikesView::default()));
         assert!(shown.iter().any(|r| matches!(r, Row::Item(TrackAct::Fetch, _))));
         assert!(!shown.iter().any(|r| matches!(r, Row::Item(TrackAct::AlbumDownload, _))));
-        assert_eq!(row_acts(sub_rows(&shown, FILE).unwrap()), [TrackAct::AlbumDownload]);
+        assert_eq!(row_acts(sub_rows(&shown, SubId::File).unwrap()), [TrackAct::AlbumDownload]);
     }
 
     /// A SoundCloud row its service will not play (a preview, Go+, DRM

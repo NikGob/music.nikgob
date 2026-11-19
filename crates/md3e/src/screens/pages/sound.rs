@@ -417,7 +417,7 @@ mod tests {
         let texts = draw(&ctx, &mut 0.0, &state, &mut out);
         assert!(out.is_empty(), "{out:?}");
         assert!(texts.iter().any(|t| t == "Эквалайзер"), "{texts:?}");
-        for name in equalizer::BAND_NAMES {
+        for name in nikgob_core::i18n::pages::band_names_in(nikgob_core::i18n::Locale::Ru) {
             assert!(texts.iter().any(|t| t == name), "no «{name}» in {texts:?}");
         }
         assert!(!texts.iter().any(|t| t == "Сохранять тембр голоса"), "{texts:?}");

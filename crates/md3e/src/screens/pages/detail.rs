@@ -369,7 +369,7 @@ fn release_body(ui: &mut Ui, r: &ReleaseDetail, state: &ViewState, pages: &mut P
     }
     if r.added_whole {
         let at = rows.iter().position(|x| matches!(x, widgets::Row::Item(widgets::ReleaseAct::Playlist, _))).map_or(rows.len(), |p| p + 1);
-        rows.insert(at, widgets::Row::Item(widgets::ReleaseAct::KeepMine, MenuItem::new(widgets::KEEP_MINE).icon(Icon::LibraryMusic)));
+        rows.insert(at, widgets::Row::Item(widgets::ReleaseAct::KeepMine, MenuItem::new(i18n::menus().keep_mine).icon(Icon::LibraryMusic)));
     }
     let (menu, acts) = widgets::menu_of("rel-more", rows);
     match menu.attach(more).and_then(|i| acts.get(i).copied()) {

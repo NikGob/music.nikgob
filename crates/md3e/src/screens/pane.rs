@@ -158,7 +158,7 @@ fn queue_menu_rows(ctx: &egui::Context, e: &QueueEntry, state: &ViewState) -> Ve
     let mut rows = vec![Row::Item(QueueAct::Play, MenuItem::new(nikgob_core::i18n::common().play).icon(Icon::PlayArrow))];
     let first = state.queue.next.first().map(|n| n.entry) == Some(e.entry);
     if state.queue.current_entry.is_some_and(|c| c != e.entry) && !first {
-        rows.push(Row::Item(QueueAct::Next, MenuItem::new(p::PLAY_NEXT).icon(Icon::QueueMusic)));
+        rows.push(Row::Item(QueueAct::Next, MenuItem::new(nikgob_core::i18n::menus().play_next).icon(Icon::QueueMusic)));
     }
     rows.push(Row::Divider);
     let wish = p::widgets::WishIndex::of(ctx, &state.downloads.wishlist);

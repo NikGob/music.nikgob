@@ -26,8 +26,6 @@ use crate::screens::stage::{Part, Stage};
 mod empty;
 mod refresh;
 mod row;
-#[cfg(test)]
-pub use empty::EMPTY_LINE;
 use crate::{
     Icon, Theme, TypeRole,
     components::{Button, FilterChip, IconButton, Size, Style, anim},

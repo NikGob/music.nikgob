@@ -5,6 +5,7 @@ use super::{Locale, PluralForms, locale};
 /// Static strings: search page.
 pub struct SearchStrings {
     pub chip_torrents: &'static str,
+    pub no_results: &'static str,
     pub library_none_body: &'static str,
     pub no_results_body: &'static str,
     pub prowlarr_hint: &'static str,
@@ -13,6 +14,7 @@ pub struct SearchStrings {
     pub none_found: &'static str,
     pub recommended: &'static str,
     pub pick_files: &'static str,
+    pub pick_files_title: &'static str,
     pub torrent_word: &'static str,
     pub reading_files: &'static str,
     pub no_files: &'static str,
@@ -26,6 +28,7 @@ pub struct SearchStrings {
 
 pub static RU: SearchStrings = SearchStrings {
     chip_torrents: "Торренты",
+    no_results: "Ничего не нашлось",
     library_none_body: "В библиотеке такого нет.",
     no_results_body: "Проверь, как написано, или поищи раздачи в торрентах.",
     prowlarr_hint: "Для раздач нужен Prowlarr: адрес и ключ — в Настройках → Источники → Торренты.",
@@ -34,6 +37,7 @@ pub static RU: SearchStrings = SearchStrings {
     none_found: "Раздач не нашлось.",
     recommended: "рекоменд.",
     pick_files: "Выбрать файлы…",
+    pick_files_title: "Выбрать файлы",
     torrent_word: "Раздача",
     reading_files: "Читаю список файлов…",
     no_files: "В раздаче нет файлов.",
@@ -47,6 +51,7 @@ pub static RU: SearchStrings = SearchStrings {
 
 pub static EN: SearchStrings = SearchStrings {
     chip_torrents: "Torrents",
+    no_results: "Nothing found",
     library_none_body: "Not in the library.",
     no_results_body: "Check the spelling, or look for torrents.",
     prowlarr_hint: "Torrents need Prowlarr: address and key — in Settings → Sources → Torrents.",
@@ -55,6 +60,7 @@ pub static EN: SearchStrings = SearchStrings {
     none_found: "No torrents found.",
     recommended: "recommended",
     pick_files: "Pick files…",
+    pick_files_title: "Choose files",
     torrent_word: "Torrent",
     reading_files: "Reading the file list…",
     no_files: "No files in this torrent.",
@@ -281,5 +287,10 @@ mod tests {
         assert_eq!(fmt_album_kind_in(ru, "", None), "Альбом");
         assert_eq!(fmt_album_kind_in(en, "Kino", Some(1988)), "Album · Kino · 1988");
         assert_eq!(fmt_album_kind_in(en, "", None), "Album");
+        assert_eq!(RU.no_results, "Ничего не нашлось");
+        assert_eq!(EN.no_results, "Nothing found");
+        assert_eq!(RU.pick_files, "Выбрать файлы…");
+        assert_eq!(RU.pick_files_title, "Выбрать файлы");
+        assert_eq!(EN.pick_files_title, "Choose files");
     }
 }

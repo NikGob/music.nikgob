@@ -290,7 +290,7 @@ fn library(
         return None;
     }
     if empty {
-        widgets::empty_state(ui, Icon::Search, i18n::library().no_results, i18n::search().library_none_body, None);
+        widgets::empty_state(ui, Icon::Search, i18n::search().no_results, i18n::search().library_none_body, None);
         ui.add_space(widgets::SECTION_GAP);
         return None;
     }
@@ -664,7 +664,7 @@ fn all_page(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
             widgets::empty_state(
                 ui,
                 Icon::Search,
-                i18n::library().no_results,
+                i18n::search().no_results,
                 i18n::search().no_results_body,
                 None,
             );
