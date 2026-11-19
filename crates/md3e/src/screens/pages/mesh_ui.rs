@@ -16,7 +16,7 @@ use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use nikgob_shapes::MaterialShape;
 use nikgob_view::{
     Command, FAVORITES_CAP_DEFAULT, FAVORITES_CAP_MAX_GB, FAVORITES_CAP_MIN_GB, LIKED_PLAYLIST, MeshKind, MeshNodeView, MeshPins,
-    MeshProfile, MeshScope, MeshView, PlaylistId, StorageView, ViewState, free_ru, size_ru,
+    MeshProfile, MeshScope, MeshView, PlaylistId, StorageView, ViewState, free_ru, kind_label, size_ru,
 };
 
 use crate::{
@@ -195,7 +195,7 @@ pub(crate) fn storage_line(n: &MeshNodeView) -> Option<(String, bool)> {
     }
     let st = n.storage?;
     if st.free < LOW_FREE {
-        return Some((format!("Мало места: свободно {}", free_ru(st.free)), true));
+        return Some((nikgob_core::i18n::mesh::fmt_low_space_in(nikgob_core::i18n::locale(), &free_ru(st.free)), true));
     }
     Some(match n.profile {
         MeshProfile::Favorites { cap_bytes } => (fraction_ru(st.used, cap_bytes), false),
@@ -210,7 +210,7 @@ pub(crate) fn this_storage_line(st: &StorageView) -> Option<String> {
     if !st.known {
         return None;
     }
-    Some(if st.masters > 0 { format!("{} · оригиналы {}", size_ru(st.music()), size_ru(st.masters)) } else { size_ru(st.music()) })
+    Some(if st.masters > 0 { nikgob_core::i18n::mesh::fmt_masters_in(nikgob_core::i18n::locale(), &size_ru(st.music()), &size_ru(st.masters)) } else { size_ru(st.music()) })
 }
 
 /// The share of a device's bar each part takes: (music, originals, rest)
@@ -299,7 +299,7 @@ pub(crate) fn profile_chip(ui: &mut Ui, salt: &str, n: &MeshNodeView, enabled: b
     let chip = FilterChip::new(n.profile.label(), false).trailing_icon(Icon::ExpandMore).enabled(enabled).id_salt(("mesh-profile", salt));
     let resp = ui.add(chip);
     let mut menu = Menu::new(("mesh-profile-menu", salt));
-    for (i, label) in ["Полная копия", "Библиотека", "Избранное…", "Только звук"].into_iter().enumerate() {
+    for (i, label) in nikgob_core::i18n::mesh::profile_choices_in(nikgob_core::i18n::locale()).into_iter().enumerate() {
         menu = menu.item(MenuItem::new(label).selected(i == at));
     }
     match menu.attach(&resp)? {
@@ -314,7 +314,7 @@ pub(crate) fn profile_chip(ui: &mut Ui, salt: &str, n: &MeshNodeView, enabled: b
 /// has it); only the device holding the ring changes it.
 pub(crate) fn guest_chip(ui: &mut Ui, salt: &str, n: &MeshNodeView, holder: bool, mem: &MeshUi) -> Option<Act> {
     let guest = shown_scope(mem, n, anim::now(ui.ctx())) == MeshScope::Guest;
-    let r = ui.add(FilterChip::new("Гость", guest).enabled(holder).id_salt(("mesh-guest", salt)));
+    let r = ui.add(FilterChip::new(nikgob_core::i18n::mesh().guest, guest).enabled(holder).id_salt(("mesh-guest", salt)));
     r.clicked().then_some(Act::Scope(if guest { MeshScope::Owner } else { MeshScope::Guest }))
 }
 
@@ -327,10 +327,10 @@ fn shown_scope(mem: &MeshUi, n: &MeshNodeView, now: f64) -> MeshScope {
 /// ⋮ of a device: «Переименовать», and for a paired one «Забыть» (only
 /// the device holding the ring forgets).
 pub(crate) fn more_menu(ui: &mut Ui, salt: &str, this: bool, can_forget: bool) -> Option<Act> {
-    let b = ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("mesh-more", salt)));
-    let mut menu = Menu::new(("mesh-more-menu", salt)).align_right(true).item(MenuItem::new("Переименовать").icon(Icon::Edit));
+    let b = ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip(nikgob_core::i18n::common().more).id_salt(("mesh-more", salt)));
+    let mut menu = Menu::new(("mesh-more-menu", salt)).align_right(true).item(MenuItem::new(nikgob_core::i18n::common().rename).icon(Icon::Edit));
     if !this {
-        menu = menu.divider().item(MenuItem::new("Забыть").icon(Icon::Delete).enabled(can_forget));
+        menu = menu.divider().item(MenuItem::new(nikgob_core::i18n::mesh().forget).icon(Icon::Delete).enabled(can_forget));
     }
     match menu.attach(&b)? {
         0 => Some(Act::Rename),
@@ -343,7 +343,7 @@ pub(crate) fn act(ui: &Ui, m: &MeshView, node: Option<&MeshNodeView>, a: Act, me
     let now = anim::now(ui.ctx());
     match (a, node) {
         (Act::Rename, None) => {
-            let placeholder = if m.this.name.is_empty() { "Компьютер".to_owned() } else { m.this.name.clone() };
+            let placeholder = if m.this.name.is_empty() { kind_label(m.this.kind).to_owned() } else { m.this.name.clone() };
             mem.rename = Some(Rename { node: None, name: m.name_setting.clone(), placeholder, focus: true });
         }
         (Act::Rename, Some(n)) => mem.rename = Some(Rename { node: Some(n.id.clone()), name: n.name.clone(), placeholder: String::new(), focus: true }),
@@ -411,13 +411,13 @@ fn rename_dialog(ui: &mut Ui, mem: &mut MeshUi, out: &mut Vec<Command>) {
     let mut submitted = false;
     // This device may go back to the computer's name; another needs one.
     let can = d.node.is_none() || !d.name.trim().is_empty();
-    let r = Dialog::new("mesh-rename-dialog", "Переименовать")
+    let r = Dialog::new("mesh-rename-dialog", nikgob_core::i18n::common().rename)
         .max_width(400.0)
-        .action("Отмена")
-        .action_with(DialogAction::new("Сохранить").enabled(can))
+        .action(nikgob_core::i18n::common().cancel)
+        .action_with(DialogAction::new(nikgob_core::i18n::common().save).enabled(can))
         .show_with(&ctx, &mut open, |ui| {
             ui.add_space(16.0);
-            let mut f = TextField::new(&mut d.name, "Название").width(ui.available_width()).request_focus(d.focus).id_salt("mesh-rename-field");
+            let mut f = TextField::new(&mut d.name, nikgob_core::i18n::mesh().name_label).width(ui.available_width()).request_focus(d.focus).id_salt("mesh-rename-field");
             if !d.placeholder.is_empty() {
                 f = f.placeholder(d.placeholder.clone());
             }
@@ -443,25 +443,25 @@ fn favorites_dialog(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &mut 
     let lists: Vec<(PlaylistId, String)> = state.library.playlists.iter().filter(|p| p.id != LIKED_PLAYLIST).map(|p| (p.id, p.name.clone())).collect();
     let r = Dialog::new("mesh-favorites-dialog", d.name.clone())
         .max_width(440.0)
-        .action("Отмена")
-        .action_with(DialogAction::new("Сохранить"))
+        .action(nikgob_core::i18n::common().cancel)
+        .action_with(DialogAction::new(nikgob_core::i18n::common().save))
         .show_with(&ctx, &mut open, |ui| {
             ui.add_space(16.0);
             let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
-            ui.painter().text(row.left_center(), egui::Align2::LEFT_CENTER, "Избранное", TypeRole::LabelLarge.font_id(), s.on_surface_variant);
-            ui.painter().text(row.right_center(), egui::Align2::RIGHT_CENTER, format!("{} ГБ", d.cap_gb), TypeRole::TitleMedium.font_id(), s.on_surface);
+            ui.painter().text(row.left_center(), egui::Align2::LEFT_CENTER, nikgob_core::i18n::mesh().favorites, TypeRole::LabelLarge.font_id(), s.on_surface_variant);
+            ui.painter().text(row.right_center(), egui::Align2::RIGHT_CENTER, format!("{} {}", d.cap_gb, nikgob_core::i18n::common().gb), TypeRole::TitleMedium.font_id(), s.on_surface);
             ui.add_space(8.0);
             let span = (FAVORITES_CAP_MAX_GB - FAVORITES_CAP_MIN_GB) as f32;
             let frac = (d.cap_gb - FAVORITES_CAP_MIN_GB) as f32 / span;
             let o = Slider::new("mesh-favorites-cap", frac)
                 .width(ui.available_width())
-                .value_label(move |v| format!("{} ГБ", cap_at(v, span)))
+                .value_label(move |v| format!("{} {}", cap_at(v, span), nikgob_core::i18n::common().gb))
                 .show(ui);
             if let Some(v) = o.dragging.or(o.committed) {
                 d.cap_gb = cap_at(v, span);
             }
             ui.add_space(12.0);
-            check_row(ui, "mesh-favorites-liked", "Любимые", &mut d.liked);
+            check_row(ui, "mesh-favorites-liked", nikgob_core::i18n::mesh().liked, &mut d.liked);
             egui::ScrollArea::vertical().id_salt("mesh-favorites-lists").max_height(240.0).auto_shrink([false, true]).show(ui, |ui| {
                 for (id, name) in &lists {
                     let mut on = d.playlists.contains(id);
@@ -518,12 +518,12 @@ fn forget_dialog(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &mut Vec
     }
     let ctx = ui.ctx().clone();
     let mut open = true;
-    let r = Dialog::new("mesh-forget-dialog", format!("Забыть «{}»?", d.name))
+    let r = Dialog::new("mesh-forget-dialog", nikgob_core::i18n::mesh::fmt_forget_in(nikgob_core::i18n::locale(), &d.name))
         .icon(Icon::Error)
         .supporting(forget_text(d.originals))
         .max_width(420.0)
-        .action("Отмена")
-        .action_with(DialogAction::new("Забыть всё равно"))
+        .action(nikgob_core::i18n::common().cancel)
+        .action_with(DialogAction::new(nikgob_core::i18n::mesh().forget_anyway))
         .show_with(&ctx, &mut open, |_| {});
     let answer = if r.action == Some(1) {
         Some(true)
@@ -541,13 +541,7 @@ fn forget_dialog(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &mut Vec
 /// What the forget's dialog says: how many originals only that device
 /// holds, or that it could not be checked.
 fn forget_text(originals: Option<u64>) -> String {
-    match originals {
-        Some(n) => {
-            let what = crate::screens::common::plural(n, "оригинал", "оригинала", "оригиналов");
-            format!("Только на этом устройстве лежат проверенные копии: {n} {what} FLAC.")
-        }
-        None => "Не удалось проверить, есть ли на этом устройстве единственные копии оригиналов FLAC.".to_owned(),
-    }
+    nikgob_core::i18n::mesh::fmt_forget_text_in(nikgob_core::i18n::locale(), originals)
 }
 
 #[cfg(test)]

@@ -43,8 +43,10 @@ use crate::{
     tokens::{Elevation, state},
 };
 
-/// The page's title (and its button's name in Settings).
-pub const TITLE: &str = "Карта сети";
+/// The page's title (and its button's name in Settings), in the active locale.
+pub fn title() -> &'static str {
+    nikgob_core::i18n::mesh().map_title
+}
 
 /// A card at rest, and grown for what plays there.
 pub(crate) const CARD_W: f32 = 240.0;
@@ -146,7 +148,7 @@ fn this_name(m: &MeshView) -> String {
     } else if !m.this.name.is_empty() {
         m.this.name.clone()
     } else {
-        "Этот компьютер".to_owned()
+        nikgob_core::i18n::mesh().this_computer.to_owned()
     }
 }
 
@@ -256,7 +258,7 @@ pub(crate) fn edge_point(rect: Rect, toward: Pos2, gap: f32) -> Pos2 {
 pub fn show(ui: &mut Ui, state: &ViewState, bottom_inset: f32, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     // A small bar (the back arrow and the title on one line): the mat
     // takes the rest of the height.
-    let bar = SmallAppBar::new(TITLE).leading(Icon::ArrowBack, "Назад (Esc)").id_salt("mesh-map-bar").show(ui, |_| {});
+    let bar = SmallAppBar::new(title()).leading(Icon::ArrowBack, nikgob_core::i18n::common().back_esc).id_salt("mesh-map-bar").show(ui, |_| {});
     if bar.leading_clicked {
         pages.go_back = true;
     }
@@ -586,7 +588,7 @@ fn card(ui: &mut Ui, rect: Rect, d: &Dev<'_>, selected: bool, m: &MeshView, mova
 /// «Гость» on a guest's card: a small tonal mark.
 fn guest_mark(ui: &mut Ui) {
     let s = Theme::get(ui.ctx()).scheme;
-    let g = ui.painter().layout_no_wrap("Гость".to_owned(), TypeRole::LabelSmall.font_id(), s.on_tertiary_container);
+    let g = ui.painter().layout_no_wrap(nikgob_core::i18n::mesh().guest.to_owned(), TypeRole::LabelSmall.font_id(), s.on_tertiary_container);
     let (rect, _) = ui.allocate_exact_size(vec2(g.size().x + 12.0, 20.0), Sense::hover());
     ui.painter().rect_filled(rect, 10.0, s.tertiary_container);
     ui.painter().galley(rect.center() - g.size() * 0.5, g, s.on_tertiary_container);
@@ -666,15 +668,14 @@ fn foot(ui: &mut Ui, rect: Rect, state: &ViewState, mem: &mut MeshUi, out: &mut 
         paint::container(fui.painter(), pill, Radii::all(22.0), s.surface, Stroke::new(1.0, s.outline_variant));
         mesh_ui::paint_avatar(&fui, pos2(pill.left() + 8.0 + 14.0, pill.center().y), 28.0, &format!("map-nearby-{}", n.id), n.kind, Look::default());
         fui.painter().galley(pos2(pill.left() + 44.0, pill.center().y - name_g.size().y * 0.5), name_g, s.on_surface);
-        let br = Rect::from_min_max(pos2(pill.right() - connect_w, pill.top()), pill.max);
         let mut b = fui.new_child(UiBuilder::new().max_rect(br).layout(Layout::right_to_left(Align::Center)).id_salt(("mesh-map-connect", &n.id)));
-        let r = b.add(Button::new("Подключить").style(Style::Text).size(Size::S).enabled(can).id_salt(("mesh-map-connect-btn", &n.id)));
+        let r = b.add(Button::new(nikgob_core::i18n::mesh().connect).style(Style::Text).size(Size::S).enabled(can).id_salt(("mesh-map-connect-btn", &n.id)));
         if r.clicked() {
             add_device::open_pair(ui.ctx(), m, mem, Some(r.rect), &n.id, out);
         }
     }
     let mut end = fui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center)).id_salt("mesh-map-foot-end"));
-    let r = end.add(Button::new("Добавить устройство").icon(Icon::Add).style(Style::Tonal).size(Size::S).enabled(can).id_salt("mesh-map-add"));
+    let r = end.add(Button::new(nikgob_core::i18n::mesh().add_device).icon(Icon::Add).style(Style::Tonal).size(Size::S).enabled(can).id_salt("mesh-map-add"));
     if r.clicked() {
         add_device::open(ui.ctx(), m, mem, Some(r.rect), AddTab::Connect, out);
     }
@@ -692,11 +693,11 @@ fn passport(ui: &mut Ui, state: &ViewState, d: &Dev<'_>, mem: &mut MeshUi, out: 
     mesh_ui::paint_avatar(ui, pos2(head.left() + 24.0, head.center().y), 48.0, &salt, d.kind, d.look);
     let mut right = ui.new_child(UiBuilder::new().max_rect(head).layout(Layout::right_to_left(Align::Center)).id_salt(("mesh-passport-head", d.id)));
     right.spacing_mut().item_spacing.x = 4.0;
-    if right.add(IconButton::new(Icon::Close).size(Size::S).tooltip("Закрыть").id_salt(("mesh-passport-close", d.id))).clicked() {
+    if right.add(IconButton::new(Icon::Close).size(Size::S).tooltip(nikgob_core::i18n::common().close).id_salt(("mesh-passport-close", d.id))).clicked() {
         mem.map.selected = None;
     }
     let mut act = None;
-    if right.add(IconButton::new(Icon::Edit).size(Size::S).tooltip("Переименовать").id_salt(("mesh-passport-rename", d.id))).clicked() {
+    if right.add(IconButton::new(Icon::Edit).size(Size::S).tooltip(nikgob_core::i18n::common().rename).id_salt(("mesh-passport-rename", d.id))).clicked() {
         act = Some(Act::Rename);
     }
     let x = head.left() + 64.0;
@@ -708,7 +709,7 @@ fn passport(ui: &mut Ui, state: &ViewState, d: &Dev<'_>, mem: &mut MeshUi, out: 
     ui.add_space(20.0);
     // What it stores, and how full it is.
     if let Some(n) = d.node {
-        fact(ui, "Хранит", |ui| {
+        fact(ui, nikgob_core::i18n::mesh().stores, |ui| {
             if let Some(a) = mesh_ui::profile_chip(ui, &salt, n, true) {
                 act = Some(a);
             }
@@ -728,12 +729,12 @@ fn passport(ui: &mut Ui, state: &ViewState, d: &Dev<'_>, mem: &mut MeshUi, out: 
         && n.profile.stores()
         && st.free >= mesh_ui::LOW_FREE
     {
-        ui.label(TypeRole::BodyMedium.style().rich(format!("свободно {}", nikgob_view::free_ru(st.free)), s.on_surface_variant));
+        ui.label(TypeRole::BodyMedium.style().rich(nikgob_core::i18n::mesh::fmt_free_in(nikgob_core::i18n::locale(), &nikgob_view::free_ru(st.free)), s.on_surface_variant));
     }
     // What plays there.
     if let Some((title, artists, progress)) = &d.playing {
         ui.add_space(16.0);
-        fact(ui, "Играет", |ui| {
+        fact(ui, nikgob_core::i18n::mesh().playing, |ui| {
             ui.vertical(|ui| {
                 ui.add(egui::Label::new(TypeRole::BodyLarge.style().rich(title, s.on_surface)).truncate());
                 if !artists.is_empty() {
@@ -755,17 +756,17 @@ fn passport(ui: &mut Ui, state: &ViewState, d: &Dev<'_>, mem: &mut MeshUi, out: 
         None => m.this.version.clone().or_else(|| Some(env!("CARGO_PKG_VERSION").to_owned())),
     };
     if let Some(v) = version {
-        fact_text(ui, "Версия", &v);
+        fact_text(ui, nikgob_core::i18n::mesh().version, &v);
     }
     let addr = d.node.map_or_else(|| m.this.addr.clone(), |n| n.addr.clone());
     if let Some(a) = addr {
-        fact_text(ui, "Адрес", &a);
+        fact_text(ui, nikgob_core::i18n::mesh().address, &a);
     }
     if let Some(n) = d.node
         && !n.online
         && let Some(at) = n.last_seen_ms
     {
-        fact_text(ui, "Был в сети", &super::settings::ago(wall_ms(), at));
+        fact_text(ui, nikgob_core::i18n::mesh().last_seen, &super::settings::ago(wall_ms(), at));
     }
     if let Some(n) = d.node {
         ui.add_space(16.0);
@@ -773,7 +774,7 @@ fn passport(ui: &mut Ui, state: &ViewState, d: &Dev<'_>, mem: &mut MeshUi, out: 
             act = Some(a);
         }
         ui.add_space(24.0);
-        let forget = Button::new("Забыть устройство").icon(Icon::Delete).style(Style::Outlined).size(Size::S).enabled(m.ring_holder).id_salt(("mesh-passport-forget", d.id));
+        let forget = Button::new(nikgob_core::i18n::mesh().forget_device).icon(Icon::Delete).style(Style::Outlined).size(Size::S).enabled(m.ring_holder).id_salt(("mesh-passport-forget", d.id));
         if ui.add(forget).clicked() {
             act = Some(Act::Forget);
         }
@@ -811,12 +812,12 @@ fn listen(ui: &mut Ui, state: &ViewState, d: &Dev<'_>, out: &mut Vec<Command>) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         if let Some(c) = here
-            && ui.add(Button::new("Слушать здесь").icon(Icon::SpeakerGroup).style(Style::Filled).size(Size::S).id_salt(("mesh-passport-here", d.id))).clicked()
+            && ui.add(Button::new(nikgob_core::i18n::mesh().play_here).icon(Icon::SpeakerGroup).style(Style::Filled).size(Size::S).id_salt(("mesh-passport-here", d.id))).clicked()
         {
             out.push(c);
         }
         if let Some(c) = remote
-            && ui.add(Button::new("Пульт").style(Style::Tonal).size(Size::S).id_salt(("mesh-passport-remote", d.id))).clicked()
+            && ui.add(Button::new(nikgob_core::i18n::mesh().remote).style(Style::Tonal).size(Size::S).id_salt(("mesh-passport-remote", d.id))).clicked()
         {
             out.push(c);
         }

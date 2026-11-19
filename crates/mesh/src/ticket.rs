@@ -32,12 +32,24 @@ pub enum TicketError {
     Expired,
 }
 
+impl TicketError {
+    /// What the owner is told about `nikgobd pair`'s argument, in `loc`.
+    pub fn message_in(&self, loc: nikgob_core::i18n::Locale) -> String {
+        let s = nikgob_core::i18n::mesh_in(loc);
+        match self {
+            Self::NotATicket => s.not_a_ticket.to_owned(),
+            Self::Version => s.newer_invite.to_owned(),
+            Self::Expired => s.invite_expired.to_owned(),
+        }
+    }
+}
+
 impl std::fmt::Display for TicketError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::NotATicket => "Это не приглашение",
-            Self::Version => "Приглашение от более новой версии",
-            Self::Expired => "Приглашение истекло",
+            Self::NotATicket => "not an invite ticket",
+            Self::Version => "an invite ticket of a newer version",
+            Self::Expired => "the invite ticket has expired",
         })
     }
 }
@@ -181,5 +193,8 @@ mod tests {
         let t = sample();
         assert!(!t.expired(t.expires_ms - 1));
         assert!(t.expired(t.expires_ms));
+        assert_eq!(TicketError::Expired.message_in(nikgob_core::i18n::Locale::Ru), "Приглашение истекло");
+        assert_eq!(TicketError::Expired.message_in(nikgob_core::i18n::Locale::En), "The invite has expired");
+        assert_eq!(TicketError::NotATicket.message_in(nikgob_core::i18n::Locale::En), "Not an invite");
     }
 }

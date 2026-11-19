@@ -302,7 +302,7 @@ fn stage(ui: &mut Ui, card: Rect, state: &ViewState, world: &World, s: &ColorSch
             }
             if back > 0.01
                 && cards::scaled(&mut pc, prev.center(), 0.5 + 0.5 * back, |ui| {
-                    ui.add_enabled(page > 0, IconButton::new(Icon::ChevronLeft).size(Size::S).style(Style::Standard).tooltip("Предыдущие миры").id_salt("home-world-prev-btn"))
+                    ui.add_enabled(page > 0, IconButton::new(Icon::ChevronLeft).size(Size::S).style(Style::Standard).tooltip(nikgob_core::i18n::streams_ui().prev_worlds).id_salt("home-world-prev-btn"))
                 })
                 .clicked()
             {
@@ -311,7 +311,7 @@ fn stage(ui: &mut Ui, card: Rect, state: &ViewState, world: &World, s: &ColorSch
             let mut nc = c.new_child(UiBuilder::new().max_rect(next).id_salt("home-world-next"));
             let more = page + 1 < pages;
             if nc
-                .add_enabled(more, IconButton::new(Icon::ChevronRight).size(Size::S).style(Style::Standard).tooltip("Следующие миры").id_salt("home-world-next-btn"))
+                .add_enabled(more, IconButton::new(Icon::ChevronRight).size(Size::S).style(Style::Standard).tooltip(nikgob_core::i18n::streams_ui().next_worlds).id_salt("home-world-next-btn"))
                 .clicked()
             {
                 page += 1;
@@ -610,7 +610,7 @@ fn text_block(
     live: bool,
 ) -> Option<Route> {
     let on = s.on_secondary_container;
-    let kicker = if playing(state, w) { "Слушаешь сейчас" } else { w.kicker.as_str() };
+    let kicker = if playing(state, w) { nikgob_core::i18n::streams_ui().listening_now } else { w.kicker.as_str() };
     let k = crate::typography::layout(ui.painter(), TypeRole::LabelLarge.style().job(kicker, on));
     ui.painter().galley(pos2(stage.left(), top), k, on);
     let mut y = top + 20.0;
@@ -621,7 +621,7 @@ fn text_block(
     let name_resp = ui
         .interact(name_rect, Id::new(("home-world-name", &w.key)), if live { Sense::click() } else { Sense::hover() })
         .on_hover_cursor(egui::CursorIcon::PointingHand);
-    let name_resp = if live { name_resp.md3_tooltip("Открыть мир", None) } else { name_resp };
+    let name_resp = if live { name_resp.md3_tooltip(nikgob_core::i18n::streams_ui().open_world, None) } else { name_resp };
     ui.painter().galley(name_rect.min, name, on);
     if name_resp.hovered() || name_resp.has_focus() {
         // A link: underlined under the pointer.
@@ -656,10 +656,10 @@ fn text_block(
     if primary.clicked() {
         out.push(play_primary(w));
     }
-    if b.add(Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Outlined).id_salt(("home-world-shuffle", &w.key))).clicked() {
+    if b.add(Button::new(nikgob_core::i18n::common().shuffle).icon(Icon::Shuffle).size(Size::M).style(Style::Outlined).id_salt(("home-world-shuffle", &w.key))).clicked() {
         out.push(Command::PlayTracks { tracks: w.shuffled.clone(), start: 0, context: nikgob_view::QueueOrigin::World(w.title.clone()) });
     }
-    let more = b.add(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Standard).tooltip("Ещё").id_salt(("home-world-more", &w.key)));
+    let more = b.add(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Standard).tooltip(nikgob_core::i18n::common().more).id_salt(("home-world-more", &w.key)));
     let items = world_items(state.home.worlds.len());
     let picked = world_menu(("home-world-menu", &w.key), &items).align_right(false).attach(&more);
     match picked.and_then(|k| items.get(k).copied()) {
@@ -702,33 +702,21 @@ fn world_menu(key: impl egui::AsId, items: &[WorldItem]) -> Menu {
             m = m.divider();
         }
         m = m.item(match item {
-            WorldItem::Open => MenuItem::new("Открыть мир").icon(Icon::Album),
+            WorldItem::Open => MenuItem::new(nikgob_core::i18n::streams_ui().open_world).icon(Icon::Album),
             WorldItem::PlayNext => MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic),
             WorldItem::Enqueue => MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic),
-            WorldItem::HideWorld => MenuItem::new("Убрать из ряда").icon(Icon::Block),
-            WorldItem::HideCard => MenuItem::new("Скрыть карточку").icon(Icon::Close),
+            WorldItem::HideWorld => MenuItem::new(nikgob_core::i18n::streams_ui().hide_world).icon(Icon::Block),
+            WorldItem::HideCard => MenuItem::new(nikgob_core::i18n::streams_ui().hide_card).icon(Icon::Close),
         });
     }
     m
-}
-
-/// «Ты слышал 36 из 134», «Ты слышал все 134», «Ты ещё не слышал ни одного
-/// из 160».
-pub fn heard_line(heard: u32, total: u32) -> String {
-    if heard == 0 {
-        format!("Ты ещё не слышал ни одного из {total}")
-    } else if heard >= total {
-        format!("Ты слышал все {total}")
-    } else {
-        format!("Ты слышал {heard} из {total}")
-    }
 }
 
 /// The progress line of a world at `at`: the wavy progress of the player
 /// (its track in the card's colours) and how many of its tracks were heard.
 pub fn progress_line(ui: &mut Ui, at: egui::Pos2, width: f32, w: &World, s: &ColorScheme, live: bool) {
     let on = s.on_secondary_container;
-    let text = super::widgets::wrapped(ui, &heard_line(w.heard, w.total), TypeRole::BodyMedium.style(), on, width, 1);
+    let text = super::widgets::wrapped(ui, &nikgob_core::i18n::streams_ui::heard_line(w.heard, w.total), TypeRole::BodyMedium.style(), on, width, 1);
     let bar_w = (width - text.size().x - 16.0).clamp(80.0, 240.0);
     let row = Rect::from_min_size(at, vec2(bar_w, 24.0));
     let mut c = ui.new_child(UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt(("home-world-progress", &w.key)));
@@ -762,7 +750,7 @@ fn cards_row(
     if playing(state, w)
         && let Some(cur) = state.player.current.as_ref()
     {
-        let now = WorldCard { icon: WorldIcon::NowPlaying, kicker: "Сейчас играет".into(), title: cur.title.clone(), go: WorldGo::Player };
+        let now = WorldCard { icon: WorldIcon::NowPlaying, kicker: nikgob_core::i18n::streams_ui().now_playing.into(), title: cur.title.clone(), go: WorldGo::Player };
         if list.first().is_some_and(|c| c.icon != WorldIcon::NowPlaying) {
             list[0] = now;
         } else if list.is_empty() {
@@ -774,7 +762,6 @@ fn cards_row(
     let n = list.len().clamp(1, 3) as f32;
     let cw = (stage.width() - (n - 1.0) * gap) / n;
     let top = stage.bottom() - 72.0;
-    let mut go = None;
     for (k, c) in list.iter().take(3).enumerate() {
         let rect = Rect::from_min_size(pos2(stage.left() + k as f32 * (cw + gap), top), vec2(cw, 72.0));
         let (dy, a) = match rise {

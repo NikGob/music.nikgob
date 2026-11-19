@@ -1137,7 +1137,7 @@ fn plain_open(path: &Path, opts: &mut OpenOptions) -> std::io::Result<std::fs::F
     no_follow(opts);
     let f = opts.open(path)?;
     if !plain_meta(&f.metadata()?) {
-        return Err(std::io::Error::other("не обычный файл"));
+        return Err(std::io::Error::other("not a regular file"));
     }
     Ok(f)
 }
@@ -1251,7 +1251,7 @@ pub(crate) fn verify_part(part: &Path, meta: &Path, hash: &str) -> Result<(), St
     if sum != hash {
         let _ = std::fs::remove_file(part);
         let _ = std::fs::remove_file(meta);
-        return Err("файл пришёл повреждённым".to_owned());
+        return Err("the file arrived damaged".to_owned());
     }
     Ok(())
 }
@@ -1288,7 +1288,7 @@ pub(crate) async fn receive_paced(resp: http::Response<Body>, part: &Path, offse
                 len += n;
                 if len > limit {
                     file.flush().await.map_err(io)?;
-                    return Err(Failed::Bad("файл больше, чем ожидалось".to_owned()));
+                    return Err(Failed::Bad("the file is larger than expected".to_owned()));
                 }
                 if seen.is_none() || since_look >= ROOM_STEP {
                     let others = room.others();
@@ -1309,12 +1309,12 @@ pub(crate) async fn receive_paced(resp: http::Response<Body>, part: &Path, offse
             }
             Ok(Some(Err(e))) => {
                 file.flush().await.map_err(io)?;
-                return Err(Failed::Bad(format!("передача оборвалась: {e}")));
+                return Err(Failed::Bad(format!("the transfer broke off: {e}")));
             }
             Ok(None) => break,
             Err(_) => {
                 file.flush().await.map_err(io)?;
-                return Err(Failed::Bad("передача остановилась".to_owned()));
+                return Err(Failed::Bad("the transfer stalled".to_owned()));
             }
         }
     }
@@ -1336,7 +1336,7 @@ async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job,
     let dir = tokio::task::spawn_blocking(move || parts_dir(&library))
         .await
         .map_err(|e| Failed::Bad(e.to_string()))?
-        .map_err(|e| Failed::Bad(format!("папка частей: {e}")))?;
+        .map_err(|e| Failed::Bad(format!("parts folder: {e}")))?;
     let key = job.key();
     let want = job.hash().to_owned();
     // A part of an earlier try goes on where it stopped when its note says
@@ -1400,13 +1400,13 @@ async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job,
                 continue;
             }
             if !status.is_success() {
-                return Err(Failed::Bad(format!("ответ {status}")));
+                return Err(Failed::Bad(format!("answer {status}")));
             }
             let Some(hash) = header(&resp, nikgob_api::HASH_HEADER).and_then(clean_hash) else {
-                return Err(Failed::Bad("то устройство не сказало хэш файла".to_owned()));
+                return Err(Failed::Bad("that device did not say the file's hash".to_owned()));
             };
             if hash != want {
-                return Err(Failed::Bad("не тот файл".to_owned()));
+                return Err(Failed::Bad("not this file".to_owned()));
             }
             let e = clean_ext(header(&resp, nikgob_api::EXT_HEADER).unwrap_or(""));
             let from_byte = if status == http::StatusCode::PARTIAL_CONTENT { offset } else { 0 };
@@ -1428,7 +1428,7 @@ async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job,
             return Ok(len);
         }
     }
-    if not_there > 0 { Err(Failed::NotThere) } else { Err(Failed::Bad("ни одно устройство не отдало файл".to_owned())) }
+    if not_there > 0 { Err(Failed::NotThere) } else { Err(Failed::Bad("no device gave the file".to_owned())) }
 }
 
 /// The checked part put in its place and made this device's own (on the
@@ -1506,7 +1506,7 @@ fn put_flat(part: &Path, root: &Path, hash: &str, ext: &str, size: u64, room: Ro
 /// back to its part (kept for the next try).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn place_song(lib: &Library, library: &Path, me: &str, want: &Want, part: &Path, hash: &str, ext: &str, size: u64, room: Room) -> Result<PathBuf, Failed> {
-    let layout = nikgob_import::master_files::layout_of_track(lib, want.track_id).ok_or_else(|| Failed::Bad("этой песни ещё нет в библиотеке".to_owned()))?;
+    let layout = nikgob_import::master_files::layout_of_track(lib, want.track_id).ok_or_else(|| Failed::Bad("the song is not in the library yet".to_owned()))?;
     let target = layout.target_path(library, ext);
     let (placed, moved) = put_in_place(part, &target, hash, size, library, room)?;
     let of = lib.offer_of_hash(hash).ok().flatten().or_else(|| want.offers.first().cloned());
@@ -1685,7 +1685,7 @@ pub(crate) async fn recheck(sh: Arc<Shared>, card: u64, hashes: Vec<String>, nee
     let failed = if !ok.is_empty() {
         None
     } else if peers.is_empty() {
-        Some("ни одного устройства в сети".to_owned())
+        Some("no device online".to_owned())
     } else {
         failure
     };

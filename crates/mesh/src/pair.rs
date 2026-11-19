@@ -93,19 +93,25 @@ pub enum PairError {
 }
 
 impl PairError {
-    /// In words for the settings row.
-    pub fn user_message(&self) -> String {
+    /// In words for the settings row, in `loc`.
+    pub fn user_message_in(&self, loc: nikgob_core::i18n::Locale) -> String {
+        let s = nikgob_core::i18n::mesh_in(loc);
         match self {
-            Self::Wrong | Self::Refused(Refusal::WrongCode) => "Неверный код".to_owned(),
-            Self::Refused(Refusal::NoInvite) => "Приглашение истекло или уже использовано".to_owned(),
-            Self::Refused(Refusal::Busy) => "Устройство занято другой привязкой".to_owned(),
-            Self::Refused(Refusal::Paired) => "Устройство уже привязано".to_owned(),
-            Self::Refused(Refusal::NotHolder) => "Привязывать может только главное устройство".to_owned(),
-            Self::Refused(Refusal::Full) => "В кольце нет места для нового устройства".to_owned(),
-            Self::Refused(Refusal::Internal) | Self::Protocol => "Устройство ответило не так".to_owned(),
-            Self::Io(_) => "Нет связи с устройством".to_owned(),
-            Self::Ring(_) => "Не удалось сохранить привязку".to_owned(),
+            Self::Wrong | Self::Refused(Refusal::WrongCode) => s.wrong_code.to_owned(),
+            Self::Refused(Refusal::NoInvite) => s.invite_gone.to_owned(),
+            Self::Refused(Refusal::Busy) => s.device_busy.to_owned(),
+            Self::Refused(Refusal::Paired) => s.device_paired.to_owned(),
+            Self::Refused(Refusal::NotHolder) => s.only_holder_pairs.to_owned(),
+            Self::Refused(Refusal::Full) => s.ring_full.to_owned(),
+            Self::Refused(Refusal::Internal) | Self::Protocol => s.bad_answer.to_owned(),
+            Self::Io(_) => s.no_link.to_owned(),
+            Self::Ring(_) => s.pair_save_failed.to_owned(),
         }
+    }
+
+    /// In words for the `nikgobd` command line, in the active process locale.
+    pub fn user_message(&self) -> String {
+        self.user_message_in(nikgob_core::i18n::locale())
     }
 }
 
