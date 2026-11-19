@@ -151,8 +151,8 @@ fn file_len(path: &Path) -> Option<u64> {
 }
 
 /// The bytes of the audio under `dir` (the sidecars beside the originals
-/// are not music, nor are dot names: `.nikgob-backup`'s copies of the
-/// database and the like). Links are not followed.
+/// and any other file are not music, nor are dot names: `.nikgob-backup`'s
+/// copies of the database and the like). Links are not followed.
 fn folder_size(dir: &Path) -> u64 {
     let mut total = 0u64;
     let mut todo = vec![dir.to_owned()];
@@ -165,18 +165,12 @@ fn folder_size(dir: &Path) -> u64 {
             let Ok(kind) = e.file_type() else { continue };
             if kind.is_dir() {
                 todo.push(e.path());
-            } else if kind.is_file() && !is_sidecar(&e.path()) {
+            } else if kind.is_file() && nikgob_import::fsutil::is_audio_file(&e.path()) {
                 total = total.saturating_add(e.metadata().map(|m| m.len()).unwrap_or(0));
             }
         }
     }
     total
-}
-
-fn is_sidecar(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "json" | "tmp" | "part"))
 }
 
 /// The folders of the files at `absolute` that are not under the library
@@ -368,9 +362,10 @@ mod tests {
 
     /// The originals' folder keeps out its dot names: `.nikgob-backup` is
     /// the database's own, not music, and a dot file or folder inside is
-    /// no original either.
+    /// no original either. Only audio counts: covers, sheets and anything
+    /// else beside the originals are not.
     #[test]
-    fn the_originals_folder_count_skips_dot_names() {
+    fn the_originals_folder_count_skips_dot_names_and_other_files() {
         let dir = tempfile::tempdir().unwrap();
         let masters = dir.path().join("FLAC");
         std::fs::create_dir_all(masters.join("ab")).unwrap();
@@ -379,6 +374,10 @@ mod tests {
         std::fs::write(masters.join("ab").join("x.flac"), vec![0u8; 5_000]).unwrap();
         std::fs::write(masters.join("ab").join(".y.flac"), vec![0u8; 700]).unwrap();
         std::fs::write(masters.join("ab").join(".hidden").join("z.flac"), vec![0u8; 900]).unwrap();
+        std::fs::write(masters.join("ab").join("cover.jpg"), vec![0u8; 800]).unwrap();
+        std::fs::write(masters.join("ab").join("x.cue"), vec![0u8; 100]).unwrap();
+        std::fs::write(masters.join("ab").join("x.json"), vec![0u8; 300]).unwrap();
+        std::fs::write(masters.join("library-1.sqlite"), vec![0u8; 4_000]).unwrap();
         std::fs::write(masters.join(".nikgob-backup").join("library-1.sqlite"), vec![0u8; 12_000]).unwrap();
         assert_eq!(folder_size(&masters), 5_000);
     }

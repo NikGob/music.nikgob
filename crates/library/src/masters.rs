@@ -381,7 +381,7 @@ impl Library {
     /// The files a verified copy on device `node` is noted for.
     pub fn replica_hashes(&self, node: &str) -> Result<HashSet<String>> {
         self.read(|c| {
-            let mut stmt = c.prepare_cached("SELECT file_hash FROM replica WHERE node_id = ?1")?;
+            let mut stmt = c.prepare_cached("SELECT file_hash FROM replica WHERE node_id = ?1 AND verified_at IS NOT NULL")?;
             let rows = stmt.query_map([node], |r| r.get(0))?;
             Ok(rows.collect::<rusqlite::Result<HashSet<_>>>()?)
         })
