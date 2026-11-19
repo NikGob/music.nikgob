@@ -194,7 +194,7 @@ mod tests {
         assert!(!t.expired(t.expires_ms - 1));
         assert!(t.expired(t.expires_ms));
         assert_eq!(TicketError::Expired.message_in(nikgob_core::i18n::Locale::Ru), "Приглашение истекло");
-        assert_eq!(TicketError::Expired.message_in(nikgob_core::i18n::Locale::En), "The invite has expired");
-        assert_eq!(TicketError::NotATicket.message_in(nikgob_core::i18n::Locale::En), "Not an invite");
+        assert_eq!(TicketError::Expired.message_in(nikgob_core::i18n::Locale::En), "The invitation has expired");
+        assert_eq!(TicketError::NotATicket.message_in(nikgob_core::i18n::Locale::En), "Not an invitation");
     }
 }

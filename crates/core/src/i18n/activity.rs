@@ -765,8 +765,8 @@ pub static EN: ActivityStrings = ActivityStrings {
     listening_now: "Listening now",
     track_one: "track",
 
-    and_more: "and more",
-    and_last: "and",
+    and_more: "& more",
+    and_last: "&",
     hero_favorites: "favorites and similar music",
     hero_listen: "Keep listening — your mix builds on what you like.",
     by_sound: "sound",

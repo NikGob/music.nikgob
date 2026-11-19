@@ -5329,7 +5329,7 @@ mod tests {
         assert_eq!(playback_error_toast(Locale::Ru, None, None), (errors_in(Locale::Ru).playback_failed.to_owned(), None));
         assert_eq!(
             playback_error_toast(Locale::En, Some("Song".into()), None),
-            ("Failed to play track".to_owned(), None),
+            ("Could not play the track".to_owned(), None),
         );
         assert_eq!(
             playback_error_toast(Locale::Ru, Some("Song".into()), None),

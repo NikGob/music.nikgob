@@ -220,7 +220,7 @@ pub static SOUND_FACTS_EN: SoundFactStrings = SoundFactStrings {
     src_spotify: "Spotify stream",
     src_youtube: "YouTube Music stream",
     src_soundcloud: "SoundCloud stream",
-    original_suffix: "of the source",
+    original_suffix: "from the source",
 };
 
 locale_table! {
@@ -769,16 +769,16 @@ mod tests {
         assert_eq!(player_in(Locale::Ru).nothing_playing, "Ничего не играет");
         assert_eq!(player_in(Locale::En).nothing_playing, "Nothing playing");
         assert_eq!(player_in(Locale::Ru).repeat_one_tip, "Повторяется этот трек — нажми, чтобы выключить");
-        assert_eq!(player_in(Locale::En).repeat_one_tip, "Repeating this track — press to turn off");
+        assert_eq!(player_in(Locale::En).repeat_one_tip, "Repeating this track — select to turn repeat off.");
     }
 
     #[test]
     fn find_song_origin_translates_and_parses_legacy() {
         let o = QueueOrigin::FindSong;
         assert_eq!(o.header_in(Locale::Ru, false).0, "Играет из «Найти песню»");
-        assert_eq!(o.header_in(Locale::En, false).0, "Playing from “Find song”");
+        assert_eq!(o.header_in(Locale::En, false).0, "Playing from “Find a song”");
         assert_eq!(o.save_name_in(Locale::Ru).as_deref(), Some("Найти песню"));
-        assert_eq!(o.save_name_in(Locale::En).as_deref(), Some("Find song"));
+        assert_eq!(o.save_name_in(Locale::En).as_deref(), Some("Find a song"));
         assert_eq!(o.legacy_text().as_deref(), Some("Найти песню"));
         assert_eq!(QueueOrigin::from_legacy(Some("Найти песню")), o);
         assert_eq!(QueueOrigin::from_legacy(Some("Find song")), o);

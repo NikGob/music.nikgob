@@ -470,18 +470,18 @@ mod tests {
     #[test]
     fn mix_titles_translate_and_parse_legacy() {
         assert_eq!(MixTitle::Daily.title_in(Locale::Ru), "Микс дня");
-        assert_eq!(MixTitle::Daily.title_in(Locale::En), "Daily mix");
+        assert_eq!(MixTitle::Daily.title_in(Locale::En), "Daily Mix");
         assert_eq!(MixTitle::Genre(7).title_in(Locale::Ru), "Хип-хоп микс");
-        assert_eq!(MixTitle::Genre(7).title_in(Locale::En), "Hip-hop mix");
-        assert_eq!(MixTitle::Artist("Кино".into()).title_in(Locale::En), "Кино mix");
+        assert_eq!(MixTitle::Genre(7).title_in(Locale::En), "Hip-Hop Mix");
+        assert_eq!(MixTitle::Artist("Кино".into()).title_in(Locale::En), "Кино Mix");
         assert_eq!(MixTitle::from_legacy("Микс дня"), MixTitle::Daily);
         assert_eq!(MixTitle::from_legacy("Хип-хоп микс"), MixTitle::Genre(7));
         assert_eq!(MixTitle::from_legacy("Микс: ZUTOMAYO"), MixTitle::Artist("ZUTOMAYO".into()));
 
         assert_eq!(MixTitle::from_legacy("Микс 90-х"), MixTitle::Era(1990));
-        assert_eq!(MixTitle::Era(1990).title_in(Locale::En), "90s mix");
+        assert_eq!(MixTitle::Era(1990).title_in(Locale::En), "90s Mix");
         assert_eq!(MixTitle::from_legacy("Микс 2010-х"), MixTitle::Era(2010));
-        assert_eq!(MixTitle::Era(2010).title_in(Locale::En), "2010s mix");
+        assert_eq!(MixTitle::Era(2010).title_in(Locale::En), "2010s Mix");
 
         assert_eq!(MixTitle::from_legacy("Похоже на Underground River"), MixTitle::BecauseYouLiked("Underground River".into()));
         assert_eq!(MixTitle::from_legacy("Похоже на «Underground River»"), MixTitle::BecauseYouLiked("Underground River".into()));
@@ -497,7 +497,7 @@ mod tests {
 
         let ru_calm = MixTitle::Side { calm: true, flavor: SideMixFlavor::Russian };
         assert_eq!(ru_calm.title_in(Locale::Ru), "Русские песни потише");
-        assert_eq!(ru_calm.title_in(Locale::En), "Calm Russian songs");
+        assert_eq!(ru_calm.title_in(Locale::En), "Calm Russian Songs");
         assert_eq!(MixTitle::from_legacy("Русские песни потише"), ru_calm);
         assert_eq!(MixTitle::from_legacy("Бодрое без слов"), MixTitle::Side { calm: false, flavor: SideMixFlavor::Instrumental });
         assert_eq!(MixTitle::from_legacy("Погромче"), MixTitle::Side { calm: false, flavor: SideMixFlavor::Plain });
@@ -676,9 +676,9 @@ mod tests {
 
         let mix = RadioTitle::Mix(MixTitle::Genre(7));
         assert_eq!(mix.title_in(Locale::Ru), "Хип-хоп микс");
-        assert_eq!(mix.title_in(Locale::En), "Hip-hop mix");
+        assert_eq!(mix.title_in(Locale::En), "Hip-Hop Mix");
         assert_eq!(mix.queue_header_in(Locale::Ru), "Микс · Хип-хоп микс");
-        assert_eq!(mix.queue_header_in(Locale::En), "Mix · Hip-hop mix");
+        assert_eq!(mix.queue_header_in(Locale::En), "Mix · Hip-Hop Mix");
         assert_eq!(mix.seed_name(), None);
         assert_eq!(mix.to_queue_origin(), QueueOrigin::Mix(MixTitle::Genre(7)));
 

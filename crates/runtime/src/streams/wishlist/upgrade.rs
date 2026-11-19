@@ -1076,7 +1076,7 @@ mod tests {
         let mut fake = Source::new(TrackId::new(), SourceKind::LocalFile, "a.flac", Codec::Flac);
         fake.quality_score = score::FAKE_LOSSLESS;
         assert_eq!(file_label(&fake), "FLAC из lossy", "the score says, not the extension");
-        assert_eq!(file_label_in(Locale::En, &fake), "FLAC from lossy");
+        assert_eq!(file_label_in(Locale::En, &fake), "FLAC from a lossy source");
         // Cut where a real master may be cut too: ranked as an MP3 320.
         fake.quality_score = score::MP3_320;
         assert_eq!(file_label(&fake), "FLAC, возможно из lossy");

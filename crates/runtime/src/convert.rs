@@ -1231,7 +1231,7 @@ mod tests {
                 ("Channels", "stereo"),
                 ("Duration", "2:32"),
                 ("Size", "25.5 MB"),
-                ("Source", "Downloaded or local file"),
+                ("Source", "Downloaded or added from a file"),
             ]
         );
         assert!(d_en.verdict.as_deref().unwrap().starts_with("Not true lossless"));
@@ -1259,7 +1259,7 @@ mod tests {
         assert_eq!(conv.band.as_deref(), Some("до 16,0 кГц (у исходника)"));
         let conv_en = sound_details_in(&mp3, Some(Path::new("a/07 - Молли.mp3")), None, None, Some(&check(Verdict::Transcoded, 16_000.0, Some(Codec::Flac))), Locale::En);
         assert!(conv_en.verdict.as_deref().unwrap().starts_with("Encoded from fake FLAC"));
-        assert_eq!(conv_en.band.as_deref(), Some("up to 16.0 kHz (from original)"));
+        assert_eq!(conv_en.band.as_deref(), Some("up to 16.0 kHz (from the source)"));
         assert!(!conv.to_mp3, "an MP3 already");
         // The original in the Trash (it may still be playing): nothing to do.
         let mut gone = flac.clone();

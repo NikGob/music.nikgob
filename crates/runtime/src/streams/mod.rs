@@ -874,9 +874,12 @@ mod tests {
 
         assert_eq!(error_text_in(&StreamError::Unavailable, Locale::Ru), errors_in(Locale::Ru).stream_unavailable);
         assert_eq!(error_text_in(&StreamError::Unavailable, Locale::En), "Unavailable");
-        assert_eq!(error_text_in(&StreamError::NotLoggedIn, Locale::En), "Sign in required");
+        assert_eq!(error_text_in(&StreamError::NotLoggedIn, Locale::En), "Sign-in required");
         assert_eq!(error_text_in(&StreamError::Http { status: 503 }, Locale::En), "Service returned an error (HTTP 503)");
         assert_eq!(error_text_in(&StreamError::Network("dns".into()), Locale::En), "No connection — check your internet");
-        assert_eq!(error_text_in(&StreamError::RateLimited { retry_after: None }, Locale::En), "Service asks to wait");
+        assert_eq!(
+            error_text_in(&StreamError::RateLimited { retry_after: None }, Locale::En),
+            "Please wait before using the service"
+        );
     }
 }

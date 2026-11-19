@@ -1273,7 +1273,7 @@ mod tests {
         let refused = "i/o error: stream URL keeps being refused (HTTP 403)";
         assert!(!video_refused(refused));
         assert_eq!(failure_text_in(refused, false, yt, Locale::Ru).0, "YouTube сейчас не отдаёт звук — попробуй чуть позже");
-        assert_eq!(failure_text_in(refused, false, yt, Locale::En).0, "YouTube is refusing audio right now — try again later");
+        assert_eq!(failure_text_in(refused, false, yt, Locale::En).0, "YouTube audio is unavailable right now — try again later");
         let offline = "network error: error sending request: dns error";
         assert!(!video_refused(offline));
         assert_eq!(failure_text_in(offline, false, yt, Locale::Ru).0, "нет связи с YouTube — проверь интернет");

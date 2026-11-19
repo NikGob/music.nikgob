@@ -3818,7 +3818,7 @@ mod tests {
         assert!(!w(Some("RuTracker"), None, false).contains("ищу"));
         assert_eq!(
             nikgob_core::i18n::status::fmt_wrong_audio_in(Locale::En, Some("Soulseek"), Some("Song"), false),
-            "The file from Soulseek holds another song — “Song”"
+            "Wrong song in the file from Soulseek — “Song”"
         );
     }
 

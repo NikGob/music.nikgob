@@ -40,12 +40,12 @@ pub static RU: HomeRecsStrings = HomeRecsStrings {
 
 pub static EN: HomeRecsStrings = HomeRecsStrings {
     my_wave: "My Wave",
-    listen_again: "Listen again",
+    listen_again: "Listen Again",
     discover: "Discover",
     mixes_for_you: "Mixes for you",
     of_day: "Daily picks",
-    your_mix: "Your mix",
-    daily_mix: "Daily mix",
+    your_mix: "Your Mix",
+    daily_mix: "Daily Mix",
     kicker_for_today: "For today",
     next_on_album: "Next on the album",
     similar_sound: "Similar sound",
@@ -106,8 +106,8 @@ impl BackgroundVariant {
             (Locale::Ru, Self::Quiet) => "Фон потише",
             (Locale::Ru, Self::Lively) => "Фон поживее",
             (Locale::En, Self::Plain) => "Background",
-            (Locale::En, Self::Quiet) => "Quieter background",
-            (Locale::En, Self::Lively) => "Livelier background",
+            (Locale::En, Self::Quiet) => "Quieter Background",
+            (Locale::En, Self::Lively) => "Livelier Background",
         }
     }
 }
@@ -171,18 +171,18 @@ impl TileStatic {
             (Locale::Ru, Self::Unfinished) => "Недослушанные альбомы",
             (Locale::Ru, Self::NotDownloaded) => "Ещё не скачано",
             (Locale::Ru, Self::Lottery) => "Лотерея",
-            (Locale::En, Self::OnRepeat) => "On repeat",
-            (Locale::En, Self::Rediscover) => "Forgotten favorites",
-            (Locale::En, Self::FirstLikes) => "First likes",
-            (Locale::En, Self::FreshLikes) => "Recent likes",
-            (Locale::En, Self::Unplayed) => "Waiting to play",
-            (Locale::En, Self::DeepCuts) => "Artist deep cuts",
-            (Locale::En, Self::Long) => "Long tracks",
-            (Locale::En, Self::Short) => "Short tracks",
-            (Locale::En, Self::SingAlong) => "With lyrics",
-            (Locale::En, Self::Unfinished) => "Unfinished albums",
-            (Locale::En, Self::NotDownloaded) => "Not downloaded yet",
-            (Locale::En, Self::Lottery) => "Music lottery",
+            (Locale::En, Self::OnRepeat) => "On Repeat",
+            (Locale::En, Self::Rediscover) => "Forgotten Favorites",
+            (Locale::En, Self::FirstLikes) => "First Likes",
+            (Locale::En, Self::FreshLikes) => "Recent Likes",
+            (Locale::En, Self::Unplayed) => "Waiting to Play",
+            (Locale::En, Self::DeepCuts) => "Artist Deep Cuts",
+            (Locale::En, Self::Long) => "Long Tracks",
+            (Locale::En, Self::Short) => "Short Tracks",
+            (Locale::En, Self::SingAlong) => "With Lyrics",
+            (Locale::En, Self::Unfinished) => "Unfinished Albums",
+            (Locale::En, Self::NotDownloaded) => "Not Downloaded Yet",
+            (Locale::En, Self::Lottery) => "Music Lottery",
         }
     }
 }
@@ -241,16 +241,16 @@ impl TileKicker {
             (Locale::En, Self::OnRepeat) => "Most played",
             (Locale::En, Self::YearAgo) => "A year ago",
             (Locale::En, Self::Season) => "Time capsule",
-            (Locale::En, Self::Rediscover) => "Not played in a while",
+            (Locale::En, Self::Rediscover) => "Long unplayed",
             (Locale::En, Self::FirstLikes) => "From the start",
             (Locale::En, Self::FreshLikes) => "Recently",
             (Locale::En, Self::Unplayed) => "Never played",
             (Locale::En, Self::DeepCuts) => "Your artists",
-            (Locale::En, Self::ArtistOfDay) => "Artist of the day",
-            (Locale::En, Self::Comeback) => "Not heard in a while",
+            (Locale::En, Self::ArtistOfDay) => "Daily artist",
+            (Locale::En, Self::Comeback) => "Long unheard",
             (Locale::En, Self::BecauseYouLiked) => "You liked",
-            (Locale::En, Self::Long) => "Long tracks",
-            (Locale::En, Self::Short) => "Short tracks",
+            (Locale::En, Self::Long) => "Extended",
+            (Locale::En, Self::Short) => "Brief",
             (Locale::En, Self::SingAlong) => "Sing along",
             (Locale::En, Self::Language) => "By language",
             (Locale::En, Self::Decade) => "By decade",
@@ -406,15 +406,15 @@ impl SideMixFlavor {
             Locale::En => {
                 let adj = if calm { "Calm" } else { "Upbeat" };
                 match self {
-                    Self::Russian => format!("{adj} Russian songs"),
-                    Self::Japanese => format!("{adj} Japanese songs"),
-                    Self::Korean => format!("{adj} Korean songs"),
-                    Self::English => format!("{adj} English songs"),
-                    Self::Spanish => format!("{adj} Spanish songs"),
-                    Self::French => format!("{adj} French songs"),
-                    Self::German => format!("{adj} German songs"),
-                    Self::OtherLang | Self::Songs => format!("{adj} songs"),
-                    Self::Instrumental => format!("{adj} instrumental"),
+                    Self::Russian => format!("{adj} Russian Songs"),
+                    Self::Japanese => format!("{adj} Japanese Songs"),
+                    Self::Korean => format!("{adj} Korean Songs"),
+                    Self::English => format!("{adj} English Songs"),
+                    Self::Spanish => format!("{adj} Spanish Songs"),
+                    Self::French => format!("{adj} French Songs"),
+                    Self::German => format!("{adj} German Songs"),
+                    Self::OtherLang | Self::Songs => format!("{adj} Songs"),
+                    Self::Instrumental => format!("{adj} Instrumental"),
                     Self::Plain => adj.to_owned(),
                 }
             }
@@ -455,12 +455,12 @@ impl MixTitle {
             Self::Daily => Cow::Borrowed(home_recs_in(loc).daily_mix),
             Self::Everything => Cow::Borrowed(match loc {
                 Locale::Ru => "Всё вперемешку",
-                Locale::En => "All mixed",
+                Locale::En => "All Mixed",
             }),
             Self::OnRepeat => Cow::Borrowed(TileStatic::OnRepeat.title_in(loc)),
             Self::Liked => Cow::Borrowed(match loc {
                 Locale::Ru => "Микс любимых",
-                Locale::En => "Liked mix",
+                Locale::En => "Liked Mix",
             }),
             Self::Wave => Cow::Borrowed(home_recs_in(loc).my_wave),
             Self::Background(v) => Cow::Borrowed(v.title_in(loc)),
@@ -493,21 +493,21 @@ impl MixTitle {
                 }
                 Locale::En => {
                     if (1900..2000).contains(decade) {
-                        format!("{}s mix", decade % 100)
+                        format!("{}s Mix", decade % 100)
                     } else {
-                        format!("{decade}s mix")
+                        format!("{decade}s Mix")
                     }
                 }
             }),
             Self::Artist(name) => Cow::Owned(match loc {
                 Locale::Ru => format!("Микс: {name}"),
-                Locale::En => format!("{name} mix"),
+                Locale::En => format!("{name} Mix"),
             }),
             Self::Energy { calm } => Cow::Borrowed(match (loc, calm) {
                 (Locale::Ru, true) => "Спокойный микс",
                 (Locale::Ru, false) => "Бодрый микс",
-                (Locale::En, true) => "Calm mix",
-                (Locale::En, false) => "Upbeat mix",
+                (Locale::En, true) => "Calm Mix",
+                (Locale::En, false) => "Upbeat Mix",
             }),
             Self::Side { calm, flavor } => Cow::Owned(flavor.title_in(*calm, loc)),
             Self::Tile(t) => Cow::Borrowed(t.title_in(loc)),
@@ -667,7 +667,7 @@ pub const fn day_part_title_in(loc: Locale, part: u8) -> &'static str {
         (Locale::Ru, 1) => "День",
         (Locale::Ru, 2) => "Вечер",
         (Locale::Ru, _) => "Ночь",
-        (Locale::En, 0) => "Good morning",
+        (Locale::En, 0) => "Good Morning",
         (Locale::En, 1) => "Daytime",
         (Locale::En, 2) => "Evening",
         (Locale::En, _) => "Night",
@@ -704,29 +704,29 @@ pub const fn genre_family_title_in(loc: Locale, id: u8) -> Option<&'static str> 
             _ => return None,
         },
         Locale::En => match id {
-            1 => "J-pop mix",
-            2 => "K-pop mix",
-            3 => "J-rock mix",
-            4 => "Post-punk mix",
-            5 => "Latin mix",
-            6 => "Reggae mix",
-            7 => "Hip-hop mix",
-            8 => "Metal mix",
-            9 => "Punk mix",
-            10 => "Indie mix",
-            11 => "Rock mix",
-            12 => "Pop mix",
-            13 => "Soundtrack mix",
-            14 => "Lo-fi mix",
-            15 => "Ambient mix",
-            16 => "Electronic mix",
-            17 => "R&B mix",
-            18 => "Jazz mix",
-            19 => "Blues mix",
-            20 => "Classical mix",
-            21 => "Country mix",
-            22 => "Folk mix",
-            23 => "Disco mix",
+            1 => "J-Pop Mix",
+            2 => "K-Pop Mix",
+            3 => "J-Rock Mix",
+            4 => "Post-Punk Mix",
+            5 => "Latin Mix",
+            6 => "Reggae Mix",
+            7 => "Hip-Hop Mix",
+            8 => "Metal Mix",
+            9 => "Punk Mix",
+            10 => "Indie Mix",
+            11 => "Rock Mix",
+            12 => "Pop Mix",
+            13 => "Soundtrack Mix",
+            14 => "Lo-Fi Mix",
+            15 => "Ambient Mix",
+            16 => "Electronic Mix",
+            17 => "R&B Mix",
+            18 => "Jazz Mix",
+            19 => "Blues Mix",
+            20 => "Classical Mix",
+            21 => "Country Mix",
+            22 => "Folk Mix",
+            23 => "Disco Mix",
             _ => return None,
         },
     })
@@ -904,7 +904,7 @@ impl SungLang {
 pub fn fmt_lang_songs_in(loc: Locale, adjective: &str) -> String {
     match loc {
         Locale::Ru => format!("{adjective} песни"),
-        Locale::En => format!("{adjective} songs"),
+        Locale::En => format!("{adjective} Songs"),
     }
 }
 
@@ -930,7 +930,7 @@ impl ProfileKind {
             (Locale::Ru, Self::Calm) => "Спокойное",
             (Locale::Ru, Self::Lively) => "Бодрое",
             (Locale::En, Self::Instrumental) => "Instrumental",
-            (Locale::En, Self::InstrumentalSoundtracks) => "Instrumental soundtracks",
+            (Locale::En, Self::InstrumentalSoundtracks) => "Instrumental Soundtracks",
             (Locale::En, Self::Songs) => "Songs",
             (Locale::En, Self::Soundtracks) => "Soundtracks",
             (Locale::En, Self::Calm) => "Calm",
@@ -1044,10 +1044,10 @@ pub const fn day_part_noun_ru(part: u8) -> (&'static str, DayGender) {
 /// The English noun of a day part (`0` morning .. `3` night).
 pub const fn day_part_noun_en(part: u8) -> &'static str {
     match part {
-        0 => "morning",
-        1 => "afternoon",
-        2 => "evening",
-        _ => "night",
+        0 => "Morning",
+        1 => "Afternoon",
+        2 => "Evening",
+        _ => "Night",
     }
 }
 
@@ -1164,7 +1164,7 @@ pub const fn blend_word_in(loc: Locale, word: BlendWord) -> &'static str {
 pub const fn blend_songs_noun_in(loc: Locale) -> &'static str {
     match loc {
         Locale::Ru => "песни",
-        Locale::En => "songs",
+        Locale::En => "Songs",
     }
 }
 
@@ -1303,7 +1303,7 @@ mod tests {
         assert_eq!(SungLang::Russian.adjective_in(Locale::Ru), "Русские");
         assert_eq!(SungLang::German.adjective_in(Locale::En), "German");
         assert_eq!(fmt_lang_songs_in(Locale::Ru, "Русские"), "Русские песни");
-        assert_eq!(fmt_lang_songs_in(Locale::En, "Russian"), "Russian songs");
+        assert_eq!(fmt_lang_songs_in(Locale::En, "Russian"), "Russian Songs");
         assert_eq!(loudness_word_in(Locale::Ru, true), "потише");
         assert_eq!(loudness_word_in(Locale::En, false), "louder");
         assert_eq!(fmt_artists_pair_in(Locale::Ru, "Eve", "Radwimps"), "Eve и Radwimps");
@@ -1316,7 +1316,7 @@ mod tests {
     fn daylist_style_and_blend_names_translate() {
         // Day 0 was a Thursday; quiet, dark, steady is cell 1.
         assert_eq!(daylist_name_in(Locale::Ru, 1, 0, 1, 0), "Тягучий день четверга");
-        assert!(daylist_name_in(Locale::En, 1, 0, 1, 0).ends_with(" Thursday afternoon"));
+        assert!(daylist_name_in(Locale::En, 1, 0, 1, 0).ends_with(" Thursday Evening"));
         let morning = daylist_name_in(Locale::Ru, 6, 0, 0, 4);
         assert!(morning.ends_with("ое утро понедельника"), "{morning}");
         assert_eq!(weekday_genitive_ru(0), "четверга");
@@ -1330,7 +1330,7 @@ mod tests {
         assert_eq!(blend_word_in(Locale::Ru, BlendWord::Wordless), "без слов");
         assert_eq!(blend_word_in(Locale::En, BlendWord::Upbeat), "upbeat");
         assert_eq!(blend_songs_noun_in(Locale::Ru), "песни");
-        assert_eq!(blend_songs_noun_in(Locale::En), "songs");
+        assert_eq!(blend_songs_noun_in(Locale::En), "Songs");
         assert_eq!(join_adjectives_in(Locale::Ru, &["Russian", "Japanese", "English"]), "Russian, japanese и english");
         assert_eq!(join_adjectives_in(Locale::En, &["Russian", "Japanese", "English"]), "Russian, Japanese & English");
         assert_eq!(blend_adjectives_in(Locale::Ru, &["Русские", "Японские"]), "Русские и японские");

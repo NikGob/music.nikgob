@@ -277,16 +277,19 @@ mod tests {
         let why = recs.why_world_mix(unheard, "Мир", &name, Locale::Ru).unwrap();
         assert!(why.starts_with("Ты не слышал; по звуку ближе всего к T"), "{why}");
         let why_en = recs.why_world_mix(unheard, "World", &name, Locale::En).unwrap();
-        assert!(why_en.starts_with("Unheard; closest in sound to T"), "{why_en}");
+        assert!(why_en.starts_with("Not played yet; sounds closest to T"), "{why_en}");
         assert_eq!(recs.why_world_mix(of(WorldMixKind::Best), "Мир", &name, Locale::Ru).as_deref(), Some("Что ты дослушивал чаще всего в Мир"));
-        assert_eq!(recs.why_world_mix(of(WorldMixKind::Best), "World", &name, Locale::En).as_deref(), Some("What you finished most in World"));
+        assert_eq!(
+            recs.why_world_mix(of(WorldMixKind::Best), "World", &name, Locale::En).as_deref(),
+            Some("Tracks you most often play to the end in World")
+        );
         let road = crate::WorldMix { kind: WorldMixKind::Road, tracks: vec![0], near: None };
         assert_eq!(recs.why_world_mix(&road, "Мир", &name, Locale::Ru).as_deref(), Some("Звучит как твой Мир, но из других миров"));
         assert_eq!(recs.why_world_mix(&road, "World", &name, Locale::En).as_deref(), Some("Sounds like your World, from other worlds"));
         let pick = |i: u128, reason| Pick { item: crate::Item::Track(tid(i)), reason };
         let title = |_: TrackId| Some("Рассел кроу".to_owned());
         assert_eq!(recs.why_pick(&pick(1, Reason::NextOnAlbum), None, &title, Locale::Ru).as_deref(), Some("Следующий на альбоме"));
-        assert_eq!(recs.why_pick(&pick(1, Reason::NextOnAlbum), None, &title, Locale::En).as_deref(), Some("Next on album"));
+        assert_eq!(recs.why_pick(&pick(1, Reason::NextOnAlbum), None, &title, Locale::En).as_deref(), Some("Next on the album"));
         assert_eq!(
             recs.why_pick(&pick(1, Reason::FollowsOften(tid(0))), None, &title, Locale::Ru).as_deref(),
             Some("После Рассел кроу: часто идёт следом")
