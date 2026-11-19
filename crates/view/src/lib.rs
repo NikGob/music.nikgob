@@ -4018,6 +4018,9 @@ pub enum Command {
     /// From the mesh: what the devices hold of this computer's masters
     /// changed (the masters that may go are looked at again).
     ReplicaCopiesChanged,
+    /// From the mesh: a pulled file was put into this device's library
+    /// (the music's size is counted again).
+    ReplicaFileKept,
 }
 
 impl Default for Prefs {

@@ -977,6 +977,21 @@ impl Library {
         self.read(|c| Ok(meta_get(c, &aside_key(source))?.is_some()))
     }
 
+    /// A file's hash and size as they are now, after something rewrote it
+    /// in place (tags, an embedded cover), only while the row still has
+    /// `old` (else a newer note won). Whether it changed. Synced like any
+    /// edit: the other devices ask for the file by its new hash.
+    pub fn refresh_source_file(&self, source: SourceId, old: &str, hash: &str, size: u64) -> Result<bool> {
+        self.write(|tx| {
+            let n = tx.execute(
+                "UPDATE source SET file_hash = ?3, size_bytes = ?4
+                  WHERE id = ?1 AND lower(file_hash) = lower(?2) AND kind = 'local_file'",
+                params![source.to_string(), old, hash, size as i64],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
     pub fn get_source(&self, id: SourceId) -> Result<Option<Source>> {
         self.read(|c| source_by_id(c, id))
     }

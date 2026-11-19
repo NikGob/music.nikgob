@@ -316,6 +316,20 @@ mod tests {
         let r = local.call(pi.clone(), get(&format!("/v1/media/tracks/{}/audio?hash={hash}", u.id))).await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND, "not a file of this song");
 
+        // Its tags rewritten in place: the old hash finds nothing, and the
+        // library notes the file as it is, so the next ask by its new hash
+        // gets it.
+        let retagged: Vec<u8> = bytes.iter().copied().chain(*b"TAGS").collect();
+        std::fs::write(&opus, &retagged).unwrap();
+        let nhash = blake3::hash(&retagged).to_hex().to_string();
+        let r = local.call(pi.clone(), get(&by_hash)).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "the old file is gone");
+        let src = library.sources_of_track(u.id).unwrap().into_iter().find(|x| x.id == s.id).unwrap();
+        assert_eq!((src.file_hash.as_deref(), src.size_bytes), (Some(nhash.as_str()), Some(retagged.len() as u64)), "noted anew");
+        let r = local.call(pi.clone(), get(&format!("/v1/media/tracks/{}/audio?profile=orig&hash={nhash}", u.id))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(body(r).await.as_ref(), retagged.as_slice());
+
         let check = |rehash: bool| {
             let ask = CheckAsk { hashes: vec![hash.clone(), missing.clone()], rehash };
             axum::http::Request::post("/v1/replica/check").body(Body::from(serde_json::to_vec(&ask).unwrap())).unwrap()

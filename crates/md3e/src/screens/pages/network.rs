@@ -10,8 +10,7 @@
 //!
 //! A card can be picked up and moved: let go near its place or onto
 //! another card it springs back, elsewhere it stays (for the session).
-//! While something flows the cards wander a few dp; at rest nothing moves
-//! and nothing is drawn again.
+//! Cards stand still; at rest nothing is drawn again.
 //!
 //! Between the cards nothing lies at rest. A line grows only while
 //! something flows: files on their way — a wave from this computer to the
@@ -59,8 +58,6 @@ const COURT: f32 = 48.0;
 const CARD_W_MAX: f32 = 340.0;
 /// A card dropped this near its place goes back to it.
 const SNAP_HOME: f32 = 48.0;
-/// How far a card wanders while something flows.
-const DRIFT_DP: f32 = 4.0;
 const PANE_W: f32 = 360.0;
 const GAP: f32 = 24.0;
 /// The foot of the mat: the nearby players and «Добавить устройство».
@@ -108,7 +105,9 @@ struct Dev<'a> {
 fn devices<'a>(state: &'a ViewState, wall: i64) -> Vec<Dev<'a>> {
     let m = &state.mesh;
     let p = &state.player;
-    let here = p.current.as_ref().filter(|_| p.status != nikgob_view::Status::Stopped).map(|t| {
+    // The player mirrors another device's music while this one is its
+    // remote: that card shows it, not this one.
+    let here = p.current.as_ref().filter(|_| state.target.is_none() && p.status != nikgob_view::Status::Stopped).map(|t| {
         let progress = p.duration.filter(|d| !d.is_zero()).map(|d| (p.position_now().as_secs_f32() / d.as_secs_f32()).clamp(0.0, 1.0));
         (t.title.clone(), t.artist.clone(), progress)
     });
@@ -127,6 +126,7 @@ fn devices<'a>(state: &'a ViewState, wall: i64) -> Vec<Dev<'a>> {
             let progress = pl.duration_ms.filter(|d| *d > 0).map(|d| (pl.position_at(wall) as f32 / d as f32).clamp(0.0, 1.0));
             (pl.title.clone(), pl.artists.join(", "), progress)
         });
+        let (bar, number) = mesh_ui::node_bar_and_line(n, &state.downloads.storage);
         out.push(Dev {
             id: &n.id,
             name: n.name.clone(),
@@ -134,8 +134,8 @@ fn devices<'a>(state: &'a ViewState, wall: i64) -> Vec<Dev<'a>> {
             look: mesh_ui::node_look(n),
             node: Some(n),
             playing,
-            bar: mesh_ui::bar_parts(n),
-            number: mesh_ui::storage_line(n),
+            bar,
+            number,
         });
     }
     out
@@ -228,15 +228,6 @@ pub(crate) fn drop_at(off: Vec2, home: Vec2, others: &[Vec2], size: Vec2, w: f32
     let r = Rect::from_center_size(Pos2::ZERO + off, vec2(w, CARD_H));
     let crowded = others.iter().any(|o| r.expand(COURT * 0.5).intersects(Rect::from_center_size(Pos2::ZERO + *o, vec2(w, CARD_H))));
     ((off - home).length() > SNAP_HOME && !crowded).then_some(off)
-}
-
-/// The slow wander of card `i` at `t` (s): a few dp, each card on its own
-/// period.
-pub(crate) fn drift(i: usize, t: f64) -> Vec2 {
-    let p = i as f64 * 1.7;
-    let x = (t * std::f64::consts::TAU / (11.0 + i as f64) + p).sin();
-    let y = (t * std::f64::consts::TAU / (13.0 + 0.5 * i as f64) + p * 1.3).cos();
-    vec2(x as f32, y as f32) * DRIFT_DP
 }
 
 /// Where the segment from `inside` toward `toward` leaves `rect` (the
@@ -345,14 +336,6 @@ fn map(ui: &mut Ui, area: Rect, state: &ViewState, devs: &[Dev<'_>], mem: &mut M
         .zip(&home)
         .map(|(d, h)| mem.map.dropped.get(d.id).map_or(*h, |f| inside(vec2(f.x * size.x, f.y * size.y), size, w)))
         .collect();
-    // While something flows the cards wander a little (the page draws
-    // anyway then); at rest they stand still and nothing is drawn.
-    let flowing = !theme.reduced_motion && devs.iter().any(|d| d.look.playing || d.node.is_some_and(|n| n.transfer.is_some()));
-    let wander = anim::fraction(&ctx, egui::Id::new("mesh-map-wander"), if flowing { 1.0 } else { 0.0 }, motion.slow_effects);
-    if wander > 0.001 {
-        ctx.request_repaint();
-    }
-    let t = anim::now(&ctx);
     let (pointer, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
     // Let go (wherever the release went): the card is no longer held.
     if !down {
@@ -364,8 +347,7 @@ fn map(ui: &mut Ui, area: Rect, state: &ViewState, devs: &[Dev<'_>], mem: &mut M
     let centres: Vec<Pos2> = devs
         .iter()
         .zip(&place)
-        .enumerate()
-        .map(|(i, (d, off))| {
+        .map(|(d, off)| {
             let id = egui::Id::new(("mesh-map-card-pos", d.id));
             let held = mem.map.drag.as_ref().filter(|(h, _)| h == d.id).map(|(_, grab)| *grab);
             if let (Some(grab), Some(p)) = (held, pointer) {
@@ -376,8 +358,7 @@ fn map(ui: &mut Ui, area: Rect, state: &ViewState, devs: &[Dev<'_>], mem: &mut M
                 return at;
             }
             let target = field.center() + *off;
-            let at = pos2(anim::f32(&ctx, id.with("x"), target.x, motion.default_spatial), anim::f32(&ctx, id.with("y"), target.y, motion.default_spatial));
-            at + drift(i, t) * wander
+            pos2(anim::f32(&ctx, id.with("x"), target.x, motion.default_spatial), anim::f32(&ctx, id.with("y"), target.y, motion.default_spatial))
         })
         .collect();
     let heights: Vec<f32> = devs
@@ -388,7 +369,7 @@ fn map(ui: &mut Ui, area: Rect, state: &ViewState, devs: &[Dev<'_>], mem: &mut M
     // What flows, under the cards.
     if let Some(this) = rects.first().copied() {
         for (i, d) in devs.iter().enumerate().skip(1) {
-            links(ui, this, rects[i], d, mem);
+            links(ui, this, rects[i], d, mem, state.target.as_ref().is_some_and(|t| t.node_id == d.id));
         }
     }
     let mut clicked = None;
@@ -595,9 +576,11 @@ fn guest_mark(ui: &mut Ui) {
 }
 
 /// What flows between this computer (`from`) and device `d` (`to`): the
-/// wave of files with their speed, the arc of music playing
-/// there. Each grows from this computer and fades away when it ends.
-fn links(ui: &mut Ui, from: Rect, to: Rect, d: &Dev<'_>, mem: &MeshUi) {
+/// wave of files with their speed, the arc of this computer's music
+/// playing there (`ours`: its remote; music the device plays on its own is
+/// only on its card). Each grows from this computer and fades away when it
+/// ends.
+fn links(ui: &mut Ui, from: Rect, to: Rect, d: &Dev<'_>, mem: &MeshUi, ours: bool) {
     let ctx = ui.ctx().clone();
     let theme = Theme::get(&ctx);
     let (s, motion) = (theme.scheme, theme.motion);
@@ -630,7 +613,7 @@ fn links(ui: &mut Ui, from: Rect, to: Rect, d: &Dev<'_>, mem: &MeshUi) {
     }
     // Music there: a calm arc bowed away from the courtyard, a dot running
     // along it.
-    let sound = anim::fraction(&ctx, id.with("sound"), if d.look.playing { 1.0 } else { 0.0 }, motion.slow_effects).clamp(0.0, 1.0);
+    let sound = anim::fraction(&ctx, id.with("sound"), if ours && d.look.playing { 1.0 } else { 0.0 }, motion.slow_effects).clamp(0.0, 1.0);
     if sound > 0.002 {
         let mid = a + (b - a) * 0.5;
         let dir = b - a;
@@ -905,17 +888,6 @@ mod tests {
         assert_eq!(far, vec2(-(500.0 - CARD_W * 0.5), 300.0 - CARD_H * 0.5), "kept inside the field");
     }
 
-    /// The wander is a few dp, never more, and each card has its own.
-    #[test]
-    fn the_cards_wander_a_little() {
-        for i in 0..5 {
-            for k in 0..200 {
-                let d = drift(i, f64::from(k) * 0.37);
-                assert!(d.x.abs() <= DRIFT_DP + 1e-3 && d.y.abs() <= DRIFT_DP + 1e-3, "{d:?}");
-            }
-        }
-        assert_ne!(drift(0, 3.0), drift(1, 3.0));
-    }
 
     #[test]
     fn a_line_leaves_a_card_at_its_edge() {

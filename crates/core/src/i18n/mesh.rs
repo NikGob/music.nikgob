@@ -4,6 +4,8 @@ use super::{Locale, PluralForms, plural_forms};
 
 /// Static strings: mesh (devices, network, pairing, replicas) UI and errors.
 pub struct MeshStrings {
+    /// «1,2 из 27,6 ГБ»: the word between the two sizes.
+    pub size_of: &'static str,
     /// A copied file whose hash did not match.
     pub file_damaged: &'static str,
     /// A device's kind in words: «Компьютер», «Raspberry Pi», «Телефон»…
@@ -93,6 +95,7 @@ pub struct MeshStrings {
 }
 
 pub static RU: MeshStrings = MeshStrings {
+    size_of: "из",
     file_damaged: "файл пришёл повреждённым",
     kind_pc: "Компьютер",
     kind_pi: "Raspberry Pi",
@@ -173,6 +176,7 @@ pub static RU: MeshStrings = MeshStrings {
 };
 
 pub static EN: MeshStrings = MeshStrings {
+    size_of: "of",
     file_damaged: "the file arrived damaged",
     kind_pc: "Computer",
     kind_pi: "Raspberry Pi",
