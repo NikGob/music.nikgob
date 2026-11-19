@@ -18,6 +18,8 @@ fake = []
 log.workspace = true
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
+# Stored wishlist notes and job lines (i18n/status.rs).
+serde_json = "1"
 thiserror = "2"
 directories = "6"
 uuid = { version = "1", features = ["v7", "serde"] }

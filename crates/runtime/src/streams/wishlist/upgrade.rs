@@ -400,9 +400,9 @@ impl Worker {
         let have = self.upgrade_have_words(item);
         have.map(|h| match h.below {
             Some((below, files)) => {
-                nikgob_core::i18n::status::fmt_how_many_of_in(loc, &file_label_in(loc, &h.worst), below, files)
+                nikgob_core::i18n::status::fmt_how_many_of_in(loc, &nikgob_core::i18n::status::fmt_quality_words_in(loc, &h.worst), below, files)
             }
-            None => file_label_in(loc, &h.worst),
+            None => nikgob_core::i18n::status::fmt_quality_words_in(loc, &h.worst),
         })
     }
 

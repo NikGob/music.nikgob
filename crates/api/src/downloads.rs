@@ -158,7 +158,7 @@ pub async fn inspect(State(sh): State<Arc<Shared>>) -> Result<Json<DownloadsAnsw
             artist: i.artist.clone(),
             status: i.status.as_str().to_owned(),
             scope: i.scope.as_str().to_owned(),
-            note: i.note.clone(),
+            note: i.note.as_deref().map(|n| nikgob_core::i18n::status::line_words_in(nikgob_core::i18n::Locale::En, n)),
             track_id: i.track_id.map(|t| t.to_string()),
             album_id: i.release_id.map(|r| r.to_string()),
         })
