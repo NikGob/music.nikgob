@@ -176,7 +176,12 @@ pub(crate) fn shown_job_in(loc: nikgob_core::i18n::Locale, j: &v::Job) -> v::Job
     let words = |s: &str| nikgob_core::i18n::status::job_line_words_in(loc, s);
     v::Job {
         title: words(&j.title),
-        subtitle: words(&j.subtitle).replace(LEGACY_PARKED, &parked_in(loc)),
+        // Old rows are Russian: their «ждут подтверждения» is put in the past
+        // tense only in Russian, never spliced into English.
+        subtitle: match loc {
+            nikgob_core::i18n::Locale::Ru => words(&j.subtitle).replace(LEGACY_PARKED, &parked_in(loc)),
+            _ => words(&j.subtitle),
+        },
         error: j.error.as_deref().map(words),
         ..j.clone()
     }
