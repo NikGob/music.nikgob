@@ -1471,7 +1471,7 @@ mod tests {
         assert_eq!(fmt_heard_when_in(Locale::Ru, Some(3)), "Слушал 3 дня назад");
         assert_eq!(fmt_heard_when_in(Locale::Ru, Some(4)), "Слушал 4 дня назад");
         assert_eq!(fmt_heard_when_in(Locale::Ru, Some(5)), "Слушал 5 дней назад");
-        assert_eq!(fmt_heard_when_in(Locale::En, Some(1)), "Listened 1 day ago");
+        assert_eq!(fmt_heard_when_in(Locale::En, Some(1)), "Listened yesterday");
         assert_eq!(fmt_heard_when_in(Locale::En, Some(4)), "Listened 4 days ago");
         assert_eq!(fmt_heard_when_in(Locale::Ru, Some(8)), "Слушал неделю назад");
         assert_eq!(fmt_heard_when_in(Locale::En, Some(8)), "Listened a week ago");

@@ -630,13 +630,13 @@ mod tests {
         assert_eq!(ago_in(Locale::Ru, now, now - 5 * 60_000), "5 мин назад");
         assert_eq!(ago_in(Locale::Ru, now, now - 3 * 3_600_000), "3 ч назад");
         assert_eq!(ago_in(Locale::Ru, now, now - 30 * 3_600_000), "вчера");
-        assert_eq!(ago_in(Locale::Ru, now, now - 86_400_000), "1 дн. назад");
+        assert_eq!(ago_in(Locale::Ru, now, now - 86_400_000), "вчера");
         assert_eq!(ago_in(Locale::Ru, now, now - 5 * 86_400_000), "5 дн. назад");
         assert_eq!(ago_in(Locale::En, now, now - 20_000), "just now");
         assert_eq!(ago_in(Locale::En, now, now - 5 * 60_000), "5 min ago");
         assert_eq!(ago_in(Locale::En, now, now - 3 * 3_600_000), "3 hr ago");
         assert_eq!(ago_in(Locale::En, now, now - 30 * 3_600_000), "yesterday");
-        assert_eq!(ago_in(Locale::En, now, now - 86_400_000), "1 day ago");
+        assert_eq!(ago_in(Locale::En, now, now - 86_400_000), "yesterday");
         assert_eq!(ago_in(Locale::En, now, now - 5 * 86_400_000), "5 days ago");
         assert_eq!(ago_in(Locale::Ru, now, now + 5_000), "только что", "a clock a little ahead");
     }

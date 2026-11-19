@@ -1040,13 +1040,6 @@ pub fn fmt_upgrade_job_words_in(
                     Locale::En => format!("the downloaded {codec} may be from {from} — kept the previous file"),
                 }
             }
-            (0, 1, Some(q)) if q.contains(s.from_lossy) => {
-                let (codec, from) = q.split_once(s.from_lossy).unwrap_or((q, ""));
-                match loc {
-                    Locale::Ru => format!("скачанный {codec} оказался из {from} — оставил прежний файл"),
-                    Locale::En => format!("the downloaded {codec} turned out to be from {from} — kept the previous file"),
-                }
-            }
             // A quality label of the importer's own («FLAC из MP3 ~128»).
             (0, 1, Some(q)) if q.contains(s.made_from) => {
                 let (codec, from) = q.split_once(s.made_from).unwrap_or((q, ""));

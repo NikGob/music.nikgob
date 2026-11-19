@@ -463,7 +463,9 @@ pub fn fmt_sleep_left_in(loc: Locale, left: Duration) -> String {
     let c = common_in(loc);
     let secs = left.as_secs();
     if secs < 60 {
-        format!("{secs} {}", c.sec_short)
+        // The chip is tight: «45 с» in Russian.
+        let sec = if loc == Locale::Ru { "с" } else { c.sec_short };
+        format!("{secs} {sec}")
     } else {
         format!("{} {}", secs.div_ceil(60), c.min_short)
     }
