@@ -19,6 +19,9 @@ use crate::{Later, Worker};
 
 /// After a change of the library, counted once it has been quiet this long.
 const QUIET: Duration = Duration::from_secs(5);
+/// Changes that never go quiet (files pulled one after another): counted
+/// at least this often while they come.
+const BUSY: Duration = Duration::from_secs(30);
 /// The free space changes by itself (downloads, other programs): counted
 /// again this often anyway.
 const REFRESH: Duration = Duration::from_secs(10 * 60);
@@ -27,6 +30,8 @@ const REFRESH: Duration = Duration::from_secs(10 * 60);
 pub(crate) struct Storage {
     /// The library changed since the count (and when it last did).
     changed: Option<Instant>,
+    /// The first change not counted yet.
+    pending: Option<Instant>,
     /// A count is on its way.
     busy: bool,
     /// When the last count was started.
@@ -36,7 +41,8 @@ pub(crate) struct Storage {
 impl Default for Storage {
     fn default() -> Self {
         // The first count right after the start.
-        Self { changed: Some(Instant::now().checked_sub(QUIET).unwrap_or_else(Instant::now)), busy: false, last: None }
+        let at = Instant::now().checked_sub(QUIET).unwrap_or_else(Instant::now);
+        Self { changed: Some(at), pending: Some(at), busy: false, last: None }
     }
 }
 
@@ -46,7 +52,8 @@ impl Storage {
         if self.busy {
             return false;
         }
-        let changed = self.changed.is_some_and(|at| now.saturating_duration_since(at) >= QUIET);
+        let changed = self.changed.is_some_and(|at| now.saturating_duration_since(at) >= QUIET)
+            || self.pending.is_some_and(|at| now.saturating_duration_since(at) >= BUSY);
         let stale = self.last.is_none_or(|at| now.saturating_duration_since(at) >= REFRESH);
         changed || stale
     }
@@ -55,7 +62,9 @@ impl Storage {
 impl Worker {
     /// The library changed: counted again once it is quiet.
     pub(crate) fn storage_changed(&mut self) {
-        self.storage.changed = Some(Instant::now());
+        let now = Instant::now();
+        self.storage.changed = Some(now);
+        self.storage.pending.get_or_insert(now);
     }
 
     /// Once a second: starts a count when one is due.
@@ -74,6 +83,7 @@ impl Worker {
         let later = self.later_tx.clone();
         self.storage.busy = true;
         self.storage.changed = None;
+        self.storage.pending = None;
         self.storage.last = Some(now);
         let spawned = std::thread::Builder::new().name("nikgob-storage".into()).spawn(move || {
             let view = count(&lib, &root, &library_dir, &masters_dir);
@@ -300,12 +310,23 @@ mod tests {
         assert!(s.due(now), "the first count at once");
         s.busy = true;
         assert!(!s.due(now), "one at a time");
-        s = Storage { changed: None, busy: false, last: Some(now) };
+        s = Storage { changed: None, pending: None, busy: false, last: Some(now) };
         assert!(!s.due(now + Duration::from_secs(60)));
         assert!(s.due(now + REFRESH));
         s.changed = Some(now);
+        s.pending = Some(now);
         assert!(!s.due(now + Duration::from_secs(2)), "an import still landing");
         assert!(s.due(now + QUIET));
+    }
+
+    #[test]
+    fn changes_that_never_go_quiet_are_counted_now_and_then() {
+        let now = Instant::now();
+        let mut s = Storage { changed: None, pending: Some(now), busy: false, last: Some(now) };
+        // A pulled file every few seconds: never quiet for long.
+        s.changed = Some(now + BUSY - Duration::from_secs(1));
+        assert!(!s.due(now + BUSY - Duration::from_secs(1)));
+        assert!(s.due(now + BUSY), "counted while the files still come");
     }
 
     #[test]

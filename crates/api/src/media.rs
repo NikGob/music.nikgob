@@ -17,7 +17,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
 
-use nikgob_core::model::{ReleaseId, SourceKind, TrackId};
+use nikgob_core::model::{ReleaseId, SourceId, SourceKind, TrackId};
 use nikgob_runtime::Resolver;
 
 use crate::Shared;
@@ -189,7 +189,7 @@ fn best_file(shared: &Shared, track: TrackId) -> Result<Option<(std::fs::File, P
 
 /// The song's local file whose BLAKE3 the library knows as `hash`, inside
 /// the served folders, open.
-fn file_of_hash(shared: &Shared, track: TrackId, hash: &str) -> Result<Option<(std::fs::File, PathBuf)>, ApiError> {
+fn file_of_hash(shared: &Shared, track: TrackId, hash: &str) -> Result<Option<(std::fs::File, PathBuf, SourceId)>, ApiError> {
     let sources = shared.lib.sources_of_track(track).map_err(db)?;
     let root = shared.rt.state().prefs.library_dir.clone();
     let resolver = Resolver::new(shared.lib.clone(), root);
@@ -198,7 +198,7 @@ fn file_of_hash(shared: &Shared, track: TrackId, hash: &str) -> Result<Option<(s
         .into_iter()
         .filter(|s| s.kind == SourceKind::LocalFile && s.available && s.trashed_at.is_none())
         .filter(|s| s.file_hash.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(hash)))
-        .find_map(|s| open_inside(&resolver.path(&s.locator), &roots)))
+        .find_map(|s| open_inside(&resolver.path(&s.locator), &roots).map(|(f, p)| (f, p, s.id))))
 }
 
 /// The BLAKE3 (hex) of the file at `path`.
@@ -286,18 +286,28 @@ pub async fn audio(
     let shared = sh.clone();
     let found = blocking(move || {
         let picked = match &select {
-            Some(h) => file_of_hash(&shared, id, h)?,
-            None => best_file(&shared, id)?,
+            Some(h) => file_of_hash(&shared, id, h)?.map(|(f, p, s)| (f, p, Some(s))),
+            None => best_file(&shared, id)?.map(|(f, p)| (f, p, None)),
         };
-        let Some((file, path)) = picked else {
+        let Some((file, path, source)) = picked else {
             return Ok(None);
         };
         let sum = if hash { Some(hash_of_file(&shared, &file, &path)?) } else { None };
-        // The file asked for changed since the library hashed it: it is
-        // not here any more.
+        // The file asked for changed since the library hashed it (its tags
+        // or cover rewritten in place): not that file any more. The library
+        // notes the file as it is, so the device asks for it again by its
+        // new hash once the sync brings it.
         if let (Some(want), Some(sum)) = (&select, &sum)
             && want != sum
         {
+            if let Some(source) = source {
+                let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                match shared.lib.refresh_source_file(source, want, sum, size) {
+                    Ok(true) => log::info!("media: {} changed in place; its hash is noted anew", path.display()),
+                    Ok(false) => {}
+                    Err(e) => log::warn!("media: the new hash of {} not noted: {e}", path.display()),
+                }
+            }
             return Ok(None);
         }
         Ok(Some((file, path, sum)))

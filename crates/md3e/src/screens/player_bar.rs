@@ -4,6 +4,10 @@
 use std::time::Duration;
 
 use egui::{Rect, Sense, Ui, vec2};
+
+/// The seek bar's room (its times beside it) below which the output pill
+/// shows its button alone.
+const SLIDER_ROOMY: f32 = 360.0;
 use nikgob_view::{Command, LikeTarget, Repeat, Status, ViewState};
 
 use super::{
@@ -191,18 +195,31 @@ pub fn show(
         let show_queue = buttons.queue;
         let (show_like, show_lyrics, show_volume) = (!compact && buttons.like, wide && lyrics_on && buttons.lyrics, wide);
         let trailing = [show_like, show_queue, show_lyrics, show_volume, true].into_iter().filter(|b| *b).count();
-        // «Где играть» by the volume once there is another device: in ⋮
-        // while this computer plays and the pill is short of room; the
-        // pill of another device's name stays whatever the width, so it is
-        // always seen whose volume the wheel turns.
-        let output_look = super::output::Look {
+        // The seek bar comes first: short of room for it, the pill of the
+        // device's name gives way to the button alone (its name in the
+        // tooltip, its accent kept), then goes into ⋮.
+        let mut output_look = super::output::Look {
             circle: 40.0,
             pill: 26.0,
             content: item.content,
             accent: (play_colors.container, play_colors.content),
             collapsed: rect.width() < 520.0,
         };
-        let output_on = super::output::available(state) && (wide || state.target.is_some());
+        // On the pill only while another device plays (whose volume the
+        // wheel turns); while this computer plays, «Где играть» is in ⋮.
+        let mut output_on = super::output::available(state) && state.target.is_some();
+        let slider_min = if compact { 112.0 } else { 160.0 };
+        let sleep_full = super::sleep_ui::chip_width(ui, state, "bar-sleep", false);
+        let room_for = |ui: &Ui, look, on| {
+            let w = super::output::slot_width(ui, state, "bar-output", look, on);
+            ui.available_width() - trailing as f32 * 44.0 - if w > 0.0 { w + 4.0 } else { 0.0 } - sleep_full - 8.0
+        };
+        if output_on && !output_look.collapsed && room_for(ui, output_look, true) < SLIDER_ROOMY {
+            output_look.collapsed = true;
+        }
+        if output_on && room_for(ui, output_look, true) < slider_min {
+            output_on = false;
+        }
         let output_w = super::output::slot_width(ui, state, "bar-output", output_look, output_on);
         let output_room = if output_w > 0.0 { output_w + 4.0 } else { 0.0 };
 
@@ -212,8 +229,6 @@ pub fn show(
         // the slider keeps its room, else the moon alone (never a button
         // less).
         let buttons_w = trailing as f32 * 44.0 + output_room;
-        let slider_min = if compact { 112.0 } else { 160.0 };
-        let sleep_full = super::sleep_ui::chip_width(ui, state, "bar-sleep", false);
         let sleep_small = !wide || ui.available_width() - buttons_w - sleep_full - 8.0 < slider_min;
         let trailing_w = buttons_w + if sleep_small { super::sleep_ui::chip_width(ui, state, "bar-sleep", true) } else { sleep_full };
         let avail = ui.available_width() - trailing_w - 8.0;

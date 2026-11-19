@@ -39,9 +39,11 @@ jiff = "0.2"
 # `/mcp` calls the `/v1` routes in-process (`ServiceExt::oneshot`).
 # The OpenAPI document of the routes (`/openapi.json`) and Swagger UI on
 # `/docs`, its files built in from utoipa-swagger-ui-vendored: nothing is
-# downloaded by the build or asked of a CDN at run time.
+# downloaded by the build or asked of a CDN at run time. `debug-embed`: a
+# debug build holds them too (else it reads them from the target dir, and
+# a cleaned target makes `/docs/` a 404).
 utoipa = "5"
-utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
+utoipa-swagger-ui = { version = "9", features = ["axum", "vendored", "debug-embed"] }
 
 [dev-dependencies]
 tempfile = "3"

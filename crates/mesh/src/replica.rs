@@ -1050,6 +1050,9 @@ async fn turn(sh: &Arc<Shared>, lib: &Library, me: &str, ctl: &Arc<Ctl>, st: &mu
         tasks.spawn(async move {
             let out = pull(&sh, &lib, &me, &dirs, &job, &from, era, &ctl, &mut room).await;
             drop(room);
+            if out.is_ok() {
+                sh.rt.send(Command::ReplicaFileKept);
+            }
             (job, era, out)
         });
         st.next_start = Some(Instant::now() + GAP);

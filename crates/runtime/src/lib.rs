@@ -2293,6 +2293,7 @@ impl Worker {
             Command::ReplicaRechecked { card, ok, failed } => self.replica_rechecked(card, ok, failed),
             Command::ReplicaUndoTrash { ids } => self.replica_undo(ids),
             Command::ReplicaCopiesChanged => self.replica_soon(),
+            Command::ReplicaFileKept => self.storage_changed(),
             Command::ReplicaRecheck { .. } => log::warn!("replica: a recheck goes to the mesh, not to the worker"),
         }
     }

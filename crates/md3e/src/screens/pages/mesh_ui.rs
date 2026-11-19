@@ -15,7 +15,7 @@ use std::sync::Arc;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use nikgob_shapes::MaterialShape;
 use nikgob_view::{
-    Command, FAVORITES_CAP_DEFAULT, FAVORITES_CAP_MAX_GB, FAVORITES_CAP_MIN_GB, LIKED_PLAYLIST, MeshKind, MeshNodeView, MeshPins,
+    Command, FAVORITES_CAP_DEFAULT, FAVORITES_CAP_MAX_GB, FAVORITES_CAP_MIN_GB, LIKED_PLAYLIST, MeshKind, MeshNodeView, MeshPins, MeshTransfer,
     MeshProfile, MeshScope, MeshView, PlaylistId, StorageView, ViewState, free_ru, size_ru,
 };
 
@@ -114,7 +114,8 @@ pub(crate) fn node_look(n: &MeshNodeView) -> Look {
 /// This computer: online while the mesh runs (or there is none to be off
 /// from), playing while its player plays.
 pub(crate) fn this_look(state: &ViewState) -> Look {
-    Look { online: true, playing: state.player.status == nikgob_view::Status::Playing }
+    // While another device plays, this one is its remote: nothing plays here.
+    Look { online: true, playing: state.target.is_none() && state.player.status == nikgob_view::Status::Playing }
 }
 
 /// A turning that advances only while `running` (`period` seconds a turn)
@@ -183,6 +184,57 @@ pub(crate) fn fraction_ru(used: u64, cap: u64) -> String {
     match (u.rsplit_once(' '), c.rsplit_once(' ')) {
         (Some((un, uu)), Some((_, cu))) if uu == cu => format!("{un} / {c}"),
         _ => format!("{u} / {c}"),
+    }
+}
+
+/// «1,2 из 27,6 ГБ»: how much of the files on their way came.
+pub(crate) fn transfer_line(t: &MeshTransfer) -> String {
+    let (d, w) = (size_ru(t.done), size_ru(t.total));
+    match (d.rsplit_once(' '), w.rsplit_once(' ')) {
+        (Some((dn, du)), Some((_, wu))) if du == wu => format!("{dn} из {w}"),
+        _ => format!("{d} из {w}"),
+    }
+}
+
+/// How much of this computer's music a device of profile `p` is to hold:
+/// all of it with «Полная копия», the tracks without the originals with
+/// «Библиотека» (none: no such goal, or this computer's not counted yet).
+pub(crate) fn copy_goal(p: MeshProfile, here: &StorageView) -> Option<u64> {
+    if !here.known {
+        return None;
+    }
+    match p {
+        MeshProfile::Full => Some(here.music()),
+        MeshProfile::Library => Some(here.library),
+        _ => None,
+    }
+    .filter(|g| *g > 0)
+}
+
+/// A device's bar and line on the map: of a full copy or the library, how
+/// much of this computer's music it holds («14 из 27,6 ГБ», the whole
+/// once it is there); else while files come, how far they got; else what
+/// it holds. A nearly full disk says so before anything.
+pub(crate) fn node_bar_and_line(n: &MeshNodeView, here: &StorageView) -> (Option<(f32, f32)>, Option<(String, bool)>) {
+    let line = storage_line(n);
+    if line.as_ref().is_some_and(|(_, error)| *error) {
+        return (bar_parts(n), line);
+    }
+    if let (Some(goal), Some(st)) = (copy_goal(n.profile, here), n.storage) {
+        // Within a few per cent it is there (sizes on two file systems).
+        if st.used.saturating_mul(100) < goal.saturating_mul(98) {
+            let t = MeshTransfer { done: st.used, total: goal, paused: false, speed: 0 };
+            let f = (st.used as f64 / goal as f64).clamp(0.0, 1.0) as f32;
+            return (Some((f, 0.0)), Some((transfer_line(&t), false)));
+        }
+        return (bar_parts(n), line);
+    }
+    match n.transfer {
+        Some(t) => {
+            let f = if t.total == 0 { 0.0 } else { (t.done as f64 / t.total as f64).clamp(0.0, 1.0) as f32 };
+            (Some((f, 0.0)), Some((transfer_line(&t), false)))
+        }
+        _ => (bar_parts(n), line),
     }
 }
 
@@ -581,6 +633,36 @@ mod tests {
         assert_eq!(this_storage_line(&st).as_deref(), Some("15,8 ГБ · оригиналы 11 ГБ"));
         assert_eq!(this_storage_line(&StorageView::default()), None);
         assert_eq!(fraction_ru(512 << 20, 25 * GB), "512 МБ / 25 ГБ");
+    }
+
+    #[test]
+    fn files_on_their_way_show_how_much_came() {
+        let t = MeshTransfer { done: GB + GB / 5, total: 27 * GB + 3 * GB / 5, paused: false, speed: 0 };
+        let none = StorageView::default();
+        let fav = MeshProfile::Favorites { cap_bytes: 25 * GB };
+        let mut n = MeshNodeView { storage: Some(MeshStorage { used: 0, free: 197 * GB }), transfer: Some(t), profile: fav, ..MeshNodeView::default() };
+        let (bar, line) = node_bar_and_line(&n, &none);
+        assert_eq!(line, Some(("1,2 из 27,6 ГБ".to_owned(), false)));
+        assert!(bar.is_some_and(|(f, _)| (f - 1.2 / 27.6).abs() < 0.01), "{bar:?}");
+        assert_eq!(transfer_line(&MeshTransfer { done: 300 << 20, total: 2 * GB, ..t }), "300 МБ из 2 ГБ");
+        n.storage = Some(MeshStorage { used: 18 * GB, free: GB });
+        assert!(node_bar_and_line(&n, &none).1.is_some_and(|(_, error)| error), "a full disk still says so");
+        // A full copy: how much of this computer's music is there, whether
+        // files come now or not.
+        // «16,2 ГБ · оригиналы 11,4 ГБ» here: the originals are of the 16,2.
+        let here = StorageView { known: true, library: 4 * GB + 4 * GB / 5, masters: 11 * GB + 2 * GB / 5, disks: Vec::new() };
+        n.profile = MeshProfile::Full;
+        n.transfer = None;
+        n.storage = Some(MeshStorage { used: 14 * GB, free: 197 * GB });
+        let (bar, line) = node_bar_and_line(&n, &here);
+        assert_eq!(line, Some(("14 из 16,2 ГБ".to_owned(), false)));
+        assert!(bar.is_some_and(|(f, _)| (f - 14.0 / 16.2).abs() < 0.01), "{bar:?}");
+        n.storage = Some(MeshStorage { used: 2 * GB, free: 197 * GB });
+        n.profile = MeshProfile::Library;
+        assert_eq!(node_bar_and_line(&n, &here).1, Some(("2 из 4,8 ГБ".to_owned(), false)));
+        n.storage = Some(MeshStorage { used: 16 * GB + GB / 5, free: 197 * GB });
+        n.profile = MeshProfile::Full;
+        assert_eq!(node_bar_and_line(&n, &here).1, Some(("16,2 ГБ".to_owned(), false)), "all there: what it holds");
     }
 
     #[test]
