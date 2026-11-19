@@ -1316,7 +1316,7 @@ mod tests {
     fn daylist_style_and_blend_names_translate() {
         // Day 0 was a Thursday; quiet, dark, steady is cell 1.
         assert_eq!(daylist_name_in(Locale::Ru, 1, 0, 1, 0), "Тягучий день четверга");
-        assert!(daylist_name_in(Locale::En, 1, 0, 1, 0).ends_with(" Thursday Evening"));
+        assert!(daylist_name_in(Locale::En, 1, 0, 1, 0).ends_with(" Thursday Afternoon"));
         let morning = daylist_name_in(Locale::Ru, 6, 0, 0, 4);
         assert!(morning.ends_with("ое утро понедельника"), "{morning}");
         assert_eq!(weekday_genitive_ru(0), "четверга");
