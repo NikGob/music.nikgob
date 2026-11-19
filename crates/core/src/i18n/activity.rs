@@ -1,6 +1,6 @@
 //! Runtime messages: cold start, home, recs, replica, connect, sync, lyrics, search, streams.
 
-use super::{Locale, PluralForms, common_in, plural_forms};
+use super::{Locale, PluralForms, common_in, plural_forms, tracks_count_in};
 
 /// Static strings: runtime messages: cold start, home, recs, replica, connect, sync, lyrics, search, streams.
 pub struct ActivityStrings {
@@ -1415,6 +1415,53 @@ pub fn fmt_playlist_in_library_in(loc: Locale, name: &str) -> String {
     format!("{quoted} {}", activity_in(loc).playlist_in_library)
 }
 
+/// «Альбом {r}» / "Album {r}": a service album its service did not list (the API's confirm card).
+pub fn fmt_api_album_in(loc: Locale, r: &str) -> String {
+    match loc {
+        Locale::Ru => format!("Альбом {r}"),
+        Locale::En => format!("Album {r}"),
+    }
+}
+
+/// «{n} треков из сервисов» / "{n} tracks from the services" (the API's confirm card).
+pub fn fmt_tracks_from_services_in(loc: Locale, n: usize) -> String {
+    match loc {
+        Locale::Ru => format!("{} из сервисов", tracks_count_in(loc, n as u64)),
+        Locale::En => format!("{} from the services", tracks_count_in(loc, n as u64)),
+    }
+}
+
+/// «{first} и ещё {n}» / "{first} and {n} more": the API confirm card's title.
+pub fn fmt_and_more_in(loc: Locale, first: &str, n: usize) -> String {
+    match loc {
+        Locale::Ru => format!("{first} и ещё {n}"),
+        Locale::En => format!("{first} and {n} more"),
+    }
+}
+
+/// «Запрос «{name}»» / "Request from “{name}”": the API confirm card's origin.
+pub fn fmt_api_request_from_in(loc: Locale, name: &str) -> String {
+    match loc {
+        Locale::Ru => format!("Запрос «{name}»"),
+        Locale::En => format!("Request from “{name}”"),
+    }
+}
+
+/// The trash toast's word for what goes: «Трек», «Альбом», «{n} треков» / "Track", "Album", "{n} tracks".
+pub fn fmt_trash_what_in(loc: Locale, tracks: usize, only_one_album: bool) -> String {
+    match (tracks, only_one_album) {
+        (_, true) => match loc {
+            Locale::Ru => "Альбом".to_owned(),
+            Locale::En => "Album".to_owned(),
+        },
+        (1, false) => match loc {
+            Locale::Ru => "Трек".to_owned(),
+            Locale::En => "Track".to_owned(),
+        },
+        (n, false) => tracks_count_in(loc, n as u64),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1561,5 +1608,25 @@ mod tests {
             fmt_login_window_failed_in(Locale::En, "no WebView2"),
             "The sign-in window did not open (no WebView2). You can sign in with cookies: “Paste cookies…”"
         );
+    }
+
+    #[test]
+    fn api_card_and_trash_words_translate_both_locales() {
+        assert_eq!(fmt_api_album_in(Locale::Ru, "spotify:4uLU"), "Альбом spotify:4uLU");
+        assert_eq!(fmt_api_album_in(Locale::En, "spotify:4uLU"), "Album spotify:4uLU");
+        assert_eq!(fmt_tracks_from_services_in(Locale::Ru, 1), "1 трек из сервисов");
+        assert_eq!(fmt_tracks_from_services_in(Locale::Ru, 5), "5 треков из сервисов");
+        assert_eq!(fmt_tracks_from_services_in(Locale::En, 1), "1 track from the services");
+        assert_eq!(fmt_tracks_from_services_in(Locale::En, 5), "5 tracks from the services");
+        assert_eq!(fmt_and_more_in(Locale::Ru, "Песня", 3), "Песня и ещё 3");
+        assert_eq!(fmt_and_more_in(Locale::En, "Song", 3), "Song and 3 more");
+        assert_eq!(fmt_api_request_from_in(Locale::Ru, "Pi"), "Запрос «Pi»");
+        assert_eq!(fmt_api_request_from_in(Locale::En, "Pi"), "Request from “Pi”");
+        assert_eq!(fmt_trash_what_in(Locale::Ru, 1, false), "Трек");
+        assert_eq!(fmt_trash_what_in(Locale::Ru, 5, false), "5 треков");
+        assert_eq!(fmt_trash_what_in(Locale::Ru, 10, true), "Альбом");
+        assert_eq!(fmt_trash_what_in(Locale::En, 1, false), "Track");
+        assert_eq!(fmt_trash_what_in(Locale::En, 21, false), "21 tracks");
+        assert_eq!(fmt_trash_what_in(Locale::En, 10, true), "Album");
     }
 }

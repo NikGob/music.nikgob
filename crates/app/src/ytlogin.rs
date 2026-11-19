@@ -48,7 +48,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use nikgob_core::i18n::{Locale, locale, view_in};
+use nikgob_core::i18n::{Locale, locale, parse_locale_tag, set_locale, view_in};
 use nikgob_core::i18n::view::{fmt_cookies_unreadable_in, fmt_window_error_in};
 use nikgob_runtime::{WebLogin, WebLoginError};
 
@@ -183,6 +183,9 @@ pub struct ChildArgs {
     pub profile: PathBuf,
     pub timeout: Duration,
     pub watch_stdin: bool,
+    /// The UI locale the parent passes (`--locale ru|en`), applied before
+    /// the window's title is read.
+    pub loc: Option<Locale>,
 }
 
 /// `None` when this is not a child run (no `--youtube-login` or
@@ -193,6 +196,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Option<Result<Chi
     let mut profile = None;
     let mut timeout = TIMEOUT;
     let mut watch_stdin = false;
+    let mut loc = None;
     let mut child = None;
     while let Some(a) = it.next() {
         match a.to_str() {
@@ -205,6 +209,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Option<Result<Chi
                 Some(s) if s > 0 => timeout = Duration::from_secs(s),
                 _ => return Some(Err("--timeout needs a number of seconds".into())),
             },
+            Some("--locale") => loc = it.next().and_then(|s| s.to_str().map(parse_locale_tag)),
             Some("--watch-stdin") => watch_stdin = true,
             _ => {}
         }
@@ -214,7 +219,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Option<Result<Chi
         return Some(Err(format!("{} needs the file to write the cookies to", site.flag())));
     };
     let profile = profile.unwrap_or_else(|| out.with_file_name("webview"));
-    Some(Ok(ChildArgs { site, out, profile, timeout, watch_stdin }))
+    Some(Ok(ChildArgs { site, out, profile, timeout, watch_stdin, loc }))
 }
 
 /// The child run, if this is one: its exit code.
@@ -226,6 +231,11 @@ pub fn child_main() -> Option<i32> {
             return Some(EXIT_ERROR);
         }
     };
+    // The parent passes the app's locale; the child reads it before the
+    // window's title (child_main runs before the normal prefs setup).
+    if let Some(loc) = args.loc {
+        set_locale(loc);
+    }
     #[cfg(windows)]
     {
         Some(window::run(&args))
@@ -416,6 +426,8 @@ impl WebLogin for WindowLogin {
             .arg(&self.out)
             .arg("--profile")
             .arg(&self.profile)
+            .arg("--locale")
+            .arg(self.loc.code())
             .arg("--watch-stdin")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -641,16 +653,18 @@ mod tests {
                 profile: profile.into(),
                 timeout: TIMEOUT,
                 watch_stdin: false,
+                loc: None,
             }))
         );
         assert_eq!(
-            args(&["--youtube-login", "o.txt", "--profile", "p", "--timeout", "30", "--watch-stdin"]),
+            args(&["--youtube-login", "o.txt", "--profile", "p", "--timeout", "30", "--locale", "en", "--watch-stdin"]),
             Some(Ok(ChildArgs {
                 site: Site::Youtube,
                 out: "o.txt".into(),
                 profile: "p".into(),
                 timeout: Duration::from_secs(30),
                 watch_stdin: true,
+                loc: Some(Locale::En),
             }))
         );
         assert!(matches!(args(&["--youtube-login"]), Some(Err(_))));

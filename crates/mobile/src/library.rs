@@ -11,7 +11,7 @@ use egui::{Context, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use nikgob_md3e::components::{BottomSheet, Button, ConnectedGroup, FilterChip, IconButton, Size, Style, TextInputDialog, TextInputResult};
 use nikgob_md3e::{Icon, Theme, TypeRole};
 use nikgob_core::i18n::{Locale, common, locale, mobile, mobile_in};
-use nikgob_view::{Command, LIKED_PLAYLIST, LibraryTab, ReleaseSort, Route, TrackSort, ViewState};
+use nikgob_view::{Command, LIKED_PLAYLIST, LibraryTab, QueueOrigin, ReleaseSort, Route, TrackSort, ViewState};
 
 use crate::parts::{self, PageOut, Picture};
 use crate::rows::{self, Look};
@@ -302,7 +302,7 @@ impl Library {
                 out.push(if look.playing {
                     Command::TogglePlay
                 } else {
-                    Command::PlayTracks { tracks: ids.clone(), start: i - lib.tracks_offset, context: "библиотеки".into() }
+                    Command::PlayTracks { tracks: ids.clone(), start: i - lib.tracks_offset, context: QueueOrigin::Library }
                 });
             }
             if o.play_next {

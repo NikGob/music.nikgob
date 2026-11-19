@@ -232,7 +232,7 @@ pub static EN: ScreensStrings = ScreensStrings {
     tag_suggestions: "Suggestions from MusicBrainz",
     menu_visualizer: "Visualizer",
     menu_trash: "Remove from library",
-    menu_youtube: "Enable YouTube",
+    menu_youtube: "Play from YouTube",
     play_where: "Play on device",
     sound_window: "Speed and equalizer",
     save_queue_title: "Save queue",

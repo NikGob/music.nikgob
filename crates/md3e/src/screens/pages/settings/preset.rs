@@ -9,7 +9,8 @@
 //! kept for «Свои» are the runtime's, not the page's copy.
 
 use egui::{Rect, Sense, Stroke, Ui, vec2};
-use nikgob_view::presets::{Area, CUSTOM};
+use nikgob_core::i18n::{locale, view_in};
+use nikgob_view::presets::Area;
 use nikgob_view::{PrefPatch, Prefs};
 
 use super::super::connected;
@@ -185,7 +186,7 @@ fn rested(since: f64, now: f64) -> bool {
 fn buttons(ui: &mut Ui, area: Area, custom: bool, current: usize) -> (Option<usize>, Vec<Rect>) {
     let mut labels: Vec<&str> = area.names().to_vec();
     if custom {
-        labels.push(CUSTOM);
+        labels.push(view_in(locale()).preset_custom);
     }
     connected(ui, egui::Id::new(("set-preset", area)), &labels, current, &[])
 }
@@ -270,7 +271,7 @@ fn tiles(ui: &mut Ui, area: Area, p: &Prefs, custom: bool, current: usize) -> (O
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
         for i in 0..n {
-            let name = area.names().get(i).copied().unwrap_or(CUSTOM);
+            let name = area.names().get(i).copied().unwrap_or(view_in(locale()).preset_custom);
             let (rect, _) = ui.allocate_exact_size(vec2(tile.x, tile.y + 6.0 + label_h), Sense::hover());
             let resp = ui.interact(rect, egui::Id::new(("set-preset-tile", area, i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
             let card = Rect::from_min_size(rect.min, tile);

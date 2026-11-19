@@ -125,7 +125,7 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
     if let Some(b) = &busy {
         super::progress(ui, b, w);
         ui.add_space(12.0);
-        if ui.add(Button::new(nikgob_core::i18n::common().cancel).style(Style::Tonal).size(Size::S).id_salt("lyrics-page-cancel")).clicked() {
+        if ui.add(Button::new(nikgob_core::i18n::common().undo).style(Style::Tonal).size(Size::S).id_salt("lyrics-page-cancel")).clicked() {
             out.push(Command::CancelCraft);
         }
         return;

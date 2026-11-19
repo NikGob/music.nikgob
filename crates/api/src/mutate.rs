@@ -73,13 +73,9 @@ fn playlist_id(s: &str) -> Result<PlaylistId, ApiError> {
     if s == LIKED_ID { Ok(LIKED_PLAYLIST) } else { s.parse().map_err(|_| bad_id()) }
 }
 
-/// "1 track", "3 tracks", "12 tracks".
+/// "1 track", "3 tracks", "12 tracks" (English: singular only for 1).
 pub fn tracks_word(n: usize) -> String {
-    let word = match (n % 10, n % 100) {
-        (1, x) if x != 11 => "track",
-        (2..=4, x) if !(12..=14).contains(&x) => "tracks",
-        _ => "tracks",
-    };
+    let word = if n == 1 { "track" } else { "tracks" };
     format!("{n} {word}")
 }
 
@@ -687,13 +683,14 @@ pub fn touches_outside(lib: &Library, track: TrackId, root: &[PathBuf]) -> Resul
     Ok(false)
 }
 
-/// The toast's word for what goes: "Track", "Album", "12 tracks".
+/// The toast's word for what goes, in `loc`: «Трек», «Альбом», «12 треков» / "Track", "Album", "12 tracks".
+pub fn trash_what_in(loc: nikgob_core::i18n::Locale, tracks: usize, only_one_album: bool) -> String {
+    nikgob_core::i18n::activity::fmt_trash_what_in(loc, tracks, only_one_album)
+}
+
+/// The toast's word for what goes, in English: "Track", "Album", "12 tracks".
 pub fn trash_what(tracks: usize, only_one_album: bool) -> String {
-    match (tracks, only_one_album) {
-        (_, true) => "Album".to_owned(),
-        (1, false) => "Track".to_owned(),
-        (n, false) => tracks_word(n),
-    }
+    trash_what_in(nikgob_core::i18n::Locale::En, tracks, only_one_album)
 }
 
 /// Moves songs and albums to the library's Trash (with a confirmation):
@@ -769,7 +766,8 @@ pub async fn trash(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
     if let Some(answer) = gate(&sh, &caller, "POST /v1/library/trash", &args, b.confirm_token.as_deref(), plan)? {
         return Ok(Json(Destructive::Plan(answer)));
     }
-    let what = trash_what(all.len(), b.album_ids.len() == 1 && b.track_ids.is_empty() && outside.is_empty());
+    // The app's UI locale: the undo toast is drawn in it.
+    let what = trash_what_in(nikgob_core::i18n::locale(), all.len(), b.album_ids.len() == 1 && b.track_ids.is_empty() && outside.is_empty());
     let n = all.len();
     sh.run_by(Some(caller.actor), vec![Command::ApiTrash { tracks: all, what }]).await?;
     Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result: json!({"trashed": n, "undo": "the app's Undo or its Trash"}) })))
@@ -788,11 +786,16 @@ mod tests {
         assert_eq!(tracks_word(1), "1 track");
         assert_eq!(tracks_word(3), "3 tracks");
         assert_eq!(tracks_word(12), "12 tracks");
-        assert_eq!(tracks_word(21), "21 track");
+        assert_eq!(tracks_word(21), "21 tracks");
+        assert_eq!(tracks_word(101), "101 tracks");
         assert_eq!(tracks_word(111), "111 tracks");
         assert_eq!(trash_what(1, false), "Track");
         assert_eq!(trash_what(10, true), "Album");
         assert_eq!(trash_what(5, false), "5 tracks");
+        assert_eq!(trash_what_in(nikgob_core::i18n::Locale::Ru, 1, false), "Трек");
+        assert_eq!(trash_what_in(nikgob_core::i18n::Locale::Ru, 5, false), "5 треков");
+        assert_eq!(trash_what_in(nikgob_core::i18n::Locale::Ru, 10, true), "Альбом");
+        assert_eq!(trash_what_in(nikgob_core::i18n::Locale::En, 21, false), "21 tracks");
     }
 
     #[test]

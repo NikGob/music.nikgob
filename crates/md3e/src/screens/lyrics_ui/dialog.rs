@@ -189,7 +189,7 @@ fn on_card(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) 
                 ui.spacing_mut().item_spacing.x = 8.0;
                 super::progress(ui, b, (inner.width() - 160.0).min(360.0));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(Button::new(nikgob_core::i18n::common().cancel).style(Style::Tonal).size(Size::S).id_salt("lyrics-dialog-cancel")).clicked() {
+                    if ui.add(Button::new(nikgob_core::i18n::common().undo).style(Style::Tonal).size(Size::S).id_salt("lyrics-dialog-cancel")).clicked() {
                         out.push(Command::CancelCraft);
                     }
                 });

@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use egui::{Align, Context, Layout, Ui};
-use nikgob_view::{Command, FindSongView, RemoteId, SourceKind, Status, TrackRow, ViewState};
+use nikgob_view::{Command, FindSongView, QueueOrigin, RemoteId, SourceKind, Status, TrackRow, ViewState};
 
 use super::common;
 use crate::{
@@ -237,7 +237,7 @@ impl FindSongUi {
                             out.push(Command::PlayStreamTracks {
                                 tracks: vec![t.remote.clone()],
                                 start: 0,
-                                context: nikgob_core::i18n::screens().find_song_context.into(),
+                                context: QueueOrigin::FindSong,
                             });
                         }
                     } else if o.response.clicked() {

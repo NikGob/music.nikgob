@@ -14,7 +14,7 @@
 //! crackle).
 
 use egui::{Align2, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Ui, pos2, vec2};
-use nikgob_view::{EQ_BANDS, EQ_FREQS, EQ_MAX_DB, EQ_PRESETS, eq_curve_db, eq_filter_gains, eq_preset_of};
+use nikgob_view::{EQ_BANDS, EQ_FREQS, EQ_MAX_DB, eq_curve_db, eq_filter_gains, eq_preset_of, eq_presets_in};
 
 use crate::{
     Theme, TypeRole,
@@ -95,9 +95,10 @@ fn db_text(db: f32) -> String {
 /// switches the equalizer on.
 pub(super) fn editor(ui: &mut Ui, on: &mut bool, gains: &mut [f32; EQ_BANDS]) {
     let preset = eq_preset_of(gains);
+    let presets = eq_presets_in(nikgob_core::i18n::locale());
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-        for (i, (name, curve)) in EQ_PRESETS.iter().enumerate() {
+        for (i, (name, curve)) in presets.iter().enumerate() {
             if ui.add(FilterChip::new(*name, preset == Some(i)).id_salt(("eq-preset", i))).clicked() {
                 *gains = *curve;
                 // A curve picked is a curve wanted; «Ровно» leaves the switch alone.
@@ -305,8 +306,8 @@ mod tests {
             [0.0, 6.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             [6.0, -6.0, 6.0, -6.0, 6.0, -6.0, 6.0, -6.0, 6.0, -6.0],
             [12.0; EQ_BANDS],
-            EQ_PRESETS[1].1,
-            EQ_PRESETS[4].1,
+            eq_presets_in(nikgob_core::i18n::Locale::Ru)[1].1,
+            eq_presets_in(nikgob_core::i18n::Locale::Ru)[4].1,
         ];
         for gains in curves {
             let pulled = response_line(&gains, left, right, top, bottom);

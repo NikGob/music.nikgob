@@ -76,6 +76,17 @@ locale_table! {
     { Ru => RU, En => EN }
 }
 
+/// The seven settings tabs' labels in `loc`, in the order `settings_help::TABS` lists them.
+pub const fn tabs_in(loc: Locale) -> [&'static str; 7] {
+    let s = settings_in(loc);
+    [s.tab_music, s.tab_lyrics, s.tab_look, s.tab_services, s.tab_downloads, s.tab_net, s.tab_system]
+}
+
+/// The seven settings tabs' labels in the active process locale.
+pub fn tabs() -> [&'static str; 7] {
+    tabs_in(locale())
+}
+
 /// Localized label for a [`LangPref`] option.
 pub const fn lang_pref_label_in(loc: Locale, pref: LangPref) -> &'static str {
     pref.label_in(loc)
@@ -2192,5 +2203,11 @@ mod tests {
     fn one_decimal_uses_the_locales_mark() {
         assert_eq!(fmt_one_decimal_in(Locale::Ru, 3.5), "3,5");
         assert_eq!(fmt_one_decimal_in(Locale::En, 3.5), "3.5");
+    }
+
+    #[test]
+    fn tab_labels_cover_both_locales_in_order() {
+        assert_eq!(tabs_in(Locale::Ru), ["Музыка", "Текст", "Вид", "Сервисы", "Загрузки", "Межсеть", "Система"]);
+        assert_eq!(tabs_in(Locale::En), ["Music", "Lyrics", "Appearance", "Services", "Downloads", "Network", "System"]);
     }
 }

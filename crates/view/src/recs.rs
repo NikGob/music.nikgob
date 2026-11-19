@@ -237,9 +237,9 @@ impl LaneCard {
         }
     }
 
-    /// Legacy context string for string-based callers.
+    /// Legacy context string for string-based callers, from the typed origin.
     pub fn context(&self) -> String {
-        format!("микса «{}»", self.queue.as_deref().unwrap_or(&self.title))
+        self.origin().legacy_text().unwrap_or_default()
     }
 }
 

@@ -441,13 +441,16 @@ pub(crate) fn listen_addr(ip: &str, port: u16) -> String {
     if ip.contains(':') && !ip.starts_with('[') { format!("[{ip}]:{port}") } else { format!("{ip}:{port}") }
 }
 
-/// Why the server cannot listen, in words for the settings row.
+/// Why the server cannot listen, in words for the settings row (the app's
+/// UI locale: the row is drawn in it).
 pub(crate) fn bind_error(e: &std::io::Error, ip: &str, port: u16) -> String {
+    use nikgob_core::i18n::{ErrorStrings, locale};
+    let loc = locale();
     match e.kind() {
-        std::io::ErrorKind::AddrInUse => format!("Port {port} is busy"),
-        std::io::ErrorKind::AddrNotAvailable => format!("The computer has no address {ip}"),
-        std::io::ErrorKind::PermissionDenied => format!("No access to port {port}"),
-        _ => format!("Could not open port {port}: {e}"),
+        std::io::ErrorKind::AddrInUse => ErrorStrings::api_port_busy_in(loc, port),
+        std::io::ErrorKind::AddrNotAvailable => ErrorStrings::api_no_address_in(loc, ip),
+        std::io::ErrorKind::PermissionDenied => ErrorStrings::api_port_denied_in(loc, port),
+        _ => ErrorStrings::api_port_failed_in(loc, port, &e.to_string()),
     }
 }
 
@@ -565,9 +568,9 @@ mod tests {
         assert_eq!(listen_addr("::1", 47210), "[::1]:47210");
         assert_eq!(listen_addr("[::1]", 1), "[::1]:1");
         let busy = std::io::Error::from(std::io::ErrorKind::AddrInUse);
-        assert_eq!(bind_error(&busy, "127.0.0.1", 47210), "Port 47210 is busy");
+        assert_eq!(bind_error(&busy, "127.0.0.1", 47210), "Порт 47210 занят");
         let none = std::io::Error::from(std::io::ErrorKind::AddrNotAvailable);
-        assert_eq!(bind_error(&none, "192.168.0.157", 47210), "The computer has no address 192.168.0.157");
+        assert_eq!(bind_error(&none, "192.168.0.157", 47210), "У компьютера нет адреса 192.168.0.157");
     }
 
     /// A paired device's request in this process: its caller's rights
@@ -665,6 +668,6 @@ mod tests {
         let port = first.local_addr().unwrap().port();
         let second = tokio::net::TcpListener::bind(listen_addr("127.0.0.1", port)).await;
         let e = second.err().expect("the port is taken");
-        assert_eq!(bind_error(&e, "127.0.0.1", port), format!("Port {port} is busy"));
+        assert_eq!(bind_error(&e, "127.0.0.1", port), format!("Порт {port} занят"));
     }
 }

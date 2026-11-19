@@ -39,6 +39,12 @@ pub enum ImportError {
     /// Sidecar file size did not match written bytes after relocation.
     #[error("{}", ErrorStrings::sidecar_verification_failed_in(Locale::Ru, &path.display().to_string()))]
     SidecarVerificationFailed { path: PathBuf },
+    /// A moved file's size or hash did not match the expected value.
+    #[error("{}", ErrorStrings::hash_check_failed_in(Locale::Ru, &path.display().to_string()))]
+    HashCheckFailed { path: PathBuf },
+    /// A staged copy in `tmp` did not match its original `src`.
+    #[error("{}", ErrorStrings::hash_copy_mismatch_in(Locale::Ru, &tmp.display().to_string(), &src.display().to_string()))]
+    HashCopyMismatch { tmp: PathBuf, src: PathBuf },
     /// The file holds another song's audio: it is not
     /// imported as `title`; `sounds_like` is the song it holds, when known.
     #[error("wrong audio in {title}: it holds {sounds_like:?}")]
@@ -98,8 +104,22 @@ impl ImportError {
             Self::SidecarVerificationFailed { path } => {
                 ErrorStrings::sidecar_verification_failed_in(loc, &path.display().to_string())
             }
+            Self::HashCheckFailed { path } => {
+                ErrorStrings::hash_check_failed_in(loc, &path.display().to_string())
+            }
+            Self::HashCopyMismatch { tmp, src } => {
+                ErrorStrings::hash_copy_mismatch_in(loc, &tmp.display().to_string(), &src.display().to_string())
+            }
             Self::WrongAudio { title, sounds_like, .. } => {
                 ErrorStrings::fmt_wrong_audio_in(loc, title, sounds_like.as_deref())
+            }
+            // An I/O error carrying one of the typed errors above (fsutil
+            // wraps them so their text survives the io boundary).
+            Self::Io { source, .. } => {
+                if let Some(inner) = source.get_ref().and_then(|e| e.downcast_ref::<ImportError>()) {
+                    return inner.message_in(loc);
+                }
+                self.to_string()
             }
             _ => self.to_string(),
         }
