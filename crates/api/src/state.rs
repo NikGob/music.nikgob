@@ -262,7 +262,7 @@ mod tests {
         assert_eq!(v["track"]["duration_ms"], 318_000);
         assert_eq!(v["next"], serde_json::json!({"title": "All I Need", "artists": ["Radiohead"]}));
         assert_eq!(v["repeat"], "off");
-        assert_eq!(v["output"], serde_json::json!({"id": "local:default", "name": "По умолчанию"}));
+        assert_eq!(v["output"], serde_json::json!({"id": "local:default", "name": "Default"}));
         assert_eq!(v["duck"], serde_json::json!({"gain": 0.18, "until_ms": 1_763_300_008_000_i64, "remaining_ms": 7580}));
         assert_eq!(v["volume"], serde_json::json!(0.62));
         assert_eq!(v["rate"], serde_json::json!(1.0));

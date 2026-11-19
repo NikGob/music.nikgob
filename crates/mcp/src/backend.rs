@@ -79,13 +79,13 @@ pub enum Unreachable {
 }
 
 /// What the player says when it cannot be reached.
-pub const NOT_RUNNING: &str = "Плеер не запущен или API выключен: Настройки → Межсеть → API и MCP";
+pub const NOT_RUNNING: &str = "The player is not running or the API is off: Settings → Mesh → API and MCP";
 
 impl Unreachable {
     pub fn message(&self) -> String {
         match self {
             Self::NotRunning => NOT_RUNNING.to_owned(),
-            Self::Other(why) => format!("Плеер не ответил: {why}"),
+            Self::Other(why) => format!("The player did not answer: {why}"),
         }
     }
 }

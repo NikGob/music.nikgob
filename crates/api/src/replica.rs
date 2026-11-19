@@ -76,10 +76,10 @@ pub async fn masters(State(sh): State<Arc<Shared>>, Extension(caller): Extension
     let raw = raw.as_deref();
     let after = query_value(raw, "after").unwrap_or_default();
     if !after.is_empty() && !is_hash(&after) {
-        return Err(ApiError::bad_request("Неверный after"));
+        return Err(ApiError::bad_request("Invalid after"));
     }
     let limit = match query_value(raw, "limit") {
-        Some(v) => v.parse::<u32>().map_err(|_| ApiError::bad_request("Неверный limit"))?.clamp(1, PAGE_MAX),
+        Some(v) => v.parse::<u32>().map_err(|_| ApiError::bad_request("Invalid limit"))?.clamp(1, PAGE_MAX),
         None => PAGE_MAX,
     };
     let shared = sh.clone();
@@ -109,7 +109,7 @@ pub async fn masters(State(sh): State<Arc<Shared>>, Extension(caller): Extension
 pub async fn master_file(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, Path(hash): Path<String>, headers: HeaderMap) -> Result<Response, ApiError> {
     peer_of(&caller)?;
     if !is_hash(&hash) {
-        return Err(ApiError::bad_request("Неверный hash"));
+        return Err(ApiError::bad_request("Invalid hash"));
     }
     let shared = sh.clone();
     let h = hash.clone();
@@ -124,7 +124,7 @@ pub async fn master_file(State(sh): State<Arc<Shared>>, Extension(caller): Exten
         Ok(named.into_iter().chain(flat).find_map(|p| open_inside(&p, &roots)))
     })
     .await?;
-    let (file, path) = found.ok_or_else(|| ApiError::not_found("Этого оригинала здесь нет"))?;
+    let (file, path) = found.ok_or_else(|| ApiError::not_found("This original is not here"))?;
     let mut r = serve_file(file, &path, &headers).await?;
     if let Some(ext) = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase)
         && let Ok(v) = HeaderValue::from_str(&ext)
@@ -142,9 +142,9 @@ pub async fn master_file(State(sh): State<Arc<Shared>>, Extension(caller): Exten
 /// `POST /v1/replica/check`.
 pub async fn check(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<CheckAnswer>, ApiError> {
     peer_of(&caller)?;
-    let ask: CheckAsk = serde_json::from_slice(&bytes).map_err(|e| ApiError::bad_request(format!("Неверное тело запроса: {e}")))?;
+    let ask: CheckAsk = serde_json::from_slice(&bytes).map_err(|e| ApiError::bad_request(format!("Invalid request body: {e}")))?;
     if ask.hashes.len() > CHECK_MAX {
-        return Err(ApiError::bad_request(format!("Не больше {CHECK_MAX} файлов за раз")));
+        return Err(ApiError::bad_request(format!("No more than {CHECK_MAX} files at a time")));
     }
     let shared = sh.clone();
     let answer = blocking(move || {

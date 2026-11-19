@@ -55,7 +55,7 @@ pub struct PlayerSnapshot {
     pub shuffle: bool,
     /// `off`, `all` or `one`.
     pub repeat: String,
-    /// What the queue was started from («альбома «…»»).
+    /// What the queue was started from (e.g. an album's “…” line).
     pub context: Option<String>,
     /// `release:<id>`, `playlist:<id>`, `artist:<id>`, a mix, a radio's seed.
     pub page: Option<String>,
@@ -65,7 +65,7 @@ pub struct PlayerSnapshot {
     /// device goes on generating it.
     #[schema(value_type = Option<Object>)]
     pub radio: Option<serde_json::Value>,
-    /// `[[place, track id], …]`: what «Автовоспроизведение» added.
+    /// `[[place, track id], …]`: what Autoplay added.
     #[schema(value_type = Object)]
     pub autoplay_at: serde_json::Value,
     /// Tracks the sending device plays from a file (it serves those of its
@@ -182,14 +182,14 @@ pub async fn load(
     // guest's device does not replace this queue.
     let paired = paired.is_some();
     if paired && !owner_device(paired, &caller) {
-        return Err(not_for("Только для устройств владельца"));
+        return Err(not_for("Only for the owner's devices"));
     }
     let snap: ZoneSnapshot = body(&bytes)?;
     if snap.tracks.len() > BODY_MAX_TRACKS {
-        return Err(ApiError::bad_request("Слишком длинная очередь"));
+        return Err(ApiError::bad_request("The queue is too long"));
     }
     if snap.index.is_some_and(|i| i >= snap.tracks.len()) {
-        return Err(ApiError::bad_request("index за концом очереди"));
+        return Err(ApiError::bad_request("index is past the end of the queue"));
     }
     let asked = !snap.tracks.is_empty();
     let snap = snap.window(LOAD_MAX);
@@ -199,7 +199,7 @@ pub async fn load(
     let files: HashSet<TrackId> = snap.files.iter().copied().collect();
     let (snap, skipped) = snap.keep(|t| rows.get(&t).is_some_and(|r| r.has_local || files.contains(&t)));
     if asked && snap.tracks.is_empty() {
-        return Err(ApiError::of(StatusCode::CONFLICT, "nothing_playable", "Здесь нет ни одной из этих песен"));
+        return Err(ApiError::of(StatusCode::CONFLICT, "nothing_playable", "None of these songs are here"));
     }
     let loaded = snap.tracks.len();
     let from = sh.mesh_peer(&caller, paired);
@@ -222,14 +222,14 @@ pub async fn remote(
 ) -> Result<Json<StateAnswer>, ApiError> {
     let paired = paired.is_some();
     if !owner_device(paired, &caller) {
-        return Err(not_for("Только для устройств владельца"));
+        return Err(not_for("Only for the owner's devices"));
     }
     let b: RemoteBody = body(&bytes)?;
     if b.commands.is_empty() {
-        return Err(ApiError::bad_request("Нужен commands"));
+        return Err(ApiError::bad_request("commands is required"));
     }
     if b.commands.len() > REMOTE_MAX {
-        return Err(ApiError::bad_request("Слишком много команд сразу"));
+        return Err(ApiError::bad_request("Too many commands at once"));
     }
     let from = sh.mesh_peer(&caller, paired);
     let commands: Vec<Command> = b.commands.into_iter().map(RemoteCommand::command).collect();

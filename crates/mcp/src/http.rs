@@ -53,7 +53,7 @@ impl Backend for HttpBackend {
             if e.is_connect() {
                 Unreachable::NotRunning
             } else if e.is_timeout() {
-                Unreachable::Other("нет ответа вовремя".to_owned())
+                Unreachable::Other("no answer in time".to_owned())
             } else {
                 Unreachable::Other(e.to_string())
             }

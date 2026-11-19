@@ -35,7 +35,7 @@ pub fn templates() -> Vec<Value> {
         "uriTemplate": "music://playlist/{id}",
         "name": "playlist",
         "title": "playlist",
-        "description": "One playlist with its tracks (`liked` is «Любимые»).",
+        "description": "One playlist with its tracks (`liked` is Liked Songs).",
         "mimeType": JSON_TYPE,
     })]
 }

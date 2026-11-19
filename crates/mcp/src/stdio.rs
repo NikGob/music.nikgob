@@ -40,11 +40,11 @@ pub fn local_url(api: &ApiSettings) -> String {
 /// and settings.toml's `[api]` (`None`: not readable, the defaults).
 pub fn config(token: Option<String>, url: Option<String>, api: Option<&ApiSettings>) -> Result<Config, String> {
     let token = token.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()).ok_or_else(|| {
-        "NIKGOB_TOKEN не задан: создай токен в плеере (Настройки → Межсеть → API и MCP → «Новый токен») и передай его в окружении".to_owned()
+        "NIKGOB_TOKEN is not set: create a token in the player (Settings → Mesh → API and MCP → “New token”) and pass it in the environment".to_owned()
     })?;
     let url = match url.map(|u| u.trim().trim_end_matches('/').to_owned()).filter(|u| !u.is_empty()) {
         Some(u) if u.starts_with("http://") || u.starts_with("https://") => u,
-        Some(u) => return Err(format!("NIKGOB_API_URL должен начинаться с http://: {u}")),
+        Some(u) => return Err(format!("NIKGOB_API_URL must start with http://: {u}")),
         None => api.map_or_else(|| format!("http://127.0.0.1:{API_PORT}"), local_url),
     };
     Ok(Config { url, token })

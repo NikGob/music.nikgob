@@ -26,14 +26,14 @@ pub(crate) fn db(e: LibraryError) -> ApiError {
 }
 
 fn gone() -> ApiError {
-    ApiError::not_found("Ничего не нашлось")
+    ApiError::not_found("Not found")
 }
 
 fn bad_id() -> ApiError {
-    ApiError::bad_request("Неверный id")
+    ApiError::bad_request("Invalid id")
 }
 
-/// The id of «Любимые» in the API.
+/// The id of Liked Songs in the API.
 pub const LIKED_ID: &str = "liked";
 
 fn ms(v: u32) -> i64 {
@@ -165,7 +165,7 @@ pub struct ArtistDetail {
 
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
 pub struct Playlist {
-    /// `liked` for «Любимые».
+    /// `liked` for Liked Songs.
     pub id: String,
     pub name: String,
     pub track_count: u32,
@@ -243,10 +243,10 @@ const SEARCH_DEPTH: u32 = 250;
     path = "/v1/search",
     tag = "library",
     params(
-        ("q" = String, Query, description = "Что искать"),
-        ("kind" = Option<String>, Query, description = "any (по умолчанию), track, album, artist, playlist"),
-        ("limit" = Option<u32>, Query, description = "Сколько в каждой группе, 1–50, по умолчанию 10"),
-        ("offset" = Option<u32>, Query, description = "С какого места каждой группы (offset + limit не больше 250)"),
+        ("q" = String, Query, description = "What to find"),
+        ("kind" = Option<String>, Query, description = "any (default), track, album, artist, playlist"),
+        ("limit" = Option<u32>, Query, description = "How many per group, 1–50, 10 by default"),
+        ("offset" = Option<u32>, Query, description = "Where each group starts (offset + limit is at most 250)"),
     ),
     responses((status = 200, body = SearchAnswer), (status = 400, body = crate::error::ErrorBody)),
     security(("bearer" = []))
@@ -254,15 +254,15 @@ const SEARCH_DEPTH: u32 = 250;
 pub async fn search(State(sh): State<Arc<Shared>>, RawQuery(raw): RawQuery) -> Result<Json<SearchAnswer>, ApiError> {
     let q = query_value(raw.as_deref(), "q").unwrap_or_default();
     if q.trim().is_empty() {
-        return Err(ApiError::bad_request("Нужен параметр q"));
+        return Err(ApiError::bad_request("The q parameter is required"));
     }
     let kind = query_value(raw.as_deref(), "kind").unwrap_or_default().to_lowercase();
     if !["", "any", "track", "album", "artist", "playlist"].contains(&kind.as_str()) {
-        return Err(ApiError::bad_request("kind: any, track, album, artist или playlist"));
+        return Err(ApiError::bad_request("kind: any, track, album, artist or playlist"));
     }
     let (offset, limit) = page_of(raw.as_deref(), 10, 50);
     if offset.saturating_add(limit) > SEARCH_DEPTH {
-        return Err(ApiError::bad_request(format!("offset + limit — не больше {SEARCH_DEPTH}")));
+        return Err(ApiError::bad_request(format!("offset + limit is at most {SEARCH_DEPTH}")));
     }
     let lib = sh.lib.clone();
     let (found, total) = blocking(move || Ok((lib.search(&q, offset + limit).map_err(db)?, lib.search_track_count(&q).map_err(db)?))).await?;
@@ -274,7 +274,7 @@ pub async fn search(State(sh): State<Arc<Shared>>, RawQuery(raw): RawQuery) -> R
     get,
     path = "/v1/tracks/{id}",
     tag = "library",
-    params(("id" = String, Path, description = "id песни")),
+    params(("id" = String, Path, description = "the track's id")),
     responses((status = 200, body = Track), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
@@ -290,7 +290,7 @@ pub async fn track(State(sh): State<Arc<Shared>>, Path(id): Path<String>) -> Res
     get,
     path = "/v1/albums/{id}",
     tag = "library",
-    params(("id" = String, Path, description = "id альбома")),
+    params(("id" = String, Path, description = "the album's id")),
     responses((status = 200, body = AlbumDetail), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
@@ -312,9 +312,9 @@ pub async fn album(State(sh): State<Arc<Shared>>, Path(id): Path<String>) -> Res
     path = "/v1/artists/{id}",
     tag = "library",
     params(
-        ("id" = String, Path, description = "id исполнителя"),
-        ("offset" = Option<u32>, Query, description = "С какой песни"),
-        ("limit" = Option<u32>, Query, description = "Сколько песен, 1–500, по умолчанию 200"),
+        ("id" = String, Path, description = "the artist's id"),
+        ("offset" = Option<u32>, Query, description = "From which track"),
+        ("limit" = Option<u32>, Query, description = "How many tracks, 1–500, 200 by default"),
     ),
     responses((status = 200, body = ArtistDetail), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
@@ -368,9 +368,9 @@ pub async fn playlists(State(sh): State<Arc<Shared>>) -> Result<Json<Vec<Playlis
     path = "/v1/playlists/{id}",
     tag = "library",
     params(
-        ("id" = String, Path, description = "id плейлиста или liked"),
-        ("offset" = Option<u32>, Query, description = "С какой песни"),
-        ("limit" = Option<u32>, Query, description = "Сколько песен, 1–5000, по умолчанию 5000"),
+        ("id" = String, Path, description = "the playlist's id or liked"),
+        ("offset" = Option<u32>, Query, description = "From which track"),
+        ("limit" = Option<u32>, Query, description = "How many tracks, 1–5000, 5000 by default"),
     ),
     responses((status = 200, body = PlaylistDetail), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
@@ -466,7 +466,7 @@ pub fn lines_of(lines: &[LyricLine]) -> (String, Vec<LyricsLine>) {
     get,
     path = "/v1/tracks/{id}/lyrics",
     tag = "library",
-    params(("id" = String, Path, description = "id песни")),
+    params(("id" = String, Path, description = "the track's id")),
     responses((status = 200, body = Lyrics), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
@@ -490,7 +490,7 @@ pub async fn lyrics(State(sh): State<Arc<Shared>>, Path(id): Path<String>) -> Re
         return Err(gone());
     }
     let Some(stored) = stored.filter(|s| !s.is_miss()) else {
-        return Err(ApiError::not_found("Текста нет"));
+        return Err(ApiError::not_found("No lyrics"));
     };
     let parsed = stored.synced.as_deref().map(nikgob_metadata::parse_lrc_lines).unwrap_or_default();
     let (timing, lines) = lines_of(&parsed);

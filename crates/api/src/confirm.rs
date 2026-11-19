@@ -51,9 +51,9 @@ pub enum Refused {
 impl From<Refused> for ApiError {
     fn from(r: Refused) -> Self {
         match r {
-            Refused::Unknown => ApiError::of(StatusCode::CONFLICT, "confirm_unknown", "Токен подтверждения не найден или уже использован: запроси план заново"),
-            Refused::Expired => ApiError::of(StatusCode::CONFLICT, "confirm_expired", "Токен подтверждения истёк: запроси план заново"),
-            Refused::Mismatch => ApiError::of(StatusCode::CONFLICT, "confirm_mismatch", "Токен подтверждения выдан для других аргументов: запроси план заново"),
+            Refused::Unknown => ApiError::of(StatusCode::CONFLICT, "confirm_unknown", "The confirmation token is not found or already used: request the plan again"),
+            Refused::Expired => ApiError::of(StatusCode::CONFLICT, "confirm_expired", "The confirmation token has expired: request the plan again"),
+            Refused::Mismatch => ApiError::of(StatusCode::CONFLICT, "confirm_mismatch", "The confirmation token was issued for other arguments: request the plan again"),
         }
     }
 }
@@ -95,7 +95,7 @@ impl Store {
     /// A new token for the plan (`plan`, a hash) of `token_id` with `args`
     /// (a hash).
     pub fn issue(&self, token_id: &str, args: &str, plan: &str, now: Instant) -> Result<String, ApiError> {
-        let secret = nikgob_core::api_token::generate().ok_or_else(|| ApiError::internal("Нет случайных чисел"))?;
+        let secret = nikgob_core::api_token::generate().ok_or_else(|| ApiError::internal("No random numbers"))?;
         let token = format!("ct_{}", secret.trim_start_matches("nk_"));
         let mut p = self.pending.lock();
         p.retain(|_, x| x.until > now);
@@ -137,7 +137,7 @@ pub struct PlanAnswer {
     /// Exactly what it would do (names, before → after).
     #[schema(value_type = Object)]
     pub plan: Value,
-    /// Can the app undo it (the Trash, «Отменить»)?
+    /// Can the app undo it (the Trash, Undo)?
     pub reversible: bool,
     /// Repeat the same request with this to do it.
     pub confirm_token: String,

@@ -140,7 +140,7 @@ pub(crate) fn open_inside(path: &FsPath, roots: &[PathBuf]) -> Option<(std::fs::
 /// The open file `file` (named `path`, for its type) as the answer to
 /// `headers` (its Range).
 pub(crate) async fn serve_file(file: std::fs::File, path: &FsPath, headers: &HeaderMap) -> Result<Response, ApiError> {
-    let gone = || ApiError::not_found("Файла нет");
+    let gone = || ApiError::not_found("No such file");
     let mut file = tokio::fs::File::from_std(file);
     let size = file.metadata().await.map_err(|_| gone())?.len();
     let kind = HeaderValue::from_static(content_type(path));
@@ -238,17 +238,17 @@ pub(crate) fn hash_of_file(shared: &Shared, file: &std::fs::File, path: &FsPath)
     path = "/v1/media/tracks/{id}/audio",
     tag = "media",
     params(
-        ("id" = String, Path, description = "id песни"),
-        ("hash" = Option<String>, Query, description = "1: BLAKE3 файла в заголовке x-nikgob-blake3; BLAKE3 файла: именно этот файл (только свои устройства Межсети)"),
-        ("profile" = Option<String>, Query, description = "orig: файл как есть, другие форматы позже (только свои устройства Межсети)"),
+        ("id" = String, Path, description = "the track's id"),
+        ("hash" = Option<String>, Query, description = "1: the file's BLAKE3 in the `x-nikgob-blake3` header; it must be this very file (the owner's devices only)"),
+        ("profile" = Option<String>, Query, description = "orig: the file as it is, other formats later (the owner's devices only)"),
     ),
     responses(
-        (status = 200, description = "Файл как есть"),
-        (status = 206, description = "Часть файла по Range"),
+        (status = 200, description = "The file as it is"),
+        (status = 206, description = "A part of the file by Range"),
         (status = 400, body = crate::error::ErrorBody),
         (status = 403, body = crate::error::ErrorBody),
         (status = 404, body = crate::error::ErrorBody),
-        (status = 416, description = "Range за концом файла"),
+        (status = 416, description = "Range past the end of the file"),
     ),
     security(("bearer" = []), ("token" = []))
 )]
@@ -259,7 +259,7 @@ pub async fn audio(
     RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let id: TrackId = id.parse().map_err(|_| ApiError::bad_request("Неверный id"))?;
+    let id: TrackId = id.parse().map_err(|_| ApiError::bad_request("Invalid id"))?;
     let raw = raw.as_deref();
     // `hash=1`: the file's hash in a header; `hash=<blake3>`: exactly that
     // file of the song, its hash in the header too.
@@ -267,7 +267,7 @@ pub async fn audio(
         None => (false, None),
         Some("1") => (true, None),
         Some(h) if crate::sync::is_hash(&h.to_ascii_lowercase()) => (true, Some(h.to_ascii_lowercase())),
-        Some(_) => return Err(ApiError::bad_request("Неверный hash")),
+        Some(_) => return Err(ApiError::bad_request("Invalid hash")),
     };
     let profile = query_value(raw, "profile");
     // The selectors of a copy are the owner's devices' only; the plain
@@ -280,7 +280,7 @@ pub async fn audio(
     if let Some(p) = profile {
         match nikgob_view::MeshFormat::parse(&p) {
             Some(f) if f.ready() => {}
-            _ => return Err(ApiError::bad_request("Такого формата пока нет")),
+            _ => return Err(ApiError::bad_request("No such format yet")),
         }
     }
     let shared = sh.clone();
@@ -303,7 +303,7 @@ pub async fn audio(
         Ok(Some((file, path, sum)))
     })
     .await?;
-    let (file, path, sum) = found.ok_or_else(|| ApiError::not_found("Файла этой песни здесь нет"))?;
+    let (file, path, sum) = found.ok_or_else(|| ApiError::not_found("The song's file is not here"))?;
     let mut r = serve_file(file, &path, &headers).await?;
     if let Some(ext) = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase)
         && let Ok(v) = HeaderValue::from_str(&ext)
@@ -329,16 +329,16 @@ enum CoverAt {
     get,
     path = "/v1/media/albums/{id}/cover",
     tag = "media",
-    params(("id" = String, Path, description = "id альбома")),
+    params(("id" = String, Path, description = "the album's id")),
     responses(
-        (status = 200, description = "Картинка"),
-        (status = 307, description = "Обложка сервиса: её адрес"),
+        (status = 200, description = "The picture"),
+        (status = 307, description = "The service's cover: its address"),
         (status = 404, body = crate::error::ErrorBody),
     ),
     security(("bearer" = []), ("token" = []))
 )]
 pub async fn cover(State(sh): State<Arc<Shared>>, Path(id): Path<String>, headers: HeaderMap) -> Result<Response, ApiError> {
-    let id: ReleaseId = id.parse().map_err(|_| ApiError::bad_request("Неверный id"))?;
+    let id: ReleaseId = id.parse().map_err(|_| ApiError::bad_request("Invalid id"))?;
     let shared = sh.clone();
     let at = blocking(move || {
         let root = shared.rt.state().prefs.library_dir.clone();
@@ -353,7 +353,7 @@ pub async fn cover(State(sh): State<Arc<Shared>>, Path(id): Path<String>, header
     match at {
         Some(CoverAt::File(f, p)) => serve_file(f, &p, &headers).await,
         Some(CoverAt::Web(url)) => Ok(Redirect::temporary(&url).into_response()),
-        None => Err(ApiError::not_found("Обложки нет")),
+        None => Err(ApiError::not_found("No cover")),
     }
 }
 

@@ -60,7 +60,7 @@ pub fn get(name: &str, args: &Value) -> Result<Value, String> {
             let theme = arg(args, "theme").unwrap_or_default();
             let length = arg(args, "duration_min").map_or_else(|| "about an hour".to_owned(), |d| format!("about {d} minutes"));
             format!(
-                "Curate a playlist for: «{theme}», {length} long.\n\
+                "Curate a playlist for: “{theme}”, {length} long.\n\
                  1. Learn the taste: stats_query report=listening (days=90) and report=forgotten_gems.\n\
                  2. Find candidates in the library with library_search and library_get; use stats_query report=similar_tracks on good seeds.\n\
                  3. Add at most a few songs the library lacks from discover_search (mark them as new).\n\
@@ -72,7 +72,7 @@ pub fn get(name: &str, args: &Value) -> Result<Value, String> {
              1. stats_query report=library_health: formats and sizes, tracks without synced lyrics, fake lossless files, masters without a replica, missing files.\n\
              2. For albums that look incomplete, use library_get kind=album and compare tracks with discover_search mode=artist_discography where useful.\n\
              3. Report the findings in order of importance with numbers.\n\
-             4. Propose a plan of fixes. Do not change anything without the user's yes: retag and trash are two-step tools that answer a plan first; downloads over the limits wait in the app's «Подтверди»."
+             4. Propose a plan of fixes. Do not change anything without the user's yes: retag and trash are two-step tools that answer a plan first; downloads over the limits wait for confirmation in the app."
             .to_owned(),
         "explain-track" => {
             let which = arg(args, "track_id").map_or_else(
