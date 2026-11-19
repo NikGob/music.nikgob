@@ -252,6 +252,7 @@ pub fn fmt_selected_files(n: usize, total: usize, size: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::plural_forms;
 
     #[test]
     fn seeds_plural_and_fmts_match_both_locales() {
