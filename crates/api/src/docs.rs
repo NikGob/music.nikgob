@@ -11,7 +11,7 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, Secur
     info(
         title = "music.nikgob",
         version = "1",
-        description = "Локальный API плеера. Каждый адрес /v1 требует токен: заголовок `Authorization: Bearer nk_…` (для /v1/events и /v1/media/… можно `?token=nk_…`). Токен создаётся в плеере: Настройки → Межсеть → API и MCP → «Новый токен». Время — в миллисекундах, громкость — от 0 до 1. Ошибка: `{\"error\", \"message\", \"details\"}`. Разрушительные запросы (теги, корзина, удаление из плейлиста, переименование и удаление плейлиста) без `confirm_token` ничего не меняют и отвечают планом и одноразовым `confirm_token` (5 минут, для тех же аргументов). MCP (Streamable HTTP) — `POST /mcp` с тем же токеном."
+        description = "The player's local API. Every /v1 route needs a token: the `Authorization: Bearer nk_…` header (for /v1/events and /v1/media/… a `?token=nk_…` works too). The token is created in the player: Settings → Mesh → API and MCP → “New token”. Time is in milliseconds, volume is from 0 to 1. An error: `{\"error\", \"message\", \"details\"}`. Destructive requests (tags, the trash, deleting from a playlist, renaming and deleting a playlist) without a `confirm_token` change nothing and answer the plan and a one-time `confirm_token` (5 minutes, for the same arguments). MCP (Streamable HTTP) is `POST /mcp` with the same token."
     ),
     paths(
         crate::routes::state,
@@ -147,15 +147,15 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, Secur
     )),
     modifiers(&Security),
     tags(
-        (name = "player", description = "Что играет, включить, пауза, громкость, приглушение, события"),
-        (name = "queue", description = "Очередь"),
-        (name = "outputs", description = "Куда идёт звук"),
-        (name = "library", description = "Поиск и чтение библиотеки"),
-        (name = "media", description = "Файлы песен и обложки"),
-        (name = "library-edit", description = "Лайки, плейлисты, теги и корзина"),
-        (name = "stats", description = "Аналитика прослушиваний и библиотеки"),
-        (name = "discover", description = "Поиск в сервисах, дискография, ссылка «Поделиться»"),
-        (name = "downloads", description = "Загрузки и «Подтверди»"),
+        (name = "player", description = "Now playing: play, pause, volume, muting, events"),
+        (name = "queue", description = "The queue"),
+        (name = "outputs", description = "Where the sound goes"),
+        (name = "library", description = "Library search and reads"),
+        (name = "media", description = "Track files and covers"),
+        (name = "library-edit", description = "Likes, playlists, tags and the trash"),
+        (name = "stats", description = "Listening stats and library analytics"),
+        (name = "discover", description = "Service search, discography, the Share link"),
+        (name = "downloads", description = "Downloads and the Confirm queue"),
     )
 )]
 pub struct ApiDoc;

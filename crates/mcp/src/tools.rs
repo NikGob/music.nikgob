@@ -1,7 +1,7 @@
 //! The tools: 18 in four groups of rights, each a thin call (or a few)
 //! into the REST API. A session sees only the tools its token can use:
-//! «Только чтение» the reading ones, «Управление» also the player's,
-//! «Полный» all of them. Answers are compact JSON (no covers, no nulls,
+//! “Read” the reading ones, “Control” also the player's,
+//! “Full” all of them. Answers are compact JSON (no covers, no nulls,
 //! lists cut with their totals said).
 
 use nikgob_core::settings::ApiPreset;
@@ -14,11 +14,11 @@ use crate::backend::{ApiRequest, ApiResponse, Backend, Unreachable, encode, with
 pub enum Contour {
     /// Reads: every token.
     Read,
-    /// The player, the queue, the output: «Управление» and «Полный».
+    /// The player, the queue, the output: “Control” and “Full”.
     Control,
-    /// Changes that add or can be undone: «Полный».
+    /// Changes that add or can be undone: “Full”.
     Library,
-    /// Changes of files and playlists, with a confirmation: «Полный».
+    /// Changes of files and playlists, with a confirmation: “Full”.
     Destructive,
 }
 
@@ -61,7 +61,7 @@ pub const TOOLS: &[ToolDef] = &[
         name: "library_get",
         title: "Read from the library",
         contour: Contour::Read,
-        description: "Read one thing of the library by id: a track (with its lyrics if include_lyrics), an album or an artist with their tracks, a playlist with its tracks (paged with offset/limit), the list of playlists (kind=playlists, no id), or a track's lyrics (kind=lyrics). Playlist id `liked` is «Любимые».",
+        description: "Read one thing of the library by id: a track (with its lyrics if include_lyrics), an album or an artist with their tracks, a playlist with its tracks (paged with offset/limit), the list of playlists (kind=playlists, no id), or a track's lyrics (kind=lyrics). Playlist id `liked` is Liked Songs.",
         schema: schema_get,
     },
     ToolDef {
@@ -82,7 +82,7 @@ pub const TOOLS: &[ToolDef] = &[
         name: "downloads_inspect",
         title: "Downloads",
         contour: Contour::Read,
-        description: "The downloads: active jobs, the «Хочу скачать» wishlist, and the «Подтверди» queue waiting for the user. With search_track_id or search_album_id: search the download sources for that library track or album without downloading anything (slow).",
+        description: "The downloads: active jobs, the Wishlist, and the Confirm queue waiting for the user. With search_track_id or search_album_id: search the download sources for that library track or album without downloading anything (slow).",
         schema: schema_downloads,
     },
     ToolDef {
@@ -96,7 +96,7 @@ pub const TOOLS: &[ToolDef] = &[
         name: "player_play",
         title: "Play",
         contour: Contour::Control,
-        description: "Start music: by a free query (an artist, album, song, playlist; «моя волна» / «любимые» work too) with optional kind, or exactly by id+kind (from library_search). mode: replace the queue (default), next (after the current track) or enqueue (at the end). shuffle: null = as the app does. output: switch the output first. No query and no id resumes.",
+        description: "Start music: by a free query (an artist, album, song, playlist; my wave and liked work too) with optional kind, or exactly by id+kind (from library_search). mode: replace the queue (default), next (after the current track) or enqueue (at the end). shuffle: null = as the app does. output: switch the output first. No query and no id resumes.",
         schema: schema_play,
     },
     ToolDef {
@@ -131,7 +131,7 @@ pub const TOOLS: &[ToolDef] = &[
         name: "library_feedback",
         title: "Like and recommend",
         contour: Contour::Library,
-        description: "Reversible feedback on a track, album or artist (a library id, or a service id `service:id` for a track or album): like / unlike, dislike / undislike (a track: «Не нравится»), dont_recommend / recommend (a track or artist: kept out of mixes and radio), add_to_library / remove_from_library (a track or album). The app shows its usual «Отменить».",
+        description: "Reversible feedback on a track, album or artist (a library id, or a service id `service:id` for a track or album): like / unlike, dislike / undislike (a track), dont_recommend / recommend (a track or artist: kept out of mixes and radio), add_to_library / remove_from_library (a track or album). The app shows its usual Undo.",
         schema: schema_feedback,
     },
     ToolDef {
@@ -145,7 +145,7 @@ pub const TOOLS: &[ToolDef] = &[
         name: "downloads_enqueue",
         title: "Download",
         contour: Contour::Library,
-        description: "Ask the player to download library tracks or albums without a file, or service tracks/albums (`service:id`). A small request (up to 3 releases, about 1.5 GB) goes to «Хочу скачать» at once; a larger one waits in the app's «Подтверди» queue for the user to click (status queued_in_confirm).",
+        description: "Ask the player to download library tracks or albums without a file, or service tracks/albums (`service:id`). A small request (up to 3 releases, about 1.5 GB) goes to the Wishlist at once; a larger one waits in the app's Confirm queue for the user to click (status queued_in_confirm).",
         schema: schema_enqueue,
     },
     ToolDef {

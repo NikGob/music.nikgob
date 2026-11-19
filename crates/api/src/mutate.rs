@@ -38,7 +38,7 @@ pub const PLAN_MAX: usize = 50;
 
 /// `400 too_many`: split the request.
 fn too_many(what: &str) -> ApiError {
-    ApiError::of(StatusCode::BAD_REQUEST, "too_many", format!("Не больше {PLAN_MAX} {what} за раз: раздели запрос"))
+    ApiError::of(StatusCode::BAD_REQUEST, "too_many", format!("No more than {PLAN_MAX} {what} at a time: split the request"))
 }
 
 /// `service:id` of a service's track or album (`spotify:4uLU…`).
@@ -49,36 +49,36 @@ pub fn remote_id(s: &str) -> Option<RemoteId> {
 }
 
 fn bad_id() -> ApiError {
-    ApiError::bad_request("Неверный id")
+    ApiError::bad_request("Invalid id")
 }
 
 fn gone() -> ApiError {
-    ApiError::not_found("Ничего не нашлось")
+    ApiError::not_found("Not found")
 }
 
 fn track_ids(ids: &[String]) -> Result<Vec<TrackId>, ApiError> {
-    ids.iter().map(|s| s.trim().parse::<TrackId>().map_err(|_| ApiError::bad_request(format!("Неверный id песни: {s}")))).collect()
+    ids.iter().map(|s| s.trim().parse::<TrackId>().map_err(|_| ApiError::bad_request(format!("Invalid track id: {s}")))).collect()
 }
 
 fn release_ids(ids: &[String]) -> Result<Vec<ReleaseId>, ApiError> {
-    ids.iter().map(|s| s.trim().parse::<ReleaseId>().map_err(|_| ApiError::bad_request(format!("Неверный id альбома: {s}")))).collect()
+    ids.iter().map(|s| s.trim().parse::<ReleaseId>().map_err(|_| ApiError::bad_request(format!("Invalid album id: {s}")))).collect()
 }
 
 fn remote_ids(ids: &[String]) -> Result<Vec<RemoteId>, ApiError> {
-    ids.iter().map(|s| remote_id(s).ok_or_else(|| ApiError::bad_request(format!("Неверный id сервиса (нужно service:id): {s}")))).collect()
+    ids.iter().map(|s| remote_id(s).ok_or_else(|| ApiError::bad_request(format!("Invalid service id (need service:id): {s}")))).collect()
 }
 
-/// The playlist of an API id (`liked` is «Любимые»).
+/// The playlist of an API id (`liked` is Liked Songs).
 fn playlist_id(s: &str) -> Result<PlaylistId, ApiError> {
     if s == LIKED_ID { Ok(LIKED_PLAYLIST) } else { s.parse().map_err(|_| bad_id()) }
 }
 
-/// «1 трек», «3 трека», «12 треков».
+/// "1 track", "3 tracks", "12 tracks".
 pub fn tracks_word(n: usize) -> String {
     let word = match (n % 10, n % 100) {
-        (1, x) if x != 11 => "трек",
-        (2..=4, x) if !(12..=14).contains(&x) => "трека",
-        _ => "треков",
+        (1, x) if x != 11 => "track",
+        (2..=4, x) if !(12..=14).contains(&x) => "tracks",
+        _ => "tracks",
     };
     format!("{n} {word}")
 }
@@ -124,21 +124,21 @@ pub fn target_of(kind: &str, id: &str) -> Result<Target, ApiError> {
         return match kind {
             "track" => Ok(Target::StreamTrack(r)),
             "album" => Ok(Target::StreamAlbum(r)),
-            _ => Err(ApiError::bad_request("Исполнителя сервиса можно отметить только по id библиотеки")),
+            _ => Err(ApiError::bad_request("A service artist can only be marked by its library id")),
         };
     }
     match kind {
         "track" => id.trim().parse().map(Target::Track).map_err(|_| bad_id()),
         "album" => id.trim().parse().map(Target::Album).map_err(|_| bad_id()),
         "artist" => id.trim().parse().map(Target::Artist).map_err(|_| bad_id()),
-        _ => Err(ApiError::bad_request("kind: track, album или artist")),
+        _ => Err(ApiError::bad_request("kind: track, album or artist")),
     }
 }
 
 /// The command of feedback `action` on `t`: the one the window's button
-/// sends (each with its «Отменить»).
+/// sends (each with its Undo).
 pub fn feedback_command(action: &str, t: &Target) -> Result<Command, ApiError> {
-    let no = || ApiError::bad_request(format!("{action} нельзя для такого объекта"));
+    let no = || ApiError::bad_request(format!("{action} is not allowed for this object"));
     Ok(match (action, t) {
         ("like" | "unlike", Target::Track(id)) => Command::Like(LikeTarget::Track(*id), action == "like"),
         ("like" | "unlike", Target::Album(id)) => Command::Like(LikeTarget::Release(*id), action == "like"),
@@ -158,7 +158,7 @@ pub fn feedback_command(action: &str, t: &Target) -> Result<Command, ApiError> {
             "like" | "unlike" | "dislike" | "undislike" | "dont_recommend" | "recommend" | "add_to_library" | "remove_from_library",
             _,
         ) => return Err(no()),
-        _ => return Err(ApiError::bad_request("action: like, unlike, dislike, undislike, dont_recommend, recommend, add_to_library или remove_from_library")),
+        _ => return Err(ApiError::bad_request("action: like, unlike, dislike, undislike, dont_recommend, recommend, add_to_library or remove_from_library")),
     })
 }
 
@@ -172,8 +172,8 @@ fn title_of(lib: &Library, t: &Target) -> Result<Option<String>, ApiError> {
     })
 }
 
-/// Likes, «Не нравится», «Не рекомендовать», «В библиотеку»: reversible,
-/// each with the app's «Отменить».
+/// Likes, dislikes, don't-recommend, add-to-library: reversible,
+/// each with the app's Undo.
 #[utoipa::path(
     post,
     path = "/v1/library/feedback",
@@ -185,7 +185,7 @@ fn title_of(lib: &Library, t: &Target) -> Result<Option<String>, ApiError> {
 pub async fn feedback(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<DoneAnswer>, ApiError> {
     let b: FeedbackBody = body(&bytes)?;
     let (Some(action), Some(kind), Some(id)) = (b.action, b.kind, b.id) else {
-        return Err(ApiError::bad_request("Нужны action, kind и id"));
+        return Err(ApiError::bad_request("action, kind and id are required"));
     };
     let target = target_of(kind.trim(), &id)?;
     let command = feedback_command(action.trim(), &target)?;
@@ -223,7 +223,7 @@ fn playlist_now(lib: &Library, id: PlaylistId) -> Result<Playlist, ApiError> {
     if id == LIKED_PLAYLIST {
         return Ok(Playlist { id: LIKED_ID.to_owned(), name: nikgob_library::LIKED_PLAYLIST_NAME.to_owned(), track_count: lib.liked_count().map_err(db)? });
     }
-    let p = lib.get_playlist(id).map_err(db)?.ok_or_else(|| ApiError::not_found("Такого плейлиста нет"))?;
+    let p = lib.get_playlist(id).map_err(db)?.ok_or_else(|| ApiError::not_found("No such playlist"))?;
     let count = lib.list_playlists().map_err(db)?.into_iter().find(|s| s.id == Some(id)).map_or(0, |s| s.track_count);
     Ok(Playlist { id: p.id.to_string(), name: p.name, track_count: count })
 }
@@ -232,14 +232,14 @@ fn playlist_now(lib: &Library, id: PlaylistId) -> Result<Playlist, ApiError> {
 fn album_tracks(lib: &Library, album: Option<&str>) -> Result<Vec<TrackId>, ApiError> {
     let Some(a) = album else { return Ok(Vec::new()) };
     let id: ReleaseId = a.trim().parse().map_err(|_| bad_id())?;
-    lib.get_release(id).map_err(db)?.ok_or_else(|| ApiError::not_found("Такого альбома нет"))?;
+    lib.get_release(id).map_err(db)?.ok_or_else(|| ApiError::not_found("No such album"))?;
     Ok(lib.tracks_of_release(id).map_err(db)?.into_iter().map(|t| t.id).collect())
 }
 
 fn known_tracks(lib: &Library, ids: &[TrackId]) -> Result<(), ApiError> {
     let found = lib.get_track_rows(ids).map_err(db)?;
     match ids.iter().find(|t| !found.contains_key(t)) {
-        Some(t) => Err(ApiError::not_found(format!("Нет такой песни: {t}"))),
+        Some(t) => Err(ApiError::not_found(format!("No such track: {t}"))),
         None => Ok(()),
     }
 }
@@ -255,7 +255,7 @@ fn known_tracks(lib: &Library, ids: &[TrackId]) -> Result<(), ApiError> {
 )]
 pub async fn create_playlist(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<DoneAnswer>, ApiError> {
     let b: PlaylistAddBody = body(&bytes)?;
-    let name = b.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).ok_or_else(|| ApiError::bad_request("Нужно name"))?.to_owned();
+    let name = b.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).ok_or_else(|| ApiError::bad_request("name is required"))?.to_owned();
     let mut tracks = track_ids(&b.track_ids)?;
     let remotes = remote_ids(&b.remote_track_ids)?;
     let lib = sh.lib.clone();
@@ -289,7 +289,7 @@ pub async fn create_playlist(State(sh): State<Arc<Shared>>, Extension(caller): E
     post,
     path = "/v1/playlists/{id}/tracks",
     tag = "library-edit",
-    params(("id" = String, Path, description = "id плейлиста или liked")),
+    params(("id" = String, Path, description = "playlist id or liked")),
     request_body(content = PlaylistAddBody, content_type = "application/json"),
     responses((status = 200, body = DoneAnswer), (status = 400, body = crate::error::ErrorBody), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
@@ -306,7 +306,7 @@ pub async fn add_to_playlist(
     let remotes = remote_ids(&b.remote_track_ids)?;
     let album: Option<ReleaseId> = b.album_id.as_deref().map(|a| a.trim().parse().map_err(|_| bad_id())).transpose()?;
     if tracks.is_empty() && remotes.is_empty() && album.is_none() {
-        return Err(ApiError::bad_request("Нечего добавить: track_ids, album_id или remote_track_ids"));
+        return Err(ApiError::bad_request("Nothing to add: track_ids, album_id or remote_track_ids"));
     }
     let lib = sh.lib.clone();
     let t = tracks.clone();
@@ -314,7 +314,7 @@ pub async fn add_to_playlist(
         playlist_now(&lib, pid)?;
         known_tracks(&lib, &t)?;
         if let Some(a) = album {
-            lib.get_release(a).map_err(db)?.ok_or_else(|| ApiError::not_found("Такого альбома нет"))?;
+            lib.get_release(a).map_err(db)?.ok_or_else(|| ApiError::not_found("No such album"))?;
         }
         Ok(())
     })
@@ -387,7 +387,7 @@ pub struct RenameBody {
     put,
     path = "/v1/playlists/{id}",
     tag = "library-edit",
-    params(("id" = String, Path, description = "id плейлиста")),
+    params(("id" = String, Path, description = "playlist id")),
     request_body(content = RenameBody, content_type = "application/json"),
     responses((status = 200, body = Destructive), (status = 400, body = crate::error::ErrorBody), (status = 409, body = crate::error::ErrorBody)),
     security(("bearer" = []))
@@ -401,9 +401,9 @@ pub async fn rename_playlist(
     let b: RenameBody = body(&bytes)?;
     let pid = playlist_id(&id)?;
     if pid == LIKED_PLAYLIST {
-        return Err(ApiError::bad_request("«Любимые» не переименовать"));
+        return Err(ApiError::bad_request("The Liked Songs playlist cannot be renamed"));
     }
-    let name = b.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).ok_or_else(|| ApiError::bad_request("Нужно name"))?.to_owned();
+    let name = b.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).ok_or_else(|| ApiError::bad_request("name is required"))?.to_owned();
     let lib = sh.lib.clone();
     let p = blocking(move || playlist_now(&lib, pid)).await?;
     let args = json!({"playlist": id, "name": name});
@@ -426,12 +426,12 @@ pub struct RemoveBody {
 }
 
 /// Takes songs out of a playlist (with a confirmation; each comes back
-/// with the app's «Отменить»). Out of «Любимые» is an unlike.
+/// with the app's Undo). Out of Liked is an unlike.
 #[utoipa::path(
     post,
     path = "/v1/playlists/{id}/remove",
     tag = "library-edit",
-    params(("id" = String, Path, description = "id плейлиста или liked")),
+    params(("id" = String, Path, description = "playlist id or liked")),
     request_body(content = RemoveBody, content_type = "application/json"),
     responses((status = 200, body = Destructive), (status = 400, body = crate::error::ErrorBody), (status = 409, body = crate::error::ErrorBody)),
     security(("bearer" = []))
@@ -446,10 +446,10 @@ pub async fn remove_from_playlist(
     let pid = playlist_id(&id)?;
     let tracks = track_ids(&b.track_ids)?;
     if tracks.is_empty() {
-        return Err(ApiError::bad_request("Нужен track_ids"));
+        return Err(ApiError::bad_request("track_ids is required"));
     }
     if tracks.len() > PLAN_MAX {
-        return Err(too_many("песен"));
+        return Err(too_many("tracks"));
     }
     let lib = sh.lib.clone();
     let t = tracks.clone();
@@ -487,13 +487,13 @@ pub async fn remove_from_playlist(
     Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result: json!({"removed": removed, "playlist": p}) })))
 }
 
-/// Deletes a playlist (with a confirmation; the app has no «Отменить»
+/// Deletes a playlist (with a confirmation; the app has no Undo
 /// for it). Its songs stay in the library.
 #[utoipa::path(
     delete,
     path = "/v1/playlists/{id}",
     tag = "library-edit",
-    params(("id" = String, Path, description = "id плейлиста"), ("confirm_token" = Option<String>, Query, description = "Из ответа без него")),
+    params(("id" = String, Path, description = "playlist id"), ("confirm_token" = Option<String>, Query, description = "From the response without one")),
     responses((status = 200, body = Destructive), (status = 400, body = crate::error::ErrorBody), (status = 409, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
@@ -505,7 +505,7 @@ pub async fn delete_playlist(
 ) -> Result<Json<Destructive>, ApiError> {
     let pid = playlist_id(&id)?;
     if pid == LIKED_PLAYLIST {
-        return Err(ApiError::bad_request("«Любимые» не удалить"));
+        return Err(ApiError::bad_request("The Liked Songs playlist cannot be deleted"));
     }
     let lib = sh.lib.clone();
     let p = blocking(move || playlist_now(&lib, pid)).await?;
@@ -536,14 +536,14 @@ pub struct RetagBody {
 /// Whether the numbers of `p` are numbers.
 pub fn check_patch(p: &TagPatch) -> Result<(), ApiError> {
     if p.is_empty() {
-        return Err(ApiError::bad_request("changes: нечего менять"));
+        return Err(ApiError::bad_request("changes: nothing to change"));
     }
     let digits = |v: &Option<String>| v.as_deref().map(str::trim).is_none_or(|s| s.is_empty() || s.chars().all(|c| c.is_ascii_digit()));
     if !digits(&p.track_no) || !digits(&p.disc_no) {
-        return Err(ApiError::bad_request("track_no и disc_no — числа"));
+        return Err(ApiError::bad_request("track_no and disc_no must be numbers"));
     }
     if p.year.as_deref().map(str::trim).is_some_and(|y| !y.is_empty() && (y.len() != 4 || !y.chars().all(|c| c.is_ascii_digit()))) {
-        return Err(ApiError::bad_request("year — четыре цифры"));
+        return Err(ApiError::bad_request("year must be four digits"));
     }
     Ok(())
 }
@@ -590,10 +590,10 @@ pub async fn retag(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
     let b: RetagBody = body(&bytes)?;
     let tracks = track_ids(&b.track_ids)?;
     if tracks.is_empty() {
-        return Err(ApiError::bad_request("Нужен track_ids"));
+        return Err(ApiError::bad_request("track_ids is required"));
     }
     if tracks.len() > PLAN_MAX {
-        return Err(too_many("песен"));
+        return Err(too_many("tracks"));
     }
     check_patch(&b.changes)?;
     let lib = sh.lib.clone();
@@ -687,17 +687,17 @@ pub fn touches_outside(lib: &Library, track: TrackId, root: &[PathBuf]) -> Resul
     Ok(false)
 }
 
-/// The toast's word for what goes: «Трек», «Альбом», «12 треков».
+/// The toast's word for what goes: "Track", "Album", "12 tracks".
 pub fn trash_what(tracks: usize, only_one_album: bool) -> String {
     match (tracks, only_one_album) {
-        (_, true) => "Альбом".to_owned(),
-        (1, false) => "Трек".to_owned(),
+        (_, true) => "Album".to_owned(),
+        (1, false) => "Track".to_owned(),
         (n, false) => tracks_word(n),
     }
 }
 
 /// Moves songs and albums to the library's Trash (with a confirmation):
-/// kept 30 days, the app's «Отменить» and Trash bring them back. Never
+/// kept 30 days, the app's Undo and Trash bring them back. Never
 /// deletes for good; refused while the Trash is off in the settings.
 #[utoipa::path(
     post,
@@ -710,12 +710,12 @@ pub fn trash_what(tracks: usize, only_one_album: bool) -> String {
 pub async fn trash(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<Destructive>, ApiError> {
     let b: TrashBody = body(&bytes)?;
     if !sh.rt.state().prefs.use_trash {
-        return Err(ApiError::of(StatusCode::CONFLICT, "trash_off", "Корзина выключена в настройках: через API ничего не удаляется"));
+        return Err(ApiError::of(StatusCode::CONFLICT, "trash_off", "The Trash is off in the settings: nothing is deleted through the API"));
     }
     let tracks = track_ids(&b.track_ids)?;
     let albums = release_ids(&b.album_ids)?;
     if tracks.is_empty() && albums.is_empty() {
-        return Err(ApiError::bad_request("Нужен track_ids или album_ids"));
+        return Err(ApiError::bad_request("track_ids or album_ids is required"));
     }
     let library_dir = sh.rt.state().prefs.library_dir.clone();
     let lib = sh.lib.clone();
@@ -724,7 +724,7 @@ pub async fn trash(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
         let mut all: Vec<TrackId> = Vec::new();
         let mut album_names = Vec::new();
         for a in &albums {
-            let r = lib.get_release(*a).map_err(db)?.ok_or_else(|| ApiError::not_found(format!("Нет такого альбома: {a}")))?;
+            let r = lib.get_release(*a).map_err(db)?.ok_or_else(|| ApiError::not_found(format!("No such album: {a}")))?;
             album_names.push(json!({"id": a.to_string(), "name": format!("{} — {}", r.artist_credit.display(), r.title)}));
             for t in lib.tracks_of_release(*a).map_err(db)? {
                 if !all.contains(&t.id) {
@@ -739,7 +739,7 @@ pub async fn trash(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
             }
         }
         if all.len() > PLAN_MAX {
-            return Err(too_many("песен (альбомы считаются по песням)"));
+            return Err(too_many("tracks (albums count by their tracks)"));
         }
         // A track with a file (or its lyrics) outside the library stays.
         let mut outside = Vec::new();
@@ -760,7 +760,7 @@ pub async fn trash(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
     })
     .await?;
     if all.is_empty() && !outside.is_empty() {
-        return Err(ApiError::of(StatusCode::CONFLICT, "outside_library", "Файлы этих песен лежат вне библиотеки: через API они не удаляются"));
+        return Err(ApiError::of(StatusCode::CONFLICT, "outside_library", "These songs' files are outside the library: the API does not delete them"));
     }
     let args = serde_json::to_value(TrashBody { confirm_token: None, ..b.clone() }).unwrap_or_default();
     let outside: Vec<String> = outside.iter().map(ToString::to_string).collect();
@@ -772,7 +772,7 @@ pub async fn trash(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
     let what = trash_what(all.len(), b.album_ids.len() == 1 && b.track_ids.is_empty() && outside.is_empty());
     let n = all.len();
     sh.run_by(Some(caller.actor), vec![Command::ApiTrash { tracks: all, what }]).await?;
-    Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result: json!({"trashed": n, "undo": "the app's «Отменить» or its Trash"}) })))
+    Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result: json!({"trashed": n, "undo": "the app's Undo or its Trash"}) })))
 }
 
 #[cfg(test)]
@@ -785,14 +785,14 @@ mod tests {
         assert_eq!(remote_id("deezer:"), None);
         assert_eq!(remote_id("nope:1"), None);
         assert_eq!(remote_id("0190a1b2-0000-7000-8000-000000000000"), None);
-        assert_eq!(tracks_word(1), "1 трек");
-        assert_eq!(tracks_word(3), "3 трека");
-        assert_eq!(tracks_word(12), "12 треков");
-        assert_eq!(tracks_word(21), "21 трек");
-        assert_eq!(tracks_word(111), "111 треков");
-        assert_eq!(trash_what(1, false), "Трек");
-        assert_eq!(trash_what(10, true), "Альбом");
-        assert_eq!(trash_what(5, false), "5 треков");
+        assert_eq!(tracks_word(1), "1 track");
+        assert_eq!(tracks_word(3), "3 tracks");
+        assert_eq!(tracks_word(12), "12 tracks");
+        assert_eq!(tracks_word(21), "21 track");
+        assert_eq!(tracks_word(111), "111 tracks");
+        assert_eq!(trash_what(1, false), "Track");
+        assert_eq!(trash_what(10, true), "Album");
+        assert_eq!(trash_what(5, false), "5 tracks");
     }
 
     #[test]

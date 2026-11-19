@@ -154,7 +154,7 @@ async fn next_event(mut f: Feed) -> Option<(Result<Event, Infallible>, Feed)> {
     path = "/v1/events",
     tag = "player",
     responses(
-        (status = 200, description = "text/event-stream: `event: state` с тем же JSON, что у GET /v1/state"),
+        (status = 200, description = "text/event-stream: `event: state` with the same JSON as GET /v1/state"),
         (status = 429, body = crate::error::ErrorBody),
     ),
     security(("bearer" = []), ("token" = []))
@@ -202,7 +202,7 @@ mod tests {
             muted: false,
             shuffle: false,
             repeat: RepeatMode::Off,
-            output: OutputRef { id: "local:default".into(), name: "По умолчанию".into() },
+            output: OutputRef { id: "local:default".into(), name: "Default".into() },
             duck: None,
         }
     }

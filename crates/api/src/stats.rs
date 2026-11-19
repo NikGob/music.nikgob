@@ -24,7 +24,7 @@ const SOUND_KEPT: Duration = Duration::from_secs(10 * 60);
 
 fn number<T: std::str::FromStr>(raw: Option<&str>, key: &str) -> Result<Option<T>, ApiError> {
     match query_value(raw, key) {
-        Some(v) if !v.trim().is_empty() => v.trim().parse().map(Some).map_err(|_| ApiError::bad_request(format!("{key} — число"))),
+        Some(v) if !v.trim().is_empty() => v.trim().parse().map(Some).map_err(|_| ApiError::bad_request(format!("{key} must be a number"))),
         _ => Ok(None),
     }
 }
@@ -141,7 +141,7 @@ pub fn period(days: Option<i64>, from: Option<i64>, to: Option<i64>, now: i64) -
         (None, None) => to - 30 * DAY_MS,
     };
     if from >= to {
-        return Err(ApiError::bad_request("from_ms должен быть раньше to_ms"));
+        return Err(ApiError::bad_request("from_ms must be earlier than to_ms"));
     }
     Ok((from, to))
 }
@@ -153,10 +153,10 @@ pub fn period(days: Option<i64>, from: Option<i64>, to: Option<i64>, now: i64) -
     path = "/v1/stats/listening",
     tag = "stats",
     params(
-        ("days" = Option<i64>, Query, description = "Последние N дней (по умолчанию 30)"),
-        ("from_ms" = Option<i64>, Query, description = "Начало периода, unix ms"),
-        ("to_ms" = Option<i64>, Query, description = "Конец периода, unix ms (по умолчанию сейчас)"),
-        ("limit" = Option<u32>, Query, description = "Сколько в каждом топе, 1–50, по умолчанию 10"),
+        ("days" = Option<i64>, Query, description = "The last N days (30 by default)"),
+        ("from_ms" = Option<i64>, Query, description = "The period's start, unix ms"),
+        ("to_ms" = Option<i64>, Query, description = "The period's end, unix ms (now by default)"),
+        ("limit" = Option<u32>, Query, description = "How many in each top, 1–50, 10 by default"),
     ),
     responses((status = 200, body = ListeningAnswer), (status = 400, body = crate::error::ErrorBody)),
     security(("bearer" = []))
@@ -186,9 +186,9 @@ pub struct ForgottenAnswer {
     path = "/v1/stats/forgotten",
     tag = "stats",
     params(
-        ("days" = Option<i64>, Query, description = "Не играли столько дней (по умолчанию 90)"),
-        ("min_plays" = Option<u32>, Query, description = "Играли хотя бы столько раз (по умолчанию 5) — или лайкнуты"),
-        ("limit" = Option<u32>, Query, description = "1–100, по умолчанию 20"),
+        ("days" = Option<i64>, Query, description = "Not played for this many days (90 by default)"),
+        ("min_plays" = Option<u32>, Query, description = "Played at least this many times (5 by default) — or liked"),
+        ("limit" = Option<u32>, Query, description = "1–100, 20 by default"),
     ),
     responses((status = 200, body = ForgottenAnswer)),
     security(("bearer" = []))
@@ -336,8 +336,8 @@ pub struct SimilarAnswer {
     path = "/v1/stats/similar",
     tag = "stats",
     params(
-        ("track_id" = Option<String>, Query, description = "id песни (по умолчанию играющая)"),
-        ("limit" = Option<u32>, Query, description = "1–50, по умолчанию 10"),
+        ("track_id" = Option<String>, Query, description = "the track's id (the playing one by default)"),
+        ("limit" = Option<u32>, Query, description = "1–50, 10 by default"),
     ),
     responses((status = 200, body = SimilarAnswer), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
@@ -346,15 +346,15 @@ pub async fn similar(State(sh): State<Arc<Shared>>, RawQuery(raw): RawQuery) -> 
     let raw = raw.as_deref();
     let limit = number::<usize>(raw, "limit")?.unwrap_or(10).clamp(1, 50);
     let seed: TrackId = match query_value(raw, "track_id").filter(|s| !s.trim().is_empty()) {
-        Some(s) => s.trim().parse().map_err(|_| ApiError::bad_request("Неверный id"))?,
-        None => sh.rt.state().player.current.as_ref().map(|t| t.id).ok_or_else(|| ApiError::bad_request("Ничего не играет: нужен track_id"))?,
+        Some(s) => s.trim().parse().map_err(|_| ApiError::bad_request("Invalid id"))?,
+        None => sh.rt.state().player.current.as_ref().map(|t| t.id).ok_or_else(|| ApiError::bad_request("Nothing is playing: a track_id is required"))?,
     };
     let sh2 = sh.clone();
     let (seed_row, near) = blocking(move || {
         let lib = &sh2.lib;
-        let row = lib.get_track_row(seed).map_err(db)?.ok_or_else(|| ApiError::not_found("Ничего не нашлось"))?;
+        let row = lib.get_track_row(seed).map_err(db)?.ok_or_else(|| ApiError::not_found("Not found"))?;
         let idx = sh2.sound.get(lib)?;
-        let v = *idx.get(seed).ok_or_else(|| ApiError::not_found("У песни ещё нет анализа звука"))?;
+        let v = *idx.get(seed).ok_or_else(|| ApiError::not_found("The song has no audio analysis yet"))?;
         let near = idx.nearest_to(Some(seed), &v, limit + 1, |k| k != seed);
         let ids: Vec<TrackId> = near.iter().map(|(k, _)| *k).collect();
         let rows = lib.get_track_rows(&ids).map_err(db)?;

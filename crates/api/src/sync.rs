@@ -48,14 +48,14 @@ fn refused(message: &str) -> ApiError {
 /// tunnel (its certificate's id, as the tunnel's caller carries it).
 pub(crate) fn peer_of(caller: &Caller) -> Result<String, ApiError> {
     let Some(node) = caller.token_id.strip_prefix(MESH_PREFIX) else {
-        return Err(refused("Только для своих устройств"));
+        return Err(refused("Only the owner's devices"));
     };
     if caller.actor != ApiActor::Owner {
-        return Err(refused("Гостевому устройству библиотека не передаётся"));
+        return Err(refused("A guest device is not handed the library"));
     }
     let fine = !node.is_empty() && node.len() <= 128 && node.chars().all(|c| c.is_ascii_alphanumeric());
     if !fine {
-        return Err(refused("Неверный id устройства"));
+        return Err(refused("Invalid device id"));
     }
     Ok(node.to_owned())
 }
@@ -70,7 +70,7 @@ async fn allowed(sh: &Arc<Shared>, caller: &Caller) -> Result<String, ApiError> 
     let p = peer.clone();
     let off = blocking(move || lib.sync_cursors(&p).map(|c| c.off).map_err(db)).await?;
     if off {
-        return Err(ApiError { status: StatusCode::FORBIDDEN, code: "sync_off", message: "Синхронизация с этим устройством выключена".into(), needs: None, plan: None });
+        return Err(ApiError { status: StatusCode::FORBIDDEN, code: "sync_off", message: "Sync with this device is off".into(), needs: None, plan: None });
     }
     Ok(peer)
 }
@@ -88,10 +88,10 @@ pub async fn changes(State(sh): State<Arc<Shared>>, Extension(caller): Extension
     let raw = raw.as_deref();
     let table = query_value(raw, "table").unwrap_or_default();
     if nikgob_library::sync_table(&table).is_none() {
-        return Err(ApiError::bad_request("Нет такой таблицы"));
+        return Err(ApiError::bad_request("No such table"));
     }
     let number = |key: &str| -> Result<Option<i64>, ApiError> {
-        query_value(raw, key).map(|v| v.parse::<i64>().map_err(|_| ApiError::bad_request(format!("Неверное {key}")))).transpose()
+        query_value(raw, key).map(|v| v.parse::<i64>().map_err(|_| ApiError::bad_request(format!("Invalid value of {key}")))).transpose()
     };
     let since = number("since")?.unwrap_or(0).max(0);
     let limit = number("limit")?.map_or(nikgob_library::sync::PAGE_ROWS, |n| n.clamp(1, i64::from(u32::MAX)) as u32);
@@ -102,12 +102,12 @@ pub async fn changes(State(sh): State<Arc<Shared>>, Extension(caller): Extension
 /// `POST /v1/sync/apply`.
 pub async fn apply(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<SyncApplied>, ApiError> {
     let peer = allowed(&sh, &caller).await?;
-    let page: SyncPage = serde_json::from_slice(&bytes).map_err(|e| ApiError::bad_request(format!("Неверное тело запроса: {e}")))?;
+    let page: SyncPage = serde_json::from_slice(&bytes).map_err(|e| ApiError::bad_request(format!("Invalid request body: {e}")))?;
     if nikgob_library::sync_table(&page.table).is_none() {
-        return Err(ApiError::bad_request("Нет такой таблицы"));
+        return Err(ApiError::bad_request("No such table"));
     }
     if nikgob_library::page_ahead(&page, nikgob_library::now_ms()) {
-        return Err(ApiError { status: StatusCode::CONFLICT, code: "clock_ahead", message: "Часы устройства спешат".into(), needs: None, plan: None });
+        return Err(ApiError { status: StatusCode::CONFLICT, code: "clock_ahead", message: "The device's clock is ahead".into(), needs: None, plan: None });
     }
     let lib = sh.lib.clone();
     Ok(Json(blocking(move || lib.sync_apply(&page, &peer, false).map_err(db)).await?))
@@ -130,7 +130,7 @@ pub async fn blob(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Ca
     allowed(&sh, &caller).await?;
     let hash = query_value(raw.as_deref(), "hash").unwrap_or_default();
     if !is_hash(&hash) {
-        return Err(ApiError::bad_request("Неверный hash"));
+        return Err(ApiError::bad_request("Invalid hash"));
     }
     let lib = sh.lib.clone();
     let found = blocking(move || {
@@ -146,7 +146,7 @@ pub async fn blob(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Ca
         Ok(std::fs::File::open(&path).ok().map(|f| (f, path)))
     })
     .await?;
-    let (file, real) = found.ok_or_else(|| ApiError::not_found("Файла нет"))?;
+    let (file, real) = found.ok_or_else(|| ApiError::not_found("No such file"))?;
     serve_file(file, &real, &headers).await
 }
 

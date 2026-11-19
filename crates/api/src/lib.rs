@@ -272,9 +272,9 @@ impl Shared {
                 let st = self.rt.state();
                 if st.api.synced >= ack {
                     // What the loop could not do (a service track it no
-                    // longer knows, a file outside the library) is not «done».
+                    // longer knows, a file outside the library) is not done.
                     return match st.api.skipped.iter().find(|(a, _)| *a == ack) {
-                        Some((_, why)) => Err(error::ApiError::of(axum::http::StatusCode::CONFLICT, "not_done", format!("Не выполнено: {}", why.join("; ")))),
+                        Some((_, why)) => Err(error::ApiError::of(axum::http::StatusCode::CONFLICT, "not_done", format!("Not done: {}", why.join("; ")))),
                         None => Ok(()),
                     };
                 }
@@ -306,8 +306,8 @@ impl Shared {
             Ok(Ok(Ok(v))) => Ok(v),
             Ok(Ok(Err(why))) => Err(error::ApiError::of(axum::http::StatusCode::BAD_GATEWAY, "lookup_failed", why)),
             // The loop dropped the request without an answer.
-            Ok(Err(_)) => Err(error::ApiError::internal("Плеер не ответил на запрос")),
-            Err(_) => Err(error::ApiError::of(axum::http::StatusCode::GATEWAY_TIMEOUT, "lookup_timeout", "Поиск не успел за отведённое время")),
+            Ok(Err(_)) => Err(error::ApiError::internal("The player did not answer the request")),
+            Err(_) => Err(error::ApiError::of(axum::http::StatusCode::GATEWAY_TIMEOUT, "lookup_timeout", "The search did not make it in time")),
         }
     }
 
@@ -317,7 +317,7 @@ impl Shared {
         if self.lookups.allow(&caller.token_id, std::time::Instant::now()) {
             Ok(())
         } else {
-            Err(error::ApiError::of(axum::http::StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Слишком частые поиски в сервисах: подожди немного"))
+            Err(error::ApiError::of(axum::http::StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Service searches are too frequent: wait a bit"))
         }
     }
 
@@ -358,7 +358,7 @@ impl Shared {
 pub(crate) struct Closing(pub watch::Receiver<bool>);
 
 async fn not_found() -> error::ApiError {
-    error::ApiError::not_found("Нет такого адреса")
+    error::ApiError::not_found("No such route")
 }
 
 /// The routes: `/v1` and `/mcp` behind the token, the docs open.
@@ -444,10 +444,10 @@ pub(crate) fn listen_addr(ip: &str, port: u16) -> String {
 /// Why the server cannot listen, in words for the settings row.
 pub(crate) fn bind_error(e: &std::io::Error, ip: &str, port: u16) -> String {
     match e.kind() {
-        std::io::ErrorKind::AddrInUse => format!("Порт {port} занят"),
-        std::io::ErrorKind::AddrNotAvailable => format!("У компьютера нет адреса {ip}"),
-        std::io::ErrorKind::PermissionDenied => format!("Нет доступа к порту {port}"),
-        _ => format!("Не удалось открыть порт {port}: {e}"),
+        std::io::ErrorKind::AddrInUse => format!("Port {port} is busy"),
+        std::io::ErrorKind::AddrNotAvailable => format!("The computer has no address {ip}"),
+        std::io::ErrorKind::PermissionDenied => format!("No access to port {port}"),
+        _ => format!("Could not open port {port}: {e}"),
     }
 }
 
@@ -565,9 +565,9 @@ mod tests {
         assert_eq!(listen_addr("::1", 47210), "[::1]:47210");
         assert_eq!(listen_addr("[::1]", 1), "[::1]:1");
         let busy = std::io::Error::from(std::io::ErrorKind::AddrInUse);
-        assert_eq!(bind_error(&busy, "127.0.0.1", 47210), "Порт 47210 занят");
+        assert_eq!(bind_error(&busy, "127.0.0.1", 47210), "Port 47210 is busy");
         let none = std::io::Error::from(std::io::ErrorKind::AddrNotAvailable);
-        assert_eq!(bind_error(&none, "192.168.0.157", 47210), "У компьютера нет адреса 192.168.0.157");
+        assert_eq!(bind_error(&none, "192.168.0.157", 47210), "The computer has no address 192.168.0.157");
     }
 
     /// A paired device's request in this process: its caller's rights
@@ -665,6 +665,6 @@ mod tests {
         let port = first.local_addr().unwrap().port();
         let second = tokio::net::TcpListener::bind(listen_addr("127.0.0.1", port)).await;
         let e = second.err().expect("the port is taken");
-        assert_eq!(bind_error(&e, "127.0.0.1", port), format!("Порт {port} занят"));
+        assert_eq!(bind_error(&e, "127.0.0.1", port), format!("Port {port} is busy"));
     }
 }

@@ -60,11 +60,11 @@ impl ApiError {
     }
 
     pub fn unauthorized() -> Self {
-        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", "Нужен действующий токен")
+        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", "A live token is required")
     }
 
     pub fn forbidden(needs: &'static str) -> Self {
-        Self { needs: Some(needs), ..Self::new(StatusCode::FORBIDDEN, "forbidden", "У токена нет нужного права") }
+        Self { needs: Some(needs), ..Self::new(StatusCode::FORBIDDEN, "forbidden", "The token lacks the right") }
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {
@@ -72,21 +72,21 @@ impl ApiError {
     }
 
     pub fn nothing_to_play() -> Self {
-        Self::new(StatusCode::CONFLICT, "nothing_to_play", "Очередь пуста")
+        Self::new(StatusCode::CONFLICT, "nothing_to_play", "The queue is empty")
     }
 
     pub fn rate_limited() -> Self {
-        Self::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Слишком частые запросы")
+        Self::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many requests")
     }
 
     pub fn no_audio() -> Self {
-        Self::new(StatusCode::SERVICE_UNAVAILABLE, "no_audio", "Устройство вывода недоступно")
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "no_audio", "The output device is unavailable")
     }
 
     /// The player did not get to the request in time: it may run later, or
     /// not at all.
     pub fn timeout() -> Self {
-        Self::new(StatusCode::GATEWAY_TIMEOUT, "player_timeout", "Плеер не ответил вовремя")
+        Self::new(StatusCode::GATEWAY_TIMEOUT, "player_timeout", "The player did not answer in time")
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -104,7 +104,7 @@ impl ApiError {
     pub fn plan_changed(plan: serde_json::Value) -> Self {
         Self {
             plan: Some(plan),
-            ..Self::new(StatusCode::CONFLICT, "plan_changed", "План изменился с тех пор, как его показали: вот новый, подтверди его")
+            ..Self::new(StatusCode::CONFLICT, "plan_changed", "The plan changed since it was shown: here is the new one, confirm it")
         }
     }
 
@@ -141,7 +141,7 @@ impl<T: Serialize> IntoResponse for Json<T> {
             Err(e) => {
                 log::error!("api: an answer could not be written: {e}");
                 let mut r = Response::new(axum::body::Body::from(
-                    r#"{"error":"internal","message":"Ответ не собрался"}"#,
+                    r#"{"error":"internal","message":"Failed to build the response"}"#,
                 ));
                 *r.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
                 r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(JSON));
@@ -157,7 +157,7 @@ pub fn body<T: DeserializeOwned + Default>(bytes: &Bytes) -> Result<T, ApiError>
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return Ok(T::default());
     }
-    serde_json::from_slice(bytes).map_err(|e| ApiError::bad_request(format!("Неверное тело запроса: {e}")))
+    serde_json::from_slice(bytes).map_err(|e| ApiError::bad_request(format!("Invalid request body: {e}")))
 }
 
 /// The query string's `key=value` pairs.
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn errors_read_as_the_contract_says() {
         let e = serde_json::to_value(ApiError::forbidden("duck").body()).unwrap();
-        assert_eq!(e, serde_json::json!({"error": "forbidden", "message": "У токена нет нужного права", "details": {"needs": "duck"}}));
+        assert_eq!(e, serde_json::json!({"error": "forbidden", "message": "The token lacks the right", "details": {"needs": "duck"}}));
         let e = serde_json::to_value(ApiError::nothing_to_play().body()).unwrap();
         assert_eq!(e["error"], "nothing_to_play");
         assert!(e.get("details").is_none());

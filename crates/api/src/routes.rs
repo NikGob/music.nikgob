@@ -50,7 +50,7 @@ impl Shared {
     }
 }
 
-/// «Что играет».
+/// “Now playing”.
 #[utoipa::path(
     get,
     path = "/v1/state",
@@ -66,13 +66,13 @@ pub async fn state(State(sh): State<Arc<Shared>>) -> Json<PlayerState> {
 #[derive(Clone, Debug, Default, Deserialize, ToSchema)]
 pub struct PlayBody {
     /// What was said, as it is: an artist, an album, a song, a playlist;
-    /// «моя волна», «любимые».
+    /// My Wave or Liked Songs.
     pub query: Option<String>,
     /// `any` by default.
     pub kind: Option<Kind>,
     /// A thing by its id instead of `query` (then `kind` is needed).
     pub id: Option<String>,
-    /// `null`: as «Слушать» does (an artist and «Любимые» shuffled).
+    /// `null`: as the Play button does (an artist and Liked Songs shuffled).
     pub shuffle: Option<bool>,
     /// `replace` by default.
     pub mode: Option<Mode>,
@@ -89,7 +89,7 @@ impl Shared {
         match outputs::resolve(output, &devices, cfg!(target_os = "linux")) {
             Pick::Default => Ok(Command::SetOutputDevice(None)),
             Pick::Device(name) => Ok(Command::SetOutputDevice(Some(name))),
-            Pick::NotFound => Err(ApiError::not_found("Такого устройства вывода нет")),
+            Pick::NotFound => Err(ApiError::not_found("No such output device")),
         }
     }
 
@@ -105,8 +105,8 @@ impl Shared {
         let back = remote.then_some((None, attach));
         match pick {
             NodePick::Node(id) => Ok(OutputPlan { target: Some((Some(id), attach)), commands: Vec::new() }),
-            NodePick::Offline(name) => Err(ApiError::of(axum::http::StatusCode::CONFLICT, "offline", format!("{name} не в сети"))),
-            NodePick::Unknown => Err(ApiError::not_found("Такого устройства нет")),
+            NodePick::Offline(name) => Err(ApiError::of(axum::http::StatusCode::CONFLICT, "offline", format!("{name} is offline"))),
+            NodePick::Unknown => Err(ApiError::not_found("No such device")),
             NodePick::This => Ok(OutputPlan { target: back, commands: Vec::new() }),
             NodePick::NoNode => Ok(OutputPlan { target: back, commands: vec![self.output_command(output)?] }),
         }
@@ -117,7 +117,7 @@ impl Shared {
     pub(crate) async fn switch_target(&self, actor: Option<nikgob_view::ApiActor>, node: Option<String>, attach: bool) -> Result<(), ApiError> {
         let v = self.ask(actor, TRANSFER_WAIT, move |reply| Command::ApiTransfer { node_id: node, attach, reply }).await.map_err(|e| {
             if e.code == "lookup_timeout" {
-                ApiError::of(axum::http::StatusCode::GATEWAY_TIMEOUT, "transfer_timeout", "Перенос не закончился вовремя")
+                ApiError::of(axum::http::StatusCode::GATEWAY_TIMEOUT, "transfer_timeout", "The transfer did not finish in time")
             } else {
                 e
             }
@@ -125,7 +125,7 @@ impl Shared {
         if v.get("done").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(());
         }
-        let message = v.get("message").and_then(serde_json::Value::as_str).unwrap_or("Не удалось перенести").to_owned();
+        let message = v.get("message").and_then(serde_json::Value::as_str).unwrap_or("Could not transfer").to_owned();
         Err(ApiError::of(axum::http::StatusCode::CONFLICT, "transfer_failed", message))
     }
 }
@@ -156,7 +156,7 @@ pub struct PlayAnswer {
     post,
     path = "/v1/player/play",
     tag = "player",
-    request_body(content = PlayBody, description = "Что играть", content_type = "application/json"),
+    request_body(content = PlayBody, description = "What to play", content_type = "application/json"),
     responses(
         (status = 200, body = PlayAnswer),
         (status = 400, body = crate::error::ErrorBody),
@@ -298,10 +298,10 @@ pub struct VolumeBody {
 pub fn volume_commands(now: f32, muted: bool, b: &VolumeBody) -> Result<Vec<Command>, ApiError> {
     let given = usize::from(b.volume.is_some()) + usize::from(b.delta.is_some()) + usize::from(b.muted.is_some());
     if given != 1 {
-        return Err(ApiError::bad_request("Нужно одно из: volume, delta, muted"));
+        return Err(ApiError::bad_request("One of: volume, delta, muted"));
     }
     if b.volume.is_some_and(|v| !v.is_finite()) || b.delta.is_some_and(|d| !d.is_finite()) {
-        return Err(ApiError::bad_request("Громкость — число"));
+        return Err(ApiError::bad_request("Volume must be a number"));
     }
     let set = |v: f32, unmutes: bool| {
         let v = v.clamp(0.0, 1.0);
@@ -352,7 +352,7 @@ pub struct DuckAnswer {
 
 /// The duck asked for, inside its limits: (gain, fade_ms, ttl_ms).
 pub fn duck_params(b: &DuckBody) -> Result<(f32, u32, u32), ApiError> {
-    let gain = b.gain.filter(|g| g.is_finite()).ok_or_else(|| ApiError::bad_request("Нужен gain от 0 до 1"))?;
+    let gain = b.gain.filter(|g| g.is_finite()).ok_or_else(|| ApiError::bad_request("A gain from 0 to 1 is required"))?;
     Ok((gain.clamp(0.0, 1.0), b.fade_ms.unwrap_or(120).min(5000), b.ttl_ms.unwrap_or(10_000).clamp(100, 60_000)))
 }
 
@@ -382,13 +382,13 @@ pub async fn duck(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Json<Du
     delete,
     path = "/v1/player/duck",
     tag = "player",
-    params(("fade_ms" = Option<u32>, Query, description = "0–5000, по умолчанию 450")),
+    params(("fade_ms" = Option<u32>, Query, description = "0–5000, 450 by default")),
     responses((status = 200, body = DuckAnswer)),
     security(("bearer" = []))
 )]
 pub async fn unduck(State(sh): State<Arc<Shared>>, RawQuery(raw): RawQuery) -> Result<Json<DuckAnswer>, ApiError> {
     let fade_ms = match query_value(raw.as_deref(), "fade_ms") {
-        Some(v) => v.trim().parse::<u32>().map_err(|_| ApiError::bad_request("fade_ms — целое число"))?.min(5000),
+        Some(v) => v.trim().parse::<u32>().map_err(|_| ApiError::bad_request("fade_ms must be an integer"))?.min(5000),
         None => 450,
     };
     sh.run(vec![Command::ClearDuck { fade_ms }]).await?;
@@ -417,7 +417,7 @@ pub async fn seek(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Ca
     let c = match (b.position_ms, b.delta_ms) {
         (Some(p), None) => Command::Seek(Duration::from_millis(u64::try_from(p.max(0)).unwrap_or(0))),
         (None, Some(d)) => Command::SeekBy(d),
-        _ => return Err(ApiError::bad_request("Нужно одно из: position_ms, delta_ms")),
+        _ => return Err(ApiError::bad_request("One of: position_ms, delta_ms")),
     };
     if sh.empty() {
         return Err(ApiError::nothing_to_play());
@@ -456,7 +456,7 @@ pub fn mode_commands(shuffle: bool, repeat: RepeatMode, b: &ModeBody) -> Vec<Com
 pub async fn mode(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<StateAnswer>, ApiError> {
     let b: ModeBody = body(&bytes)?;
     if b.shuffle.is_none() && b.repeat.is_none() {
-        return Err(ApiError::bad_request("Нужно shuffle или repeat"));
+        return Err(ApiError::bad_request("shuffle or repeat is required"));
     }
     let (shuffle, repeat) = {
         let st = sh.rt.state();
@@ -528,7 +528,7 @@ pub struct OutputBody {
 )]
 pub async fn set_output(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Json<StateAnswer>, ApiError> {
     let b: OutputBody = body(&bytes)?;
-    let q = b.output.or(b.id).filter(|o| !o.trim().is_empty()).ok_or_else(|| ApiError::bad_request("Нужен output"))?;
+    let q = b.output.or(b.id).filter(|o| !o.trim().is_empty()).ok_or_else(|| ApiError::bad_request("output is required"))?;
     let plan = sh.output_plan(q.trim(), b.attach)?;
     // A transfer is answered when it is done, with the state it made.
     if let Some((node, attach)) = plan.target {
@@ -583,7 +583,7 @@ impl Shared {
 }
 
 fn entry_of(s: &str) -> Result<u64, ApiError> {
-    s.trim().parse().map_err(|_| ApiError::bad_request("Неверный номер места в очереди"))
+    s.trim().parse().map_err(|_| ApiError::bad_request("Invalid place in the queue"))
 }
 
 #[utoipa::path(get, path = "/v1/queue", tag = "queue", responses((status = 200, body = QueueAnswer)), security(("bearer" = [])))]
@@ -620,10 +620,10 @@ pub struct QueueAdd {
 pub async fn queue_add(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<QueueAnswer>, ApiError> {
     let b: QueueAdd = body(&bytes)?;
     if b.track_ids.is_empty() {
-        return Err(ApiError::bad_request("Нужен track_ids"));
+        return Err(ApiError::bad_request("track_ids is required"));
     }
     let ids: Vec<TrackId> =
-        b.track_ids.iter().map(|s| s.trim().parse::<TrackId>()).collect::<Result<_, _>>().map_err(|_| ApiError::bad_request("Неверный id песни"))?;
+        b.track_ids.iter().map(|s| s.trim().parse::<TrackId>()).collect::<Result<_, _>>().map_err(|_| ApiError::bad_request("Invalid track id"))?;
     let c = match b.mode.unwrap_or_default() {
         QueueMode::Next => Command::PlayNext(ids),
         QueueMode::Enqueue => Command::Enqueue(ids),
@@ -636,14 +636,14 @@ pub async fn queue_add(State(sh): State<Arc<Shared>>, Extension(caller): Extensi
     post,
     path = "/v1/queue/{entry}/play",
     tag = "queue",
-    params(("entry" = u64, Path, description = "Место в очереди")),
+    params(("entry" = u64, Path, description = "The place in the queue")),
     responses((status = 200, body = StateAnswer), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
 pub async fn queue_play(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, Path(entry): Path<String>) -> Result<Json<StateAnswer>, ApiError> {
     let entry = entry_of(&entry)?;
     if !sh.has_entry(entry) {
-        return Err(ApiError::not_found("Такого места в очереди нет"));
+        return Err(ApiError::not_found("No such place in the queue"));
     }
     sh.answer_by(caller.actor, vec![Command::PlayQueueEntry(entry)]).await
 }
@@ -652,14 +652,14 @@ pub async fn queue_play(State(sh): State<Arc<Shared>>, Extension(caller): Extens
     delete,
     path = "/v1/queue/{entry}",
     tag = "queue",
-    params(("entry" = u64, Path, description = "Место в очереди")),
+    params(("entry" = u64, Path, description = "The place in the queue")),
     responses((status = 200, body = QueueAnswer), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
 pub async fn queue_remove(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, Path(entry): Path<String>) -> Result<Json<QueueAnswer>, ApiError> {
     let entry = entry_of(&entry)?;
     if !sh.has_entry(entry) {
-        return Err(ApiError::not_found("Такого места в очереди нет"));
+        return Err(ApiError::not_found("No such place in the queue"));
     }
     sh.run_by(Some(caller.actor), vec![Command::RemoveFromQueue(entry)]).await?;
     Ok(Json(sh.queue_now()))
@@ -685,10 +685,10 @@ pub struct QueueMove {
 pub async fn queue_move(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<QueueAnswer>, ApiError> {
     let b: QueueMove = body(&bytes)?;
     let (Some(entry), Some(anchor)) = (b.entry, b.anchor) else {
-        return Err(ApiError::bad_request("Нужны entry и anchor"));
+        return Err(ApiError::bad_request("entry and anchor are required"));
     };
     if !sh.has_entry(entry) || !sh.has_entry(anchor) {
-        return Err(ApiError::not_found("Такого места в очереди нет"));
+        return Err(ApiError::not_found("No such place in the queue"));
     }
     sh.run_by(Some(caller.actor), vec![Command::MoveInQueue { entry, anchor, after: b.after.unwrap_or(true) }]).await?;
     Ok(Json(sh.queue_now()))

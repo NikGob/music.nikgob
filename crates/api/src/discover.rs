@@ -1,7 +1,7 @@
 //! Music outside the library: the connected services searched (each
 //! result marked when the library has it), an artist's releases the
-//! library lacks, and a share page (song.link / MusicLink, as «Поделиться»
-//! finds it). Every route here asks the network: a token may make a few a
+//! library lacks, and a share page (song.link / MusicLink, as the app's
+//! Share finds it). Every route here asks the network: a token may make a few a
 //! minute ([`crate::auth::LOOKUPS_PER_S`]), each service asked one of them.
 //! The tracks a search finds are handed to the loop (as the window's search
 //! results are) and kept here too, so a like, a playlist or a download of
@@ -72,7 +72,7 @@ impl Seen {
 /// [`REMOTE_TRACKS_MAX`].
 pub async fn stream_tracks(sh: &Shared, caller: &Caller, remotes: &[RemoteId]) -> Result<Vec<StreamTrack>, ApiError> {
     if remotes.len() > REMOTE_TRACKS_MAX {
-        return Err(ApiError::of(StatusCode::BAD_REQUEST, "too_many", format!("Не больше {REMOTE_TRACKS_MAX} треков сервисов за раз")));
+        return Err(ApiError::of(StatusCode::BAD_REQUEST, "too_many", format!("No more than {REMOTE_TRACKS_MAX} service tracks at a time")));
     }
     let mut found: Vec<StreamTrack> = Vec::new();
     let mut ask: HashMap<Service, Vec<String>> = HashMap::new();
@@ -87,13 +87,13 @@ pub async fn stream_tracks(sh: &Shared, caller: &Caller, remotes: &[RemoteId]) -
     }
     for (service, ids) in ask {
         let Some(svc) = sh.rt.service(service) else {
-            return Err(ApiError::of(StatusCode::SERVICE_UNAVAILABLE, "no_services", format!("{} не подключён", service.as_str())));
+            return Err(ApiError::of(StatusCode::SERVICE_UNAVAILABLE, "no_services", format!("{} is not connected", service.as_str())));
         };
         sh.lookup_allowed(caller)?;
         let got = match tokio::time::timeout(SEARCH_WAIT, svc.tracks(&ids)).await {
             Ok(Ok(got)) => got,
             Ok(Err(e)) => return Err(ApiError::of(StatusCode::BAD_GATEWAY, "lookup_failed", e.to_string())),
-            Err(_) => return Err(ApiError::of(StatusCode::GATEWAY_TIMEOUT, "lookup_timeout", "Сервис не ответил вовремя")),
+            Err(_) => return Err(ApiError::of(StatusCode::GATEWAY_TIMEOUT, "lookup_timeout", "The service did not answer in time")),
         };
         let mut seen = sh.seen.lock();
         for t in got.into_iter().flatten() {
@@ -104,7 +104,7 @@ pub async fn stream_tracks(sh: &Shared, caller: &Caller, remotes: &[RemoteId]) -
     let have: HashSet<&RemoteId> = found.iter().map(|t| &t.id).collect();
     let missing: Vec<String> = remotes.iter().filter(|r| !have.contains(r)).map(ToString::to_string).collect();
     if !missing.is_empty() {
-        return Err(ApiError::not_found(format!("Сервис не знает таких треков: {}", missing.join(", "))));
+        return Err(ApiError::not_found(format!("The service has none of these tracks: {}", missing.join(", "))));
     }
     Ok(found)
 }
@@ -194,11 +194,11 @@ pub fn services_of(raw: Option<&str>) -> Result<Vec<Service>, ApiError> {
     };
     let names: Vec<&str> = list.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
     if names.len() > SERVICES_MAX {
-        return Err(ApiError::bad_request(format!("Не больше {SERVICES_MAX} сервисов")));
+        return Err(ApiError::bad_request(format!("No more than {SERVICES_MAX} services")));
     }
     let mut out = Vec::new();
     for s in names {
-        let service = Service::parse(&s.to_ascii_lowercase()).ok_or_else(|| ApiError::bad_request(format!("Нет такого сервиса: {s}")))?;
+        let service = Service::parse(&s.to_ascii_lowercase()).ok_or_else(|| ApiError::bad_request(format!("No such service: {s}")))?;
         if !out.contains(&service) {
             out.push(service);
         }
@@ -286,26 +286,26 @@ pub fn album_of(lib: &Library, a: &StreamAlbum) -> FoundAlbum {
     operation_id = "discover_search",
     tag = "discover",
     params(
-        ("q" = String, Query, description = "Что искать"),
-        ("kind" = Option<String>, Query, description = "any (по умолчанию), track, album, artist, playlist"),
-        ("services" = Option<String>, Query, description = "Через запятую: spotify, youtube, deezer, soundcloud (по умолчанию все подключённые)"),
-        ("limit" = Option<u32>, Query, description = "Сколько в каждой группе каждого сервиса, 1–25, по умолчанию 5"),
+        ("q" = String, Query, description = "What to find"),
+        ("kind" = Option<String>, Query, description = "any (default), track, album, artist, playlist"),
+        ("services" = Option<String>, Query, description = "Comma-separated: spotify, youtube, deezer, soundcloud (all connected by default)"),
+        ("limit" = Option<u32>, Query, description = "How many per group of each service, 1–25, 5 by default"),
     ),
     responses((status = 200, body = DiscoverAnswer), (status = 400, body = crate::error::ErrorBody), (status = 429, body = crate::error::ErrorBody), (status = 503, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
 pub async fn search(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, RawQuery(raw): RawQuery) -> Result<Json<DiscoverAnswer>, ApiError> {
     let raw = raw.as_deref();
-    let q = query_value(raw, "q").map(|q| q.trim().to_owned()).filter(|q| !q.is_empty()).ok_or_else(|| ApiError::bad_request("Нужен параметр q"))?;
+    let q = query_value(raw, "q").map(|q| q.trim().to_owned()).filter(|q| !q.is_empty()).ok_or_else(|| ApiError::bad_request("The q parameter is required"))?;
     let kind = query_value(raw, "kind").unwrap_or_default().to_lowercase();
     if !["", "any", "track", "album", "artist", "playlist"].contains(&kind.as_str()) {
-        return Err(ApiError::bad_request("kind: any, track, album, artist или playlist"));
+        return Err(ApiError::bad_request("kind: any, track, album, artist or playlist"));
     }
     let limit = query_value(raw, "limit").and_then(|l| l.trim().parse::<usize>().ok()).unwrap_or(5).clamp(1, 25);
     let asked = services_of(query_value(raw, "services").as_deref())?;
     let ready: Vec<_> = asked.iter().filter_map(|s| sh.rt.service(*s).map(|svc| (*s, svc))).collect();
     if ready.is_empty() {
-        return Err(ApiError::of(StatusCode::SERVICE_UNAVAILABLE, "no_services", "Ни один из этих сервисов не подключён"));
+        return Err(ApiError::of(StatusCode::SERVICE_UNAVAILABLE, "no_services", "None of these services is connected"));
     }
     // Each service asked is a lookup of its own.
     for _ in &ready {
@@ -317,7 +317,7 @@ pub async fn search(State(sh): State<Arc<Shared>>, Extension(caller): Extension<
             let r = match tokio::time::timeout(SEARCH_WAIT, svc.search(&q)).await {
                 Ok(Ok(r)) => Ok(r),
                 Ok(Err(e)) => Err(e.to_string()),
-                Err(_) => Err("нет ответа вовремя".to_owned()),
+                Err(_) => Err("no answer in time".to_owned()),
             };
             (service, r)
         }
@@ -372,13 +372,13 @@ pub struct DiscographyAnswer {
     pub missing: Vec<FoundAlbum>,
 }
 
-/// What a library artist released that the library lacks (as «Нет в
-/// библиотеке» of the artist's page shows it).
+/// What a library artist released that the library lacks (as the
+/// artist page's “Not in library” line shows it).
 #[utoipa::path(
     get,
     path = "/v1/discover/artists/{id}/discography",
     tag = "discover",
-    params(("id" = String, Path, description = "id исполнителя библиотеки"), ("refresh" = Option<bool>, Query, description = "Спросить сервисы снова, если сведения устарели")),
+    params(("id" = String, Path, description = "the library artist's id"), ("refresh" = Option<bool>, Query, description = "Ask the services again if the details are stale")),
     responses((status = 200, body = DiscographyAnswer), (status = 404, body = crate::error::ErrorBody), (status = 503, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
@@ -388,11 +388,11 @@ pub async fn discography(
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
 ) -> Result<Json<DiscographyAnswer>, ApiError> {
-    let artist: ArtistId = id.trim().parse().map_err(|_| ApiError::bad_request("Неверный id"))?;
+    let artist: ArtistId = id.trim().parse().map_err(|_| ApiError::bad_request("Invalid id"))?;
     let refresh = query_value(raw.as_deref(), "refresh").is_some_and(|v| v == "true" || v == "1");
     let lib = sh.lib.clone();
     let (name, kept) = blocking(move || {
-        let a = lib.get_artist(artist).map_err(db)?.ok_or_else(|| ApiError::not_found("Нет такого исполнителя"))?;
+        let a = lib.get_artist(artist).map_err(db)?.ok_or_else(|| ApiError::not_found("No such artist"))?;
         Ok((a.name, nikgob_runtime::kept_discography(&lib, artist)))
     })
     .await?;
@@ -404,7 +404,7 @@ pub async fn discography(
     }
     let asked = [Service::Spotify, Service::Deezer, Service::Youtube].iter().filter(|s| sh.rt.service(**s).is_some()).count();
     if asked == 0 {
-        return Err(ApiError::of(StatusCode::SERVICE_UNAVAILABLE, "no_services", "Нет подключённых сервисов для дискографии"));
+        return Err(ApiError::of(StatusCode::SERVICE_UNAVAILABLE, "no_services", "No connected services for the discography"));
     }
     // Each service the loop asks is a lookup.
     for _ in 0..asked {
@@ -446,7 +446,7 @@ fn discography_answer(artist: ArtistId, name: &str, kept: Option<&nikgob_runtime
 pub struct ShareAnswer {
     /// The page with every service (or the service's own page).
     pub link: Option<String>,
-    /// «Исполнитель — Название».
+    /// “Artist — Title”.
     pub text: String,
     /// The link opens in any service.
     pub everywhere: bool,
@@ -460,27 +460,27 @@ pub fn share_target(kind: &str, id: &str) -> Result<ShareTarget, ApiError> {
             _ => Ok(ShareTarget::StreamTrack(r)),
         };
     }
-    let bad = || ApiError::bad_request("Неверный id");
+    let bad = || ApiError::bad_request("Invalid id");
     match kind {
         "album" => id.trim().parse().map(ShareTarget::Release).map_err(|_| bad()),
         "track" | "" => id.trim().parse().map(ShareTarget::Track).map_err(|_| bad()),
-        _ => Err(ApiError::bad_request("kind: track или album")),
+        _ => Err(ApiError::bad_request("kind: track or album")),
     }
 }
 
-/// A song.link / album.link page (MusicLink first), as «Поделиться» finds
+/// A song.link / album.link page (MusicLink first), as the app's Share finds
 /// it; nothing is copied and no toast shows.
 #[utoipa::path(
     get,
     path = "/v1/discover/share",
     tag = "discover",
-    params(("kind" = Option<String>, Query, description = "track (по умолчанию) или album"), ("id" = String, Query, description = "id библиотеки или service:id")),
+    params(("kind" = Option<String>, Query, description = "track (default) or album"), ("id" = String, Query, description = "the library's id or service:id")),
     responses((status = 200, body = ShareAnswer), (status = 400, body = crate::error::ErrorBody), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
 pub async fn share(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, RawQuery(raw): RawQuery) -> Result<Json<ShareAnswer>, ApiError> {
     let raw = raw.as_deref();
-    let id = query_value(raw, "id").filter(|i| !i.trim().is_empty()).ok_or_else(|| ApiError::bad_request("Нужен id"))?;
+    let id = query_value(raw, "id").filter(|i| !i.trim().is_empty()).ok_or_else(|| ApiError::bad_request("An id is required"))?;
     let target = share_target(query_value(raw, "kind").unwrap_or_default().trim(), &id)?;
     let lib = sh.lib.clone();
     let t = target.clone();
@@ -490,7 +490,7 @@ pub async fn share(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
             ShareTarget::Release(id) => lib.get_release(*id).map_err(db)?.is_some(),
             _ => true,
         };
-        if there { Ok(()) } else { Err(ApiError::not_found("Ничего не нашлось")) }
+        if there { Ok(()) } else { Err(ApiError::not_found("Not found")) }
     })
     .await?;
     sh.lookup_allowed(&caller)?;

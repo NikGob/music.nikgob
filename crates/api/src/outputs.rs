@@ -11,7 +11,7 @@ use utoipa::ToSchema;
 use nikgob_view::MeshNodeView;
 
 pub const DEFAULT_ID: &str = "local:default";
-pub const DEFAULT_NAME: &str = "По умолчанию";
+pub const DEFAULT_NAME: &str = "Default";
 /// The id of a device of the home begins with this.
 pub const NODE_PREFIX: &str = "node:";
 
@@ -112,7 +112,7 @@ pub fn node_pick(query: &str, this: &str, nodes: &[MeshNodeView]) -> NodePick {
     }
     let pick = |n: &MeshNodeView| if n.online { NodePick::Node(n.id.clone()) } else { NodePick::Offline(n.name.clone()) };
     let Some(id) = q.strip_prefix(NODE_PREFIX).map(str::trim) else {
-        // A device by its whole name («Raspberry Pi»).
+        // A device by its whole name (“Raspberry Pi”).
         return nodes
             .iter()
             .find(|n| !qw.is_empty() && (n.name.trim().eq_ignore_ascii_case(q) || words(&n.name) == qw))

@@ -1,4 +1,4 @@
-//! «Добавить устройство → Установить»: a Linux machine (a Raspberry Pi, a
+//! “Add device → Install”: a Linux machine (a Raspberry Pi, a
 //! server) installs the headless player from this computer with the line
 //! the window shows ([`nikgob_core::releases::install_command`]):
 //!
@@ -69,7 +69,7 @@ pub(crate) fn host_of(headers: &HeaderMap) -> Option<String> {
 }
 
 fn not_found() -> Response {
-    ApiError::not_found("Нет такого адреса").into_response()
+    ApiError::not_found("No such address").into_response()
 }
 
 /// The content type of a build by its name.

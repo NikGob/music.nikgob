@@ -1,6 +1,6 @@
-//! `POST /v1/player/play`: what a spoken query means. «Моя волна»,
-//! «Любимые» and the mixes of the parts of the day («доброе утро»,
-//! «вечерний микс»; and their English names) are found by their words; anything
+//! `POST /v1/player/play`: what a spoken query means. My Wave,
+//! Liked Songs and the part-of-day mixes (in Russian and English) are
+//! found by their words; anything
 //! else is searched in the library and the best match wins, ties going to
 //! a playlist, then an artist, an album, a song.
 
@@ -25,8 +25,8 @@ pub enum Kind {
     Playlist,
     Liked,
     Wave,
-    /// The mix of a part of the day («Доброе утро», «День», «Вечер»,
-    /// «Ночь»): its id is the part, 0–3 from the morning.
+    /// The mix of a part of the day (“Good morning”, “Day”, “Evening”,
+    /// “Night”): its id is the part, 0–3 from the morning.
     Part,
 }
 
@@ -47,7 +47,7 @@ pub enum Mode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, ToSchema)]
 pub struct Matched {
     pub kind: Kind,
-    /// `null` for the wave and «Любимые».
+    /// `null` for My Wave and Liked Songs.
     pub id: Option<String>,
     pub title: String,
 }
@@ -78,7 +78,7 @@ pub fn normalize(s: &str) -> String {
 const LEADING: [&str; 12] =
     ["включи", "включить", "поставь", "поставить", "сыграй", "играй", "запусти", "давай", "play", "put on", "start", "please"];
 
-/// The query without a leading «включи», «поставь», «play».
+/// The query without a leading ask-word (its Russian words or "play").
 fn bare(q: &str) -> String {
     let mut q = normalize(q);
     loop {
@@ -99,7 +99,7 @@ fn bare(q: &str) -> String {
     }
 }
 
-/// «Моя волна» or «Любимые» by their words, in Russian or English.
+/// My Wave or Liked Songs by their words, Russian or English.
 pub fn special(query: &str) -> Option<Kind> {
     const WAVE: [&str; 8] = ["моя волна", "мою волну", "волна", "волну", "моя волна пожалуйста", "my wave", "wave", "the wave"];
     const LIKED: [&str; 16] = [
@@ -119,10 +119,10 @@ pub fn special(query: &str) -> Option<Kind> {
 }
 
 /// The mixes of the parts of the day by their names, 0–3 from the morning.
-pub const PARTS: [&str; 4] = ["Доброе утро", "День", "Вечер", "Ночь"];
+pub const PARTS: [&str; 4] = ["Good morning", "Day", "Evening", "Night"];
 
-/// The part of the day a spoken query asks the mix of («доброе утро»,
-/// «вечерний микс»), 0–3 from the morning. A bare «ночь» or «вечер» is
+/// The part of the day a spoken query asks the mix of (its Russian
+/// “good morning” words), 0–3 from the morning. A bare “night” or “evening” is
 /// a title as well (an album, a song), so only the mix's own words count.
 pub fn special_part(query: &str) -> Option<u8> {
     const WORDS: [&[&str]; 4] = [
@@ -136,7 +136,8 @@ pub fn special_part(query: &str) -> Option<u8> {
 }
 
 /// The part a query names when the part is asked for already: the mix's
-/// words, a part's own name («утро», «вечер», «night») or its number.
+/// words, a part's own name (“morning”, “evening”, “night”, or their Russian
+/// words) or its number.
 fn part_of(query: &str) -> Option<u8> {
     if let Some(p) = special_part(query) {
         return Some(p);
@@ -158,7 +159,7 @@ fn part(p: u8) -> Target {
 
 /// A part asked for that is none of the four.
 fn no_such_part() -> ApiError {
-    ApiError::bad_request("Часть дня: утро, день, вечер или ночь")
+    ApiError::bad_request("Part of the day: morning, day, evening or night")
 }
 
 /// How well `c` answers the normalized query `q` (higher is better).
@@ -256,24 +257,24 @@ impl Target {
 }
 
 fn liked() -> Target {
-    Target { kind: Kind::Liked, id: None, title: "Любимые".to_owned() }
+    Target { kind: Kind::Liked, id: None, title: "Liked Songs".to_owned() }
 }
 
 fn wave() -> Target {
-    Target { kind: Kind::Wave, id: None, title: "Моя волна".to_owned() }
+    Target { kind: Kind::Wave, id: None, title: "My Wave".to_owned() }
 }
 
 /// The library's thing of `kind` with `id` (blocking: call off the
 /// server's threads).
 pub fn exact(lib: &Library, kind: Kind, id: &str) -> Result<Target, ApiError> {
-    let bad = || ApiError::bad_request("Неверный id");
-    let gone = || ApiError::not_found("Ничего не нашлось");
+    let bad = || ApiError::bad_request("Invalid id");
+    let gone = || ApiError::not_found("Not found");
     let db = |e: nikgob_library::LibraryError| ApiError::internal(e.to_string());
     match kind {
         Kind::Liked => Ok(liked()),
         Kind::Wave => Ok(wave()),
         Kind::Part => part_of(id).map(part).ok_or_else(no_such_part),
-        Kind::Any => Err(ApiError::bad_request("С id нужен kind: track, album, artist или playlist")),
+        Kind::Any => Err(ApiError::bad_request("With an id, a kind is required: track, album, artist or playlist")),
         Kind::Track => {
             let id: TrackId = id.parse().map_err(|_| bad())?;
             let t = lib.get_track_row(id).map_err(db)?.ok_or_else(gone)?;
@@ -300,7 +301,7 @@ pub fn exact(lib: &Library, kind: Kind, id: &str) -> Result<Target, ApiError> {
     }
 }
 
-/// What `query` means: the wave and «Любимые» by their words, anything else
+/// What `query` means: My Wave or Liked Songs by their words, anything else
 /// searched (blocking: call off the server's threads).
 pub fn find(lib: &Library, query: &str, kind: Kind) -> Result<Target, ApiError> {
     match kind {
@@ -322,12 +323,12 @@ pub fn find(lib: &Library, query: &str, kind: Kind) -> Result<Target, ApiError> 
     let q = bare(query);
     let found = lib.search(&q, 10).map_err(|e| ApiError::internal(e.to_string()))?;
     let all = candidates(&found);
-    let c = best(&q, kind, &all).ok_or_else(|| ApiError::not_found("Ничего не нашлось"))?;
+    let c = best(&q, kind, &all).ok_or_else(|| ApiError::not_found("Not found"))?;
     Ok(Target { kind: c.kind, id: Some(c.id.clone()), title: c.title.clone() })
 }
 
-/// Shuffled or not when the request does not say: as «Слушать» does, an
-/// artist and «Любимые» shuffled, the rest in order.
+/// Shuffled or not when the request does not say: as the Play button does,
+/// an artist and Liked Songs shuffled, the rest in order.
 pub fn shuffled(kind: Kind, asked: Option<bool>) -> bool {
     asked.unwrap_or(matches!(kind, Kind::Artist | Kind::Liked))
 }
@@ -335,19 +336,19 @@ pub fn shuffled(kind: Kind, asked: Option<bool>) -> bool {
 /// The wave asked to go after the current track or at the end: it can only
 /// replace the queue.
 pub fn wave_not_queued() -> ApiError {
-    ApiError::bad_request("Волну можно только включить вместо очереди")
+    ApiError::bad_request("The Wave can only replace the queue")
 }
 
 /// The commands that play `t`. A new queue (`replace`) gets `shuffle`
 /// before it is made; the wave only replaces the queue (and keeps its own
 /// order).
 pub fn commands(t: &Target, shuffle: bool, mode: Mode) -> Result<Vec<Command>, ApiError> {
-    let bad = || ApiError::bad_request("Неверный id");
+    let bad = || ApiError::bad_request("Invalid id");
     let id = t.id.as_deref().unwrap_or_default();
     let c = match (t.kind, mode) {
         (Kind::Wave, Mode::Replace) => return Ok(vec![Command::PlayWave { preset: None }]),
         (Kind::Wave, _) => return Err(wave_not_queued()),
-        // The part's mix as «Моя волна» of that part: the card of a part
+        // The part's mix as My Wave of that part: the card of a part
         // is on the home only while it lasts, the wave of any part is.
         (Kind::Part, Mode::Replace) => {
             let p: u8 = id.parse().ok().filter(|p| usize::from(*p) < PARTS.len()).ok_or_else(no_such_part)?;
@@ -389,7 +390,7 @@ pub fn commands(t: &Target, shuffle: bool, mode: Mode) -> Result<Vec<Command>, A
                 Mode::Enqueue => Command::EnqueuePlaylist(id),
             }
         }
-        (Kind::Any, _) => return Err(ApiError::bad_request("Не сказано, что играть")),
+        (Kind::Any, _) => return Err(ApiError::bad_request("Nothing to play is given")),
     };
     Ok(if mode == Mode::Replace { vec![Command::ApiShuffle(shuffle), c] } else { vec![c] })
 }
@@ -421,7 +422,7 @@ mod tests {
             assert_eq!(special_part(q), Some(p), "{q}");
             assert_eq!(special(q), Some(Kind::Part), "{q}");
         }
-        // A bare «ночь» may be an album: searched as anything else.
+        // A bare “night” may be an album: searched as anything else.
         for q in ["ночь", "вечер", "день", "звезда по имени солнце"] {
             assert_eq!(special_part(q), None, "{q}");
         }
@@ -431,7 +432,7 @@ mod tests {
         }
         assert_eq!(part_of("полдник"), None);
         let t = part(0);
-        assert_eq!((t.kind, t.id.as_deref(), t.title.as_str()), (Kind::Part, Some("0"), "Доброе утро"));
+        assert_eq!((t.kind, t.id.as_deref(), t.title.as_str()), (Kind::Part, Some("0"), "Good morning"));
         assert!(matches!(
             commands(&t, false, Mode::Replace).unwrap()[..],
             [Command::PlayWave { preset: Some(nikgob_view::MixKey::Part(0)) }]
@@ -457,7 +458,7 @@ mod tests {
         // An exact song beats a playlist that only starts with the words.
         let all = [c(Kind::Playlist, "Creep covers", "", 0), c(Kind::Track, "Creep", "Radiohead", 3)];
         assert_eq!(best("creep", Kind::Any, &all).map(|c| c.kind), Some(Kind::Track));
-        // «Исполнитель песня» names the song.
+        // An “artist song” names the song.
         let all = [c(Kind::Artist, "Radiohead", "", 0), c(Kind::Track, "Creep", "Radiohead", 0), c(Kind::Album, "Pablo Honey", "Radiohead", 0)];
         assert_eq!(best("radiohead creep", Kind::Any, &all).map(|c| c.title.as_str()), Some("Creep"));
         assert_eq!(best("включи Radiohead", Kind::Any, &all).map(|c| c.kind), Some(Kind::Artist));

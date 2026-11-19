@@ -209,7 +209,7 @@ impl<B: Backend> McpServer<B> {
                     return Err(RpcError::new(RpcError::INVALID_PARAMS, format!("Unknown tool: {name}")));
                 };
                 if !tools::visible(tool, self.preset().await) {
-                    let e = json!({"error": "forbidden", "message": "У токена нет нужного права"});
+                    let e = json!({"error": "forbidden", "message": "The token lacks the right"});
                     return Ok(tool_result(&e, true));
                 }
                 let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(n(ask(&down, "tools/list", json!({})).await), 18);
         let r = ask(&down, "tools/call", json!({"name": "status_get", "arguments": {}})).await;
         assert_eq!(r["result"]["isError"], true);
-        assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("Плеер не запущен"));
+        assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("The player is not running"));
     }
 
     #[tokio::test]

@@ -1,8 +1,8 @@
-//! Downloads: what runs, what waits in «Хочу скачать» and in «Подтверди»,
-//! a dry search of the download sources, and a request to download. A
+//! Downloads: what runs, what waits on the Wishlist and in the Confirm
+//! queue, a dry search of the download sources, and a request to download. A
 //! small request (a few releases of a sure match, not too big) goes to
-//! «Хочу скачать» at once, as the window's «Скачать» does; anything larger
-//! waits as a card in the app's own «Подтверди» for the owner's click,
+//! the Wishlist at once, as the window's Download does; anything larger
+//! waits as a card in the app's own Confirm for the owner's click,
 //! and so does one whose size cannot be told for sure (a service that did
 //! not answer, an album listed without all its songs).
 
@@ -42,7 +42,7 @@ const SOURCES_WAIT: Duration = Duration::from_secs(75);
 const ALBUM_WAIT: Duration = Duration::from_secs(10);
 /// Service albums one request may name at most (each is a lookup).
 pub const REMOTE_ALBUMS_MAX: usize = 20;
-/// Items of «Хочу скачать» listed at most.
+/// Wishlist items listed at most.
 const WISHLIST_SHOWN: usize = 50;
 
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
@@ -92,9 +92,9 @@ pub struct StatusCount {
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
 pub struct DownloadsAnswer {
     pub active: Vec<JobOut>,
-    /// «Подтверди»: cards waiting for the owner in the app.
+    /// Confirm: cards waiting for the owner in the app.
     pub confirm: Vec<ConfirmOut>,
-    /// «Хочу скачать» by state.
+    /// The Wishlist by state.
     pub wishlist_counts: Vec<StatusCount>,
     /// Its items not done yet, newest first (the first 50).
     pub wishlist: Vec<WishOut>,
@@ -181,18 +181,18 @@ pub struct SourcesAnswer {
     get,
     path = "/v1/downloads/sources",
     tag = "downloads",
-    params(("track_id" = Option<String>, Query, description = "id песни"), ("album_id" = Option<String>, Query, description = "id альбома")),
+    params(("track_id" = Option<String>, Query, description = "the track's id"), ("album_id" = Option<String>, Query, description = "the album's id")),
     responses((status = 200, body = SourcesAnswer), (status = 400, body = crate::error::ErrorBody), (status = 429, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
 pub async fn sources(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, RawQuery(raw): RawQuery) -> Result<Json<SourcesAnswer>, ApiError> {
     let raw = raw.as_deref();
-    let bad = || ApiError::bad_request("Неверный id");
+    let bad = || ApiError::bad_request("Invalid id");
     let track: Option<TrackId> = query_value(raw, "track_id").filter(|s| !s.trim().is_empty()).map(|s| s.trim().parse().map_err(|_| bad())).transpose()?;
     let release: Option<ReleaseId> =
         query_value(raw, "album_id").filter(|s| !s.trim().is_empty()).map(|s| s.trim().parse().map_err(|_| bad())).transpose()?;
     if track.is_none() == release.is_none() {
-        return Err(ApiError::bad_request("Нужен один из: track_id, album_id"));
+        return Err(ApiError::bad_request("One of: track_id, album_id"));
     }
     let lib = sh.lib.clone();
     blocking(move || {
@@ -201,7 +201,7 @@ pub async fn sources(State(sh): State<Arc<Shared>>, Extension(caller): Extension
             (None, Some(r)) => lib.get_release(r).map_err(db)?.is_some(),
             _ => false,
         };
-        if there { Ok(()) } else { Err(ApiError::not_found("Ничего не нашлось")) }
+        if there { Ok(()) } else { Err(ApiError::not_found("Not found")) }
     })
     .await?;
     sh.lookup_allowed(&caller)?;
@@ -229,10 +229,10 @@ pub struct EnqueueBody {
 /// `POST /v1/downloads`.
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
 pub struct EnqueueAnswer {
-    /// `queued` (in «Хочу скачать»), `queued_in_confirm` (waits for the
-    /// owner in «Подтверди») or `nothing_to_do`.
+    /// `queued` (on the Wishlist), `queued_in_confirm` (waits for the
+    /// owner in Confirm) or `nothing_to_do`.
     pub status: String,
-    /// The «Подтверди» card, when it waits there.
+    /// The Confirm card, when it waits there.
     pub confirm_id: Option<u64>,
     /// What it asks for, one line each.
     pub items: Vec<String>,
@@ -287,13 +287,13 @@ pub fn album_want(r: &RemoteId, album: Option<&nikgob_core::streaming::StreamAlb
             let line = format!("{} — {} ({})", album_artists(a), a.title, crate::mutate::tracks_word(n));
             (line, n, known, unknown, listed > 0 && listed >= n)
         }
-        None => (format!("Альбом {r}"), 12, 0, 12, false),
+        None => (format!("Album {r}"), 12, 0, 12, false),
     };
     Want { line, tracks: n, known_ms: known, unknown, release: Some(r.to_string()), command: Some(Command::DownloadStreamAlbum(r.clone())), sure }
 }
 
 /// Asks the player to download songs and albums: at once when the request
-/// is small, else as a card in «Подтверди» for the owner.
+/// is small, else as a card in Confirm for the owner.
 #[utoipa::path(
     post,
     path = "/v1/downloads",
@@ -304,16 +304,16 @@ pub fn album_want(r: &RemoteId, album: Option<&nikgob_core::streaming::StreamAlb
 )]
 pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<EnqueueAnswer>, ApiError> {
     let b: EnqueueBody = body(&bytes)?;
-    let bad = |what: &str, s: &str| ApiError::bad_request(format!("Неверный id {what}: {s}"));
-    let tracks: Vec<TrackId> = b.track_ids.iter().map(|s| s.trim().parse().map_err(|_| bad("песни", s))).collect::<Result<_, _>>()?;
-    let albums: Vec<ReleaseId> = b.album_ids.iter().map(|s| s.trim().parse().map_err(|_| bad("альбома", s))).collect::<Result<_, _>>()?;
-    let remote_tracks: Vec<RemoteId> = b.remote_track_ids.iter().map(|s| remote_id(s).ok_or_else(|| bad("сервиса", s))).collect::<Result<_, _>>()?;
-    let remote_albums: Vec<RemoteId> = b.remote_album_ids.iter().map(|s| remote_id(s).ok_or_else(|| bad("сервиса", s))).collect::<Result<_, _>>()?;
+    let bad = |what: &str, s: &str| ApiError::bad_request(format!("Invalid {what} id: {s}"));
+    let tracks: Vec<TrackId> = b.track_ids.iter().map(|s| s.trim().parse().map_err(|_| bad("track", s))).collect::<Result<_, _>>()?;
+    let albums: Vec<ReleaseId> = b.album_ids.iter().map(|s| s.trim().parse().map_err(|_| bad("album", s))).collect::<Result<_, _>>()?;
+    let remote_tracks: Vec<RemoteId> = b.remote_track_ids.iter().map(|s| remote_id(s).ok_or_else(|| bad("service", s))).collect::<Result<_, _>>()?;
+    let remote_albums: Vec<RemoteId> = b.remote_album_ids.iter().map(|s| remote_id(s).ok_or_else(|| bad("service", s))).collect::<Result<_, _>>()?;
     if tracks.is_empty() && albums.is_empty() && remote_tracks.is_empty() && remote_albums.is_empty() {
-        return Err(ApiError::bad_request("Нечего скачивать"));
+        return Err(ApiError::bad_request("Nothing to download"));
     }
     if remote_albums.len() > REMOTE_ALBUMS_MAX {
-        return Err(ApiError::of(StatusCode::BAD_REQUEST, "too_many", format!("Не больше {REMOTE_ALBUMS_MAX} альбомов сервисов за раз")));
+        return Err(ApiError::of(StatusCode::BAD_REQUEST, "too_many", format!("No more than {REMOTE_ALBUMS_MAX} service albums at a time")));
     }
     let lib = sh.lib.clone();
     let (mut wants, already) = blocking(move || {
@@ -322,7 +322,7 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
         let rows = lib.get_track_rows(&tracks).map_err(db)?;
         let mut missing = Vec::new();
         for t in &tracks {
-            let r = rows.get(t).ok_or_else(|| ApiError::not_found(format!("Нет такой песни: {t}")))?;
+            let r = rows.get(t).ok_or_else(|| ApiError::not_found(format!("No such track: {t}")))?;
             if r.has_local {
                 already.push(format!("{} — {}", r.artist, r.title));
                 continue;
@@ -338,12 +338,12 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
                 sure: true,
             });
         }
-        // One command for the songs: the window's «Скачать» of a selection.
+        // One command for the songs: the window's Download of a selection.
         if let Some(first) = wants.first_mut() {
             first.command = Some(Command::DownloadTracks(missing));
         }
         for a in &albums {
-            let row = lib.get_release_row(*a).map_err(db)?.ok_or_else(|| ApiError::not_found(format!("Нет такого альбома: {a}")))?;
+            let row = lib.get_release_row(*a).map_err(db)?.ok_or_else(|| ApiError::not_found(format!("No such album: {a}")))?;
             let songs = lib.tracks_of_release(*a).map_err(db)?;
             let lacking: Vec<_> = songs.iter().filter(|t| !t.has_local).collect();
             if lacking.is_empty() {
@@ -369,7 +369,7 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
         let found = crate::discover::stream_tracks(&sh, &caller, &remote_tracks).await?;
         let n = remote_tracks.len();
         wants.push(Want {
-            line: format!("{} из сервисов", crate::mutate::tracks_word(n)),
+            line: format!("{} from the services", crate::mutate::tracks_word(n)),
             tracks: 0,
             known_ms: 0,
             unknown: 0,
@@ -425,10 +425,10 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
     }
     let title = match items.as_slice() {
         [one] => one.clone(),
-        [first, rest @ ..] => format!("{first} и ещё {}", rest.len()),
-        [] => "Загрузка".to_owned(),
+        [first, rest @ ..] => format!("{first} and {} more", rest.len()),
+        [] => "Download".to_owned(),
     };
-    let origin = format!("Запрос «{}»", caller.name);
+    let origin = format!("Request from “{}”", caller.name);
     sh.run_by(Some(caller.actor), vec![Command::ApiConfirmDownload { title, origin, lines: items.clone(), commands }]).await?;
     // The card just made: the newest of the API's.
     let confirm_id = sh.rt.state().downloads.confirm.iter().map(|c| c.id).filter(|id| id & (1 << 50) != 0).max();
