@@ -911,14 +911,14 @@ fn songs_progress(keep: &Keep, offers: &[Offer], held: &HashMap<TrackId, Vec<Hel
 /// masters whose files it holds verified (`held`).
 fn masters_progress(lists: &HashMap<String, (Instant, Vec<MasterItem>)>, held: &HashSet<String>) -> (u64, u64) {
     let mut sizes: BTreeMap<&str, u64> = BTreeMap::new();
-    for list in lists.values() {
+    for (_, list) in lists.values() {
         for m in list {
             let n = sizes.entry(m.hash.as_str()).or_default();
             *n = (*n).max(m.size);
         }
     }
     sizes.into_iter().fold((0u64, 0u64), |(done, goal), (hash, size)| {
-        (goal.saturating_add(size), if held.contains(hash) { done.saturating_add(size) } else { done })
+        (if held.contains(hash) { done.saturating_add(size) } else { done }, goal.saturating_add(size))
     })
 }
 

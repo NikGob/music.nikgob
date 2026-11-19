@@ -30,7 +30,7 @@ impl FakeWindow {
 }
 
 impl WebLogin for FakeWindow {
-    fn sign_in(&self, cancel: &AtomicBool) -> Result<String, WebLoginError> {
+    fn sign_in(&self, cancel: &AtomicBool, _loc: nikgob_core::i18n::Locale) -> Result<String, WebLoginError> {
         while !self.release.load(Ordering::SeqCst) {
             if cancel.load(Ordering::SeqCst) {
                 self.saw_cancel.store(true, Ordering::SeqCst);

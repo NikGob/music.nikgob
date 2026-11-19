@@ -247,9 +247,10 @@ impl Worker {
             });
         }
 
+        let loc = self.locale();
         let jobs: Vec<v::Job> = rows
             .iter()
-            .map(|(id, title, via, from, t)| t.job(IMPORT_ID | DIRECT_JOB | id, title.clone(), via.as_deref(), Some(from), true, false))
+            .map(|(id, title, via, from, t)| t.job_in(loc, IMPORT_ID | DIRECT_JOB | id, title.clone(), via.as_deref(), Some(from), true, false))
             .collect();
         let shape_now = shape(&rows.iter().map(|(id, .., t)| (*id, *t)).collect::<Vec<_>>());
         let runs = &mut self.streaming.wish.runs;
@@ -268,6 +269,15 @@ impl Worker {
             self.wish_dismiss(&[item]);
             self.publish_running();
         }
+    }
+
+    /// The rows in the UI's new language: what was published is forgotten,
+    /// so [`Self::publish_running`] puts them out again even when nothing
+    /// else changed.
+    pub(crate) fn relocalize_running(&mut self) {
+        self.streaming.wish.runs.shown = None;
+        self.streaming.wish.runs.shape = None;
+        self.publish_running();
     }
 }
 

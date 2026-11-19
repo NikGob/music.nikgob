@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 pub use nikgob_core::settings::KeepMasters;
 
+use nikgob_core::i18n::Locale;
+
 use crate::PlaylistId;
 
 /// What a device is.
@@ -295,8 +297,9 @@ pub struct MeshSyncView {
     /// When the last pull that brought rows ended (unix ms).
     pub last_ms: Option<i64>,
     /// Why the last pull failed, or that rows of it wait for the owner
-    /// ([`Self::conflicts`]): a blocker to show.
-    pub error: Option<String>,
+    /// ([`Self::conflicts`]): a blocker to show, as data — its words are
+    /// made when the row is drawn.
+    pub error: Option<MeshSyncError>,
     /// Its artists, albums, streams this device has under another id: kept
     /// until the owner decides.
     pub conflicts: u32,
@@ -311,6 +314,53 @@ impl MeshSyncView {
     /// How far a running pull is, 0..=1.
     pub fn fraction(&self) -> f32 {
         if self.total == 0 { 0.0 } else { (self.done as f64 / self.total as f64).clamp(0.0, 1.0) as f32 }
+    }
+}
+
+/// Why the mesh service cannot run, as data: its words are made when the
+/// settings draw it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MeshServiceError {
+    /// The network could not be opened: the reason.
+    Network(String),
+}
+
+impl MeshServiceError {
+    /// The words of `self` in `loc`.
+    pub fn text_in(&self, loc: Locale) -> String {
+        match self {
+            Self::Network(why) => nikgob_core::i18n::mesh::fmt_open_net_in(loc, why),
+        }
+    }
+}
+
+/// Why a device's sync row shows a blocker, as data: its words are made
+/// when the row is drawn, so a language change reaches a row already shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MeshSyncError {
+    /// Syncing is off on this database.
+    Blocked,
+    /// The device does not take sync (turned off there, not an owner).
+    Refused,
+    /// Its clock runs ahead: nothing of it is taken.
+    ClockAhead,
+    /// The pull failed.
+    Failed,
+    /// Its rows wait for the owner: how many.
+    Conflicts(u32),
+}
+
+impl MeshSyncError {
+    /// The words of `self` in `loc`.
+    pub fn text_in(&self, loc: Locale) -> String {
+        let s = nikgob_core::i18n::mesh_in(loc);
+        match self {
+            Self::Blocked => s.sync_blocked.to_owned(),
+            Self::Refused => s.sync_refused.to_owned(),
+            Self::ClockAhead => s.sync_clock_ahead.to_owned(),
+            Self::Failed => s.sync_failed.to_owned(),
+            Self::Conflicts(n) => nikgob_core::i18n::mesh::fmt_sync_conflicts_in(loc, *n),
+        }
     }
 }
 
@@ -332,12 +382,122 @@ pub enum MeshPairing {
     WaitingCode { nearby_id: String },
     /// The exchange runs.
     Working,
-    /// Why it did not pair, already said in the owner's language.
-    Failed(String),
+    /// Why it did not pair, as data: the dialog says it in the UI's
+    /// language when it draws it.
+    Failed(MeshPairingError),
     /// The code the device showed was wrong: its window shakes, no word.
     FailedWrongCode,
     /// Paired: the new device's id.
     Done { node_id: String },
+}
+
+/// Why a pairing did not happen, as data: its words are made when the
+/// dialog draws it, so a language change reaches a failure already shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MeshPairingError {
+    /// The mesh is off.
+    MeshOff,
+    /// The mesh service does not run.
+    NotRunning,
+    /// The invite could not be made.
+    InviteNotMade,
+    /// Only the ring's holder adds devices.
+    OnlyHolderAdds,
+    /// The ring could not be made.
+    RingNotMade,
+    /// The invite was cancelled.
+    InviteCancelled,
+    /// No such device.
+    NoSuchDevice,
+    /// The code must be six digits.
+    CodeSixDigits,
+    /// The device is gone.
+    DeviceGone,
+    /// It is in a ring already.
+    AlreadyPaired,
+    /// The other side would not pair: its refusal.
+    Refused(MeshRefusal),
+    /// The invite ticket was not taken.
+    Ticket(MeshTicketError),
+    /// The exchange broke.
+    Protocol,
+    /// No link to the device.
+    NoLink,
+    /// The ring could not be saved.
+    SaveFailed,
+}
+
+/// Why the other side would not pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeshRefusal {
+    WrongCode,
+    /// No such invite, or it expired or was spent.
+    NoInvite,
+    /// Another pairing runs there.
+    Busy,
+    /// It is in a ring already.
+    Paired,
+    /// It cannot sign (not the ring's holder).
+    NotHolder,
+    Internal,
+    /// The ring has no room for another device.
+    Full,
+}
+
+/// Why an invite ticket was not taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeshTicketError {
+    /// Not a ticket of this player.
+    NotATicket,
+    /// A ticket of a newer player.
+    Version,
+    Expired,
+}
+
+impl MeshTicketError {
+    /// The words of `self` in `loc`.
+    pub fn text_in(self, loc: Locale) -> String {
+        let s = nikgob_core::i18n::mesh_in(loc);
+        match self {
+            Self::NotATicket => s.not_a_ticket,
+            Self::Version => s.newer_invite,
+            Self::Expired => s.invite_expired,
+        }
+        .to_owned()
+    }
+}
+
+impl MeshPairingError {
+    /// The words of `self` in `loc`.
+    pub fn text_in(&self, loc: Locale) -> String {
+        let s = nikgob_core::i18n::mesh_in(loc);
+        match self {
+            Self::MeshOff => s.mesh_off,
+            Self::NotRunning => s.mesh_not_running,
+            Self::InviteNotMade => s.invite_not_made,
+            Self::OnlyHolderAdds => s.only_holder_adds,
+            Self::RingNotMade => s.ring_not_made,
+            Self::InviteCancelled => s.invite_cancelled,
+            Self::NoSuchDevice => s.no_such_device,
+            Self::CodeSixDigits => s.code_six_digits,
+            Self::DeviceGone => s.device_gone,
+            Self::AlreadyPaired => s.already_paired,
+            Self::Refused(r) => match r {
+                MeshRefusal::WrongCode => s.wrong_code,
+                MeshRefusal::NoInvite => s.invite_gone,
+                MeshRefusal::Busy => s.device_busy,
+                MeshRefusal::Paired => s.device_paired,
+                MeshRefusal::NotHolder => s.only_holder_pairs,
+                MeshRefusal::Internal => s.bad_answer,
+                MeshRefusal::Full => s.ring_full,
+            },
+            Self::Protocol => s.bad_answer,
+            Self::Ticket(e) => return e.text_in(loc),
+            Self::NoLink => s.no_link,
+            Self::SaveFailed => s.pair_save_failed,
+        }
+        .to_owned()
+    }
 }
 
 /// The invite being shown: the ticket for `nikgobd pair <ticket>` (or a
@@ -371,8 +531,9 @@ pub struct MeshView {
     /// This instance's 6-digit code while it is in no ring (another
     /// device's «Подключить» asks for it).
     pub code: Option<String>,
-    /// Why the service cannot run (no network, a port), in words.
-    pub error: Option<String>,
+    /// Why the service cannot run (no network, a port), as data: its words
+    /// are made when the settings draw it.
+    pub error: Option<MeshServiceError>,
     /// `[mesh] name` of settings.toml (empty: the computer's name).
     pub name_setting: String,
     /// The settings can be saved (there is a settings.toml).
@@ -420,7 +581,7 @@ pub struct MeshSnapshot {
     pub ring_holder: bool,
     pub paired: bool,
     pub code: Option<String>,
-    pub error: Option<String>,
+    pub error: Option<MeshServiceError>,
 }
 
 /// «Компьютер», «Raspberry Pi»…: a device's kind in words, in the active locale.
@@ -438,6 +599,22 @@ pub fn kind_label(k: MeshKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pairing's failure and a sync row's blocker are data: the same one
+    /// reads in both languages.
+    #[test]
+    fn failures_read_in_both_languages() {
+        assert_eq!(MeshPairingError::MeshOff.text_in(Locale::Ru), "Межсеть выключена");
+        assert_eq!(MeshPairingError::MeshOff.text_in(Locale::En), "Mesh is off");
+        assert_eq!(MeshPairingError::NoLink.text_in(Locale::Ru), "Нет связи с устройством");
+        assert_eq!(MeshPairingError::NoLink.text_in(Locale::En), "Cannot connect to the device");
+        assert_eq!(MeshPairingError::Refused(MeshRefusal::Full).text_in(Locale::En), "No room for another device in the ring");
+        assert_eq!(MeshPairingError::Ticket(MeshTicketError::Expired).text_in(Locale::Ru), "Приглашение истекло");
+        assert_eq!(MeshSyncError::Conflicts(3).text_in(Locale::Ru), "Не все изменения приняты: 3");
+        assert_eq!(MeshSyncError::Conflicts(3).text_in(Locale::En), "Not all changes accepted: 3");
+        assert_eq!(MeshServiceError::Network("x".into()).text_in(Locale::Ru), "Не удалось открыть сеть: x");
+        assert_eq!(MeshServiceError::Network("x".into()).text_in(Locale::En), "Could not open the network: x");
+    }
 
     #[test]
     fn words_round_trip() {

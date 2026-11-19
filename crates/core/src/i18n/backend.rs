@@ -28,6 +28,8 @@ pub struct BackendStrings {
     /// Spotify without Premium is not connected at all: what its account
     /// says.
     pub spotify_premium_required: &'static str,
+    /// Spotify's saved sign-in was refused.
+    pub spotify_session_expired: &'static str,
     /// Why syncing is off on this database (see `nikgob-library`'s sync).
     pub sync_epoch_unwritten: &'static str,
 }
@@ -48,6 +50,7 @@ pub static RU: BackendStrings = BackendStrings {
     soundcloud_login_refused: "SoundCloud не принял вход — токен устарел",
     soundcloud_player: "Плеер SoundCloud",
     spotify_premium_required: crate::streaming::SPOTIFY_PREMIUM_REQUIRED,
+    spotify_session_expired: "Вход в Spotify истёк, войди снова",
     sync_epoch_unwritten: "Синхронизация остановлена: метка базы не записана",
 };
 
@@ -67,6 +70,7 @@ pub static EN: BackendStrings = BackendStrings {
     soundcloud_login_refused: "SoundCloud sign-in failed — the token has expired",
     soundcloud_player: "SoundCloud player",
     spotify_premium_required: "Spotify Premium is required to connect; YouTube Music works without it",
+    spotify_session_expired: "Your Spotify sign-in has expired — sign in again",
     sync_epoch_unwritten: "Sync stopped: the database sync marker was not saved",
 };
 
@@ -271,6 +275,7 @@ mod tests {
             RU.soundcloud_login_refused,
             RU.soundcloud_player,
             RU.spotify_premium_required,
+            RU.spotify_session_expired,
             RU.sync_epoch_unwritten,
         ] {
             assert!(!ru.is_empty());
@@ -290,6 +295,7 @@ mod tests {
             EN.soundcloud_login_refused,
             EN.soundcloud_player,
             EN.spotify_premium_required,
+            EN.spotify_session_expired,
             EN.sync_epoch_unwritten,
         ] {
             assert!(!en.is_empty());

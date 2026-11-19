@@ -4,6 +4,37 @@
 
 pub use nikgob_core::settings::{API_PORT, ApiAccess, ApiActor, ApiPreset};
 
+use nikgob_core::i18n::Locale;
+
+/// One line of an API download request's card, as data: the card is drawn
+/// in the app's UI language when it is published, so a language change
+/// reaches a card that already waits in «Подтверди».
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApiConfirmLine {
+    /// `artist — title`, no count.
+    Named(String),
+    /// `artist — title (N tracks)`.
+    NamedCount { head: String, tracks: usize },
+    /// `N tracks from the services`.
+    FromServices(usize),
+    /// `Album <id>`.
+    Album(String),
+}
+
+impl ApiConfirmLine {
+    /// The line in `loc`.
+    pub fn text_in(&self, loc: Locale) -> String {
+        match self {
+            Self::Named(head) => head.clone(),
+            Self::NamedCount { head, tracks } => {
+                format!("{head} ({})", nikgob_core::i18n::tracks_count_in(loc, *tracks as u64))
+            }
+            Self::FromServices(n) => nikgob_core::i18n::activity::fmt_tracks_from_services_in(loc, *n),
+            Self::Album(id) => nikgob_core::i18n::activity::fmt_api_album_in(loc, id),
+        }
+    }
+}
+
 /// `[api]` of settings.toml as the runtime keeps it, and what the server
 /// reported.
 #[derive(Clone, Debug, PartialEq)]

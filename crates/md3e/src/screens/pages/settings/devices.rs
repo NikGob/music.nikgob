@@ -311,15 +311,15 @@ fn actions(ui: &mut Ui, state: &ViewState, on: bool, shared: &mut MeshUi, out: &
     });
     // What blocks it, in words, and the switch out of it when there is one.
     let failed = match (&m.pairing, shared_add_closed(shared)) {
-        (MeshPairing::Failed(why), true) => Some(why.clone()),
+        (MeshPairing::Failed(why), true) => Some(why.text_in(i18n::locale())),
         _ => None,
     };
     let (text, fix): (Option<String>, Option<(&str, Command)>) = if !m.configurable {
         (Some(st.no_settings_file.to_owned()), None)
     } else if !on {
         (Some(st.mesh_off.to_owned()), Some((st.turn_on, Command::MeshSetEnabled(true))))
-    } else if let Some(e) = m.error.clone() {
-        (Some(e), None)
+    } else if let Some(e) = m.error.as_ref() {
+        (Some(e.text_in(i18n::locale())), None)
     } else {
         (failed, None)
     };

@@ -20,7 +20,7 @@ use nikgob_core::i18n::Locale;
 use nikgob_core::model::{ReleaseId, TrackId, WishlistItem, WishlistScope, WishlistStatus};
 use nikgob_core::settings::{ApiSettings, ApiTokenRecord, Settings};
 use nikgob_core::source::SourceError;
-use nikgob_view::{ApiActor, ApiReply, ApiTokenView, ApiView, Command, Confirm, ConfirmOption};
+use nikgob_view::{ApiActor, ApiConfirmLine, ApiReply, ApiTokenView, ApiView, Command, Confirm, ConfirmOption};
 
 use crate::{PlaybackEvent, Worker};
 
@@ -36,22 +36,34 @@ const OFFERS_ANSWERED: usize = 12;
 /// A source's dry search at most (the API waits a little longer).
 const SOURCE_SEARCH_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// A download of the API waiting in «Подтверди».
+/// A download of the API waiting in «Подтверди»: what it asks for as data,
+/// its card made in the UI's language of the moment it is published.
 struct ApiConfirm {
-    card: Confirm,
+    id: u64,
+    lines: Vec<ApiConfirmLine>,
+    /// Who asked (its token's name).
+    caller: String,
     /// What «Скачать» runs.
     commands: Vec<Command>,
 }
 
-/// The card of a download the API asked for.
-pub(crate) fn confirm_card(id: u64, title: &str, origin: &str, lines: &[String], loc: Locale) -> Confirm {
+/// The card of a download the API asked for, in `loc`.
+pub(crate) fn confirm_card(id: u64, lines: &[ApiConfirmLine], caller: &str, loc: Locale) -> Confirm {
     let s = activity_in(loc);
+    let title = match lines {
+        [one] => one.text_in(loc),
+        [first, rest @ ..] => nikgob_core::i18n::activity::fmt_and_more_in(loc, &first.text_in(loc), rest.len()),
+        [] => nikgob_core::i18n::downloads_in(loc).incoming.to_owned(),
+    };
     Confirm {
         id,
-        title: title.to_owned(),
-        origin: origin.to_owned(),
+        title,
+        origin: nikgob_core::i18n::activity::fmt_api_request_from_in(loc, caller),
         question: s.download_q.to_owned(),
-        options: lines.iter().map(|l| ConfirmOption { label: l.clone(), detail: String::new(), recommended: false }).collect(),
+        options: lines
+            .iter()
+            .map(|l| ConfirmOption { label: l.text_in(loc), detail: String::new(), recommended: false })
+            .collect(),
         skip_label: s.dont_download.to_owned(),
         accept_label: s.download.to_owned(),
         pick: None,
@@ -395,14 +407,15 @@ impl Worker {
                 self.delete_tracks(tracks, &what);
             }
             Command::ApiSourceSearch { track, release, reply } => self.api_source_search(track, release, reply),
-            Command::ApiConfirmDownload { title, origin, lines, commands } => {
+            Command::ApiConfirmDownload { lines, caller, commands } => {
                 self.api.next_confirm += 1;
                 let id = API_CONFIRM_ID | self.api.next_confirm;
                 if self.api.confirms.len() >= API_CONFIRMS {
                     let old = self.api.confirms.remove(0);
-                    log::info!("api: the download «{}» waited too long in «Подтверди», dropped", old.card.title);
+                    let first = old.lines.first().map(|l| l.text_in(self.locale())).unwrap_or_default();
+                    log::info!("api: the download «{first}» waited too long in «Подтверди», dropped");
                 }
-                self.api.confirms.push(ApiConfirm { card: confirm_card(id, &title, &origin, &lines, loc), commands });
+                self.api.confirms.push(ApiConfirm { id, lines, caller, commands });
                 self.publish_api_confirms();
             }
             Command::ApiKnow(tracks) => self.streaming.learn(&tracks),
@@ -411,9 +424,11 @@ impl Worker {
         }
     }
 
-    /// The API's cards into «Подтверди» (the other cards stay).
-    fn publish_api_confirms(&mut self) {
-        let cards: Vec<Confirm> = self.api.confirms.iter().map(|c| c.card.clone()).collect();
+    /// The API's cards into «Подтверди» (the other cards stay), in the UI's
+    /// language of now.
+    pub(crate) fn publish_api_confirms(&mut self) {
+        let loc = self.locale();
+        let cards: Vec<Confirm> = self.api.confirms.iter().map(|c| confirm_card(c.id, &c.lines, &c.caller, loc)).collect();
         self.publish(move |s| {
             s.downloads.confirm.retain(|c| c.id & API_CONFIRM_ID == 0);
             s.downloads.confirm.extend(cards);
@@ -450,11 +465,11 @@ impl Worker {
 
     /// «Скачать» (`Some`) or «Не скачивать» (`None`) of an API card.
     pub(crate) fn api_confirm(&mut self, id: u64, option: Option<usize>) {
-        let Some(at) = self.api.confirms.iter().position(|c| c.card.id == id) else { return };
+        let Some(at) = self.api.confirms.iter().position(|c| c.id == id) else { return };
         let c = self.api.confirms.remove(at);
         self.publish_api_confirms();
         if option.is_some() {
-            log::info!("api: «{}» downloads, as confirmed", c.card.title);
+            log::info!("api: a download from «{}» goes, as confirmed", c.caller);
             for command in c.commands {
                 self.command(command);
             }
@@ -632,10 +647,12 @@ mod tests {
     }
 
     /// A download of the API waits as a yes-or-no card of its own bit, its
-    /// lines shown, «Скачать» and «Не скачивать».
+    /// lines shown, «Скачать» and «Не скачивать»; the same data in English
+    /// makes the English card.
     #[test]
     fn an_api_download_card() {
-        let c = confirm_card(API_CONFIRM_ID | 3, "A — B и ещё 4", "Запрос «Claude»", &["A — B".to_owned(), "C — D".to_owned()], Locale::Ru);
+        let lines = [ApiConfirmLine::Named("A — B".into()), ApiConfirmLine::Named("C — D".into())];
+        let c = confirm_card(API_CONFIRM_ID | 3, &lines, "Claude", Locale::Ru);
         assert_eq!(c.id & API_CONFIRM_ID, API_CONFIRM_ID);
         for other in [1u64 << 44, 1 << 45, 1 << 47, 1 << 48] {
             assert_eq!(c.id & other, 0, "no other part's bit");
@@ -643,5 +660,12 @@ mod tests {
         assert!(c.yes_no && c.answerable());
         assert_eq!(c.options.len(), 2);
         assert_eq!((c.accept_label.as_str(), c.skip_label.as_str()), ("Скачать", "Не скачивать"));
+        assert_eq!(c.title, "A — B и ещё 1");
+        assert_eq!(c.origin, "Запрос «Claude»");
+        let en = confirm_card(API_CONFIRM_ID | 3, &lines, "Claude", Locale::En);
+        assert_eq!(en.title, "A — B and 1 more");
+        assert_eq!(en.origin, "Request from “Claude”");
+        assert_eq!((en.accept_label.as_str(), en.skip_label.as_str()), ("Download", "Don't download"));
+        assert_eq!(en.options[1].label, "C — D");
     }
 }

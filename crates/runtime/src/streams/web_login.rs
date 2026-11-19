@@ -48,8 +48,10 @@ pub fn window_hint(service: Service) -> &'static str {
 /// A sign-in window of the app.
 pub trait WebLogin: Send + Sync {
     /// Opens the window and blocks until it is done: the session cookies as
-    /// a Netscape cookies.txt. Stops soon after `cancel` becomes true.
-    fn sign_in(&self, cancel: &AtomicBool) -> Result<String, WebLoginError>;
+    /// a Netscape cookies.txt. Stops soon after `cancel` becomes true. `loc`
+    /// is the UI's language of this sign-in (the window's title and its
+    /// errors are in it), not the one the app started with.
+    fn sign_in(&self, cancel: &AtomicBool, loc: Locale) -> Result<String, WebLoginError>;
     /// Forgets the window's saved session (its browser profile). Blocking.
     fn forget(&self);
 }
@@ -108,7 +110,9 @@ impl WebLoginError {
 /// A web login of one service.
 pub(crate) enum WebState {
     Running(Arc<AtomicBool>),
-    Failed(String),
+    /// Why it gave no cookies, as data: its words are made when the account
+    /// is shown.
+    Failed(WebLoginError),
 }
 
 impl Worker {
@@ -123,7 +127,7 @@ impl Worker {
             Some(WebState::Running(_)) => {
                 Account::LoggingIn(Some(LoginPrompt::Window(window_hint_in(service, self.locale()).into())))
             }
-            Some(WebState::Failed(m)) if !account.is_logged_in() => Account::Failed(m.clone()),
+            Some(WebState::Failed(e)) if !account.is_logged_in() => Account::Failed(e.text_for_in(service, self.locale())),
             _ => account,
         }
     }
@@ -144,15 +148,15 @@ impl Worker {
         self.streaming.errors.remove(&service);
         log::info!("{service}: login in the app's window");
         let tx = self.streaming.internal.clone();
+        let loc = self.locale();
         let spawned = std::thread::Builder::new()
             .name(format!("{service}-web-login"))
             .spawn(move || {
-                let r = login.sign_in(&cancel);
+                let r = login.sign_in(&cancel, loc);
                 let _ = tx.send(Internal::Stream(Msg::WebLoginDone(service, r)));
             });
         if let Err(e) = spawned {
-            let text = WebLoginError::Failed(e.to_string()).text_for_in(service, self.locale());
-            self.streaming.web_state.insert(service, WebState::Failed(text));
+            self.streaming.web_state.insert(service, WebState::Failed(WebLoginError::Failed(e.to_string())));
         }
         self.publish_accounts();
         true
@@ -172,8 +176,7 @@ impl Worker {
             Err(WebLoginError::Cancelled) => {}
             Err(e) => {
                 log::warn!("{service}: sign-in window: {e:?}");
-                let text = e.text_for_in(service, self.locale());
-                self.streaming.web_state.insert(service, WebState::Failed(text));
+                self.streaming.web_state.insert(service, WebState::Failed(e));
             }
         }
         self.publish_accounts();

@@ -315,7 +315,7 @@ impl Worker {
         }
     }
 
-    fn replica_publish(&mut self) {
+    pub(crate) fn replica_publish(&mut self) {
         let loc = self.locale();
         let card = self.replica.card.as_ref().map(|(id, items)| keep_card(*id, items, loc));
         self.publish(move |s| {

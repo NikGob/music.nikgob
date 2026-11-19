@@ -83,7 +83,48 @@ enum Run {
     Starting,
     Running,
     /// Failed; started again at the instant, or by the user (`None`).
-    Failed { why: String, retry_at: Option<Instant> },
+    Failed { why: RunFailure, retry_at: Option<Instant> },
+}
+
+/// Why a run failed, as data: its words are made when the phase is
+/// produced ([`Soloist::status`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunFailure {
+    /// The build expired and there is no new one.
+    BuildExpired,
+    /// The child stopped.
+    Stopped,
+}
+
+impl RunFailure {
+    /// The words of `self` in `loc`.
+    fn text_in(self, loc: nikgob_core::i18n::Locale) -> String {
+        let s = i18n_backend::backend_in(loc);
+        match self {
+            Self::BuildExpired => s.soloist_build_expired.to_owned(),
+            Self::Stopped => s.soloist_stopped.to_owned(),
+        }
+    }
+}
+
+/// Why the build could not be downloaded, as data: its words are made when
+/// the phase is produced ([`Soloist::status`]).
+#[derive(Debug)]
+enum DownloadError {
+    /// The build could not be saved: the reason.
+    Save(String),
+    /// The download failed: the reason.
+    Download(install::InstallError),
+}
+
+impl DownloadError {
+    /// The words of `self` in `loc`.
+    fn text_in(&self, loc: nikgob_core::i18n::Locale) -> String {
+        match self {
+            Self::Save(why) => i18n_backend::fmt_soloist_save_failed_in(loc, why),
+            Self::Download(e) => capitalised(&e.message_in(loc)),
+        }
+    }
 }
 
 struct State {
@@ -94,7 +135,7 @@ struct State {
     key_refused: bool,
     wanted: bool,
     downloading: Option<(u64, Option<u64>)>,
-    download_error: Option<String>,
+    download_error: Option<DownloadError>,
     size: Option<u64>,
     run: Run,
     failures: usize,
@@ -249,12 +290,13 @@ impl Soloist {
     pub fn status(&self) -> SoloistStatus {
         let st = lock(&self.state);
         let live = client::lock(&self.live);
+        let loc = nikgob_core::i18n::locale();
         let phase = if install::artifact().is_none() {
             SoloistPhase::Unsupported
         } else if let Some((done, total)) = st.downloading {
             SoloistPhase::Downloading { done, total }
         } else if let Some(e) = &st.download_error {
-            SoloistPhase::Failed(e.clone())
+            SoloistPhase::Failed(e.text_in(loc))
         } else if st.build.is_none() {
             SoloistPhase::Absent
         } else if st.key_loaded && (st.key.is_none() || st.key_refused) {
@@ -263,7 +305,7 @@ impl Soloist {
             SoloistPhase::Off
         } else {
             match &st.run {
-                Run::Failed { why, .. } => SoloistPhase::Failed(why.clone()),
+                Run::Failed { why, .. } => SoloistPhase::Failed(why.text_in(loc)),
                 Run::Running if live.connected && live.logged_in => SoloistPhase::Ready,
                 Run::Running if live.connected => SoloistPhase::Pairing,
                 _ => SoloistPhase::Starting,
@@ -438,8 +480,7 @@ impl Soloist {
             Ok(build) => {
                 log::info!("soloist: downloaded {} (built {})", build.version, build.built);
                 if let Err(e) = install::write_pointer(&self.builds(), CURRENT, &build) {
-                    st.download_error =
-                        Some(i18n_backend::fmt_soloist_save_failed_in(nikgob_core::i18n::locale(), &e.to_string()));
+                    st.download_error = Some(DownloadError::Save(e.to_string()));
                 } else {
                     // A staged renewal keeps its folder.
                     let pending = install::read_pointer_raw(&self.builds(), PENDING).map(|b| b.digest);
@@ -455,7 +496,7 @@ impl Soloist {
             }
             Err(e) => {
                 log::warn!("soloist: download failed: {e}");
-                st.download_error = Some(capitalised(&e.message_in(nikgob_core::i18n::locale())));
+                st.download_error = Some(DownloadError::Download(e));
             }
         }
         drop(st);
@@ -607,16 +648,14 @@ impl Soloist {
                     true
                 }
                 Outcome::Expired => {
-                    let why = i18n_backend::backend_in(nikgob_core::i18n::locale()).soloist_build_expired.to_owned();
-                    st.run = Run::Failed { why, retry_at: None };
+                    st.run = Run::Failed { why: RunFailure::BuildExpired, retry_at: None };
                     false
                 }
                 Outcome::Failed(why) => {
                     log::warn!("soloist: {why}");
                     let retry_at = BACKOFF.get(st.failures).map(|d| Instant::now() + *d);
                     st.failures += 1;
-                    let said = i18n_backend::backend_in(nikgob_core::i18n::locale()).soloist_stopped.to_owned();
-                    st.run = Run::Failed { why: said, retry_at };
+                    st.run = Run::Failed { why: RunFailure::Stopped, retry_at };
                     false
                 }
             }

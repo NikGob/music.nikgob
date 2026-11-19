@@ -386,9 +386,6 @@ pub struct WindowLogin {
     profile: PathBuf,
     /// Where the child writes the cookies.
     out: PathBuf,
-    /// The UI locale taken at construction (this runs on the app's main
-    /// thread); the sign-in's own thread never reads the global locale.
-    loc: Locale,
 }
 
 impl WindowLogin {
@@ -400,7 +397,6 @@ impl WindowLogin {
             exe,
             profile: dir.join("webview"),
             out: dir.join("signin-cookies.txt"),
-            loc: locale(),
         })
     }
 }
@@ -415,7 +411,7 @@ fn no_webview_in(loc: Locale) -> &'static str {
 const CANCEL_GRACE: Duration = Duration::from_secs(3);
 
 impl WebLogin for WindowLogin {
-    fn sign_in(&self, cancel: &AtomicBool) -> Result<String, WebLoginError> {
+    fn sign_in(&self, cancel: &AtomicBool, loc: Locale) -> Result<String, WebLoginError> {
         let _ = std::fs::remove_file(&self.out);
         if let Some(d) = self.out.parent() {
             let _ = std::fs::create_dir_all(d);
@@ -427,7 +423,7 @@ impl WebLogin for WindowLogin {
             .arg("--profile")
             .arg(&self.profile)
             .arg("--locale")
-            .arg(self.loc.code())
+            .arg(loc.code())
             .arg("--watch-stdin")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -485,17 +481,17 @@ impl WebLogin for WindowLogin {
         match code {
             Some(EXIT_OK) => match read() {
                 Ok(t) if !t.trim().is_empty() => Ok(t),
-                Ok(_) => Err(WebLoginError::Failed(view_in(self.loc).window_no_cookies.into())),
-                Err(e) => Err(WebLoginError::Failed(fmt_cookies_unreadable_in(self.loc, &e.to_string()))),
+                Ok(_) => Err(WebLoginError::Failed(view_in(loc).window_no_cookies.into())),
+                Err(e) => Err(WebLoginError::Failed(fmt_cookies_unreadable_in(loc, &e.to_string()))),
             },
             Some(EXIT_CLOSED) => Err(WebLoginError::Closed),
             Some(EXIT_TIMEOUT) => Err(WebLoginError::TimedOut),
             Some(EXIT_REFUSED) => Err(WebLoginError::Refused),
-            Some(EXIT_NO_WEBVIEW) => Err(WebLoginError::Failed(no_webview_in(self.loc).into())),
+            Some(EXIT_NO_WEBVIEW) => Err(WebLoginError::Failed(no_webview_in(loc).into())),
             other => {
                 Err(WebLoginError::Failed(match other {
-                    Some(c) => fmt_window_error_in(self.loc, c),
-                    None => view_in(self.loc).window_crashed.into(),
+                    Some(c) => fmt_window_error_in(loc, c),
+                    None => view_in(loc).window_crashed.into(),
                 }))
             }
         }

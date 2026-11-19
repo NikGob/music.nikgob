@@ -3911,8 +3911,10 @@ pub enum Command {
     /// without downloading anything, answered as `{"offers": […]}`.
     ApiSourceSearch { track: Option<TrackId>, release: Option<ReleaseId>, reply: ApiReply },
     /// From the API: a download too large to start by itself waits in
-    /// «Загрузки → Подтверди» as one card; «Скачать» runs `commands`.
-    ApiConfirmDownload { title: String, origin: String, lines: Vec<String>, commands: Vec<Command> },
+    /// «Загрузки → Подтверди» as one card; «Скачать» runs `commands`. The
+    /// card's words are made from `lines` and `caller` when it is
+    /// published, in the UI's language of that moment.
+    ApiConfirmDownload { lines: Vec<ApiConfirmLine>, caller: String, commands: Vec<Command> },
 
     // The owner's devices («Межсеть → Устройства»): `[mesh]` of
     // settings.toml and the node table kept by the runtime, the network

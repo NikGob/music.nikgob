@@ -148,8 +148,8 @@ fn transfer(t: &TorrentStatus) -> v::Transfer {
     v::Transfer { phase, done: t.downloaded, total: (t.total > 0).then_some(t.total), bps: t.down_bps }
 }
 
-fn job(t: &TorrentStatus) -> v::Job {
-    let mut job = transfer(t).job(t.id, t.name.clone(), None, None, true, true);
+fn job(t: &TorrentStatus, loc: nikgob_core::i18n::Locale) -> v::Job {
+    let mut job = transfer(t).job_in(loc, t.id, t.name.clone(), None, None, true, true);
     if let TorrentState::Error(e) = &t.state {
         job.error = Some(e.clone());
     }
@@ -642,7 +642,7 @@ impl Worker {
 
         let seed_days = self.state.read().prefs.seed_days;
         let seed_loc = self.locale();
-        let active: Vec<v::Job> = list.iter().filter(|t| !complete(t)).map(job).collect();
+        let active: Vec<v::Job> = list.iter().filter(|t| !complete(t)).map(|t| job(t, seed_loc)).collect();
         let seeding: Vec<v::SeedRow> = list
             .iter()
             .filter(|t| complete(t))
@@ -707,6 +707,14 @@ impl Worker {
             }
         }
         self.run_cleanup();
+    }
+
+    /// The rows in the UI's new language: what was published is forgotten,
+    /// so the next poll puts them out again even when nothing else changed.
+    pub(crate) fn relocalize_torrents(&mut self) {
+        self.torrents.last_view = None;
+        self.torrents.last_shape = None;
+        self.poll_torrents();
     }
 
     /// Finished downloads of earlier sessions ("Загрузки → История").

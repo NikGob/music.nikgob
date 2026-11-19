@@ -59,7 +59,7 @@ use nikgob_audio::{
 use nikgob_core::streaming::{AudioStream, StreamService};
 #[cfg(feature = "live")]
 use nikgob_core::streaming::{Service as StreamKind, StreamError};
-use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent};
+use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent, QualityLabel};
 
 /// The analyzer of the engine that plays right now.
 pub type AnalyzerSlot = Arc<Mutex<Option<Analyzer>>>;
@@ -357,10 +357,10 @@ impl Engine {
     }
 
     #[cfg(feature = "live")]
-    fn quality(&self, id: u64, label: &str) {
+    fn quality(&self, id: u64, label: QualityLabel) {
         let to = self.links.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
         if let Some(to) = to {
-            let _ = to.send(PlaybackEvent::Quality { id, label: label.into() });
+            let _ = to.send(PlaybackEvent::Quality { id, label });
         }
     }
 
@@ -383,7 +383,7 @@ impl Engine {
     fn live_item(&self, r: &PlayRequest) -> Option<PlayItem> {
         if let (Some(w), PlaySource::Stream { id, .. }) = (self.widget_for(r), &r.source) {
             log::debug!("soundcloud {id} plays through SoundCloud's player (item {})", r.id);
-            self.quality(r.id, nikgob_core::i18n::backend_in(nikgob_core::i18n::locale()).soundcloud_player);
+            self.quality(r.id, QualityLabel::SoundcloudPlayer);
             self.plays_live(r);
             return Some(PlayItem {
                 id: r.id,
@@ -397,7 +397,7 @@ impl Engine {
             log::debug!("spotify {id} plays through Soloist (item {})", r.id);
             let to = self.links.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
             if let Some(to) = to {
-                let _ = to.send(PlaybackEvent::Quality { id: r.id, label: "Soloist".into() });
+                let _ = to.send(PlaybackEvent::Quality { id: r.id, label: QualityLabel::Text("Soloist".into()) });
             }
             self.plays_live(r);
             // Another device took Spotify's one stream (or paused this one):
@@ -519,7 +519,7 @@ impl StreamBytes {
         );
         let to = self.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
         if let (Some(label), Some(to)) = (quality, to) {
-            let _ = to.send(PlaybackEvent::Quality { id: self.item, label });
+            let _ = to.send(PlaybackEvent::Quality { id: self.item, label: QualityLabel::Text(label) });
         }
     }
 }
