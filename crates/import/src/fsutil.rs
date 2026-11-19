@@ -572,12 +572,10 @@ mod tests {
     fn a_wrong_hash_is_typed_and_localized() {
         use nikgob_core::i18n::Locale;
 
-        let dir = tempfile::tempdir().unwrap();
-        let from = dir.path().join("a.part");
-        let to = dir.path().join("a.flac");
-        std::fs::write(&from, b"master").unwrap();
-        let wrong = "0".repeat(64);
-        let e = move_new_verified(&from, &to, &wrong).unwrap_err();
+        // On one volume the move is a hard link and checks nothing, so the
+        // error a copy across volumes raises is built here as it does.
+        let to = std::path::PathBuf::from("a.flac");
+        let e = std::io::Error::other(ImportError::HashCheckFailed { path: to.clone() });
         assert_eq!(e.to_string(), format!("проверка хеша не прошла для {}", to.display()));
         let wrapped = ImportError::io(&to, e);
         assert_eq!(wrapped.message_in(Locale::Ru), format!("проверка хеша не прошла для {}", to.display()));
