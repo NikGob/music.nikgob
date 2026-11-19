@@ -14,6 +14,9 @@
 
 use std::time::{Duration, Instant};
 
+use nikgob_core::i18n::activity_in;
+use nikgob_core::i18n::activity::fmt_quoted_in;
+use nikgob_core::i18n::Locale;
 use nikgob_core::model::{ReleaseId, TrackId, WishlistItem, WishlistScope, WishlistStatus};
 use nikgob_core::settings::{ApiSettings, ApiTokenRecord, Settings};
 use nikgob_core::source::SourceError;
@@ -41,15 +44,16 @@ struct ApiConfirm {
 }
 
 /// The card of a download the API asked for.
-pub(crate) fn confirm_card(id: u64, title: &str, origin: &str, lines: &[String]) -> Confirm {
+pub(crate) fn confirm_card(id: u64, title: &str, origin: &str, lines: &[String], loc: Locale) -> Confirm {
+    let s = activity_in(loc);
     Confirm {
         id,
         title: title.to_owned(),
         origin: origin.to_owned(),
-        question: "Скачать?".to_owned(),
+        question: s.download_q.to_owned(),
         options: lines.iter().map(|l| ConfirmOption { label: l.clone(), detail: String::new(), recommended: false }).collect(),
-        skip_label: "Не скачивать".to_owned(),
-        accept_label: "Скачать".to_owned(),
+        skip_label: s.dont_download.to_owned(),
+        accept_label: s.download.to_owned(),
         pick: None,
         yes_no: true,
     }
@@ -208,8 +212,9 @@ impl Worker {
 
     /// [`Self::api_edit`] with the failure in words instead of a toast.
     fn api_save(&mut self, edit: impl FnOnce(&mut ApiSettings) -> bool) -> Result<bool, &'static str> {
+        let s = activity_in(self.locale());
         let Some(path) = self.settings_path.clone() else {
-            return Err("Некуда сохранить настройки");
+            return Err(s.no_settings_place);
         };
         // A file that cannot be read is not replaced by defaults: that would
         // drop every other secret in it.
@@ -217,7 +222,7 @@ impl Worker {
             Ok(s) => s,
             Err(e) => {
                 log::error!("loading settings: {e}");
-                return Err("settings.toml не читается — поправь файл вручную");
+                return Err(s.settings_unreadable);
             }
         };
         {
@@ -243,6 +248,7 @@ impl Worker {
     }
 
     pub(crate) fn api_command(&mut self, c: Command) {
+        let loc = self.locale();
         match c {
             Command::SetApiEnabled(on) => {
                 self.api_edit(|a| {
@@ -275,7 +281,8 @@ impl Worker {
                 let id = t.id.clone();
                 if t.name.trim().is_empty() || nikgob_core::api_token::Hashed::parse(&t.hash).is_none() {
                     log::warn!("api: a token without a name or a hash refused");
-                    self.publish(move |s| s.api.token_failed = Some((id, "Токен без названия".to_owned())));
+                    let text = activity_in(loc).token_unnamed;
+                    self.publish(move |s| s.api.token_failed = Some((id, text.to_owned())));
                     return;
                 }
                 let record = ApiTokenRecord {
@@ -298,7 +305,7 @@ impl Worker {
                     true
                 }) {
                     Ok(true) => None,
-                    Ok(false) => Some("Такой токен уже есть"),
+                    Ok(false) => Some(activity_in(loc).token_exists),
                     Err(why) => Some(why),
                 };
                 if let Some(why) = failed {
@@ -319,7 +326,9 @@ impl Worker {
                 });
                 if revoked {
                     let undo = self.undo_action(Command::ApiRestoreToken(id));
-                    self.toast_info(format!("Токен «{name}» отозван"), Some(undo));
+                    let s = activity_in(loc);
+                    let text = format!("{} {} {}", s.token, fmt_quoted_in(loc, &name), s.revoked);
+                    self.toast_info(text, Some(undo));
                 }
             }
             Command::ApiRestoreToken(id) => {
@@ -393,7 +402,7 @@ impl Worker {
                     let old = self.api.confirms.remove(0);
                     log::info!("api: the download «{}» waited too long in «Подтверди», dropped", old.card.title);
                 }
-                self.api.confirms.push(ApiConfirm { card: confirm_card(id, &title, &origin, &lines), commands });
+                self.api.confirms.push(ApiConfirm { card: confirm_card(id, &title, &origin, &lines, loc), commands });
                 self.publish_api_confirms();
             }
             Command::ApiKnow(tracks) => self.streaming.learn(&tracks),
@@ -423,15 +432,19 @@ impl Worker {
     /// [`Command::ApiCreatePlaylist`]: the playlist under the API's id, as
     /// «Сохранить как плейлист» makes one.
     fn api_create_playlist(&mut self, id: nikgob_core::model::PlaylistId, name: &str, tracks: &[TrackId]) {
+        let loc = self.locale();
         let before = self.library_tracks();
-        let Some(p) = self.log_err("плейлист", self.lib.create_playlist_with_id(id, name)) else {
+        let what = activity_in(loc).playlist_err;
+        let Some(p) = self.log_err(what, self.lib.create_playlist_with_id(id, name)) else {
             self.api_skip(format!("playlist «{name}» not created"));
             return;
         };
         if !tracks.is_empty() {
-            let _ = self.log_err("плейлист", self.lib.playlist_add_many(p.id, tracks));
+            let _ = self.log_err(what, self.lib.playlist_add_many(p.id, tracks));
         }
-        self.toast_ok(format!("Плейлист «{name}» сохранён"), None);
+        let s = activity_in(loc);
+        let text = format!("{} {} {}", s.playlist, fmt_quoted_in(loc, name), s.saved);
+        self.toast_ok(text, None);
         self.library_edited(before, Vec::new());
     }
 
@@ -456,13 +469,14 @@ impl Worker {
         item.release_id = release;
         item.scope = if track.is_some() { WishlistScope::Track } else { WishlistScope::Album };
         let want = self.want_of(&item);
+        let s = activity_in(self.locale());
         if want.artists.is_empty() || (want.title.is_none() && want.album.is_none()) {
-            reply.send(Err("Не знаю, что искать: у песни нет исполнителя или названия".to_owned()));
+            reply.send(Err(s.dont_know_what.to_owned()));
             return;
         }
         let sources = self.download_sources();
         if sources.is_empty() {
-            reply.send(Err("Источники загрузок не настроены".to_owned()));
+            reply.send(Err(s.no_download_sources.to_owned()));
             return;
         }
         let order: Vec<_> = self.state.read().prefs.source_order().iter().filter(|s| s.on).map(|s| s.key).collect();
@@ -621,7 +635,7 @@ mod tests {
     /// lines shown, «Скачать» and «Не скачивать».
     #[test]
     fn an_api_download_card() {
-        let c = confirm_card(API_CONFIRM_ID | 3, "A — B и ещё 4", "Запрос «Claude»", &["A — B".to_owned(), "C — D".to_owned()]);
+        let c = confirm_card(API_CONFIRM_ID | 3, "A — B и ещё 4", "Запрос «Claude»", &["A — B".to_owned(), "C — D".to_owned()], Locale::Ru);
         assert_eq!(c.id & API_CONFIRM_ID, API_CONFIRM_ID);
         for other in [1u64 << 44, 1 << 45, 1 << 47, 1 << 48] {
             assert_eq!(c.id & other, 0, "no other part's bit");

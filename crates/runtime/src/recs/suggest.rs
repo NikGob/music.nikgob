@@ -31,6 +31,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nikgob_core::i18n::activity::{fmt_count_in, fmt_reconnect_in};
+use nikgob_core::i18n::{Locale, activity_in, common_in};
 use nikgob_core::model::UnixMs;
 use nikgob_core::streaming::{
     RemoteId, Service, StreamError, StreamService, SuggestedArtist, SuggestedTrack, SuggestionFeed, Suggestions,
@@ -125,39 +127,36 @@ pub(crate) fn cached(lib: &nikgob_library::Library) -> Vec<Kept> {
 }
 
 /// «14:10» today, «21.10 в 14:10» another day (local time).
-fn when(at: UnixMs) -> String {
+fn when(at: UnixMs, loc: Locale) -> String {
     let Ok(ts) = jiff::Timestamp::from_millisecond(at) else { return String::new() };
     let tz = jiff::tz::TimeZone::system();
     let at = ts.to_zoned(tz.clone());
     let today = jiff::Timestamp::now().to_zoned(tz).date();
+    let s = activity_in(loc);
     if at.date() == today {
-        format!("в {}", at.strftime("%H:%M"))
+        format!("{} {}", s.at, at.strftime("%H:%M"))
     } else {
-        format!("{} в {}", at.strftime("%d.%m"), at.strftime("%H:%M"))
+        format!("{} {} {}", at.strftime("%d.%m"), s.at, at.strftime("%H:%M"))
     }
 }
 
 /// «Подсказки: 48 треков, 6 исполнителей · обновлено в 14:10».
-pub(crate) fn line_of(k: &Kept) -> String {
+pub(crate) fn line_of(k: &Kept, loc: Locale) -> String {
+    let s = activity_in(loc);
     let tracks: HashSet<&RemoteId> = k.tracks.iter().map(|t| &t.track.id).collect();
     let artists: HashSet<&str> = k.artists.iter().map(|a| a.artist.name.as_str()).collect();
-    let plural = crate::streams::plural;
     let mut what = Vec::new();
     if !tracks.is_empty() {
-        what.push(format!("{} {}", tracks.len(), plural(tracks.len(), "трек", "трека", "треков")));
+        what.push(fmt_count_in(loc, tracks.len(), &common_in(loc).tracks));
     }
     if !artists.is_empty() {
-        what.push(format!(
-            "{} {}",
-            artists.len(),
-            plural(artists.len(), "исполнитель", "исполнителя", "исполнителей")
-        ));
+        what.push(fmt_count_in(loc, artists.len(), &common_in(loc).artists));
     }
-    let when = when(k.at);
+    let when = when(k.at, loc);
     if what.is_empty() {
-        format!("Подсказки: сервис пока ничего не советует · обновлено {when}")
+        format!("{}: {} · {} {when}", s.suggestions, s.service_no_suggestions, s.updated)
     } else {
-        format!("Подсказки: {} · обновлено {when}", what.join(", "))
+        format!("{}: {} · {} {when}", s.suggestions, what.join(", "), s.updated)
     }
 }
 
@@ -204,18 +203,20 @@ impl Worker {
         }
         let signed_in = svc.account().is_logged_in();
         let kept = self.recs.suggest.kept.get(&service);
+        let loc = self.locale();
+        let s = activity_in(loc);
         let line = match kept {
             _ if !signed_in => match service {
                 // Spotify's own block already says it is not connected.
                 Service::Spotify => None,
-                _ => Some("Подсказки — после входа в аккаунт".to_owned()),
+                _ => Some(s.suggestions_sign_in.to_owned()),
             },
-            Some(k) => Some(line_of(k)),
-            None => Some("Подсказки ещё не загружены".to_owned()),
+            Some(k) => Some(line_of(k, loc)),
+            None => Some(s.suggestions_not_loaded.to_owned()),
         };
         let note = kept
             .filter(|k| signed_in && k.needs_reconnect)
-            .map(|_| format!("Переподключи {}, чтобы брать твой топ", service.display_name()));
+            .map(|_| fmt_reconnect_in(loc, service.display_name()));
         (line, note)
     }
 
@@ -403,7 +404,7 @@ mod tests {
             artists: Vec::new(),
             needs_reconnect: false,
         };
-        let line = line_of(&k);
+        let line = line_of(&k, Locale::Ru);
         assert!(line.starts_with("Подсказки: 2 трека · обновлено в "), "{line}");
         k.artists = (0..5)
             .map(|i| SuggestedArtist {
@@ -412,11 +413,12 @@ mod tests {
                 weight: 1.0,
             })
             .collect();
-        assert!(line_of(&k).starts_with("Подсказки: 2 трека, 5 исполнителей · "), "{}", line_of(&k));
+        assert!(line_of(&k, Locale::Ru).starts_with("Подсказки: 2 трека, 5 исполнителей · "), "{}", line_of(&k, Locale::Ru));
         let empty = Kept { at, ..Kept::default() };
-        assert!(line_of(&empty).starts_with("Подсказки: сервис пока ничего не советует"));
+        assert!(line_of(&empty, Locale::Ru).starts_with("Подсказки: сервис пока ничего не советует"));
+        assert!(line_of(&empty, Locale::En).starts_with("Suggestions: the service has nothing to suggest yet"));
         let old = Kept { at: at - 3 * 24 * 3600 * 1000, ..k };
-        assert!(line_of(&old).contains('.'), "another day says the date: {}", line_of(&old));
+        assert!(line_of(&old, Locale::Ru).contains('.'), "another day says the date: {}", line_of(&old, Locale::Ru));
     }
 
     #[test]

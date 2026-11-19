@@ -9,6 +9,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use nikgob_core::i18n::activity::fmt_device_forgotten_in;
+use nikgob_core::i18n::activity_in;
 use nikgob_core::settings::{MeshPinsRecord, MeshSettings, Settings};
 use nikgob_library::{NodeRow, OnlyCopy};
 use nikgob_view::{Command, MeshForgetAsk, MeshKind, MeshNodeView, MeshPairing, MeshPins, MeshProfile, MeshScope, MeshSnapshot, MeshSyncView, MeshView};
@@ -354,7 +356,7 @@ impl Worker {
         self.mesh.forgetting.push((node_id.clone(), nikgob_library::now_ms()));
         self.mesh_publish();
         let undo = self.undo_action(Command::MeshRestore { node_id });
-        self.toast_info(format!("Устройство «{name}» забыто"), Some(undo));
+        self.toast_info(fmt_device_forgotten_in(self.locale(), &name), Some(undo));
     }
 
     fn mesh_publish(&mut self) {
@@ -444,7 +446,7 @@ impl Worker {
             }
             None => {
                 if matches!(c, Command::MeshPairNearby { .. } | Command::MeshCreateInvite { .. } | Command::MeshJoin { .. }) {
-                    self.mesh.failed = Some("Межсеть не запущена".to_owned());
+                    self.mesh.failed = Some(activity_in(self.locale()).mesh_not_running.to_owned());
                     self.mesh_publish();
                 } else if c == Command::MeshClearPairing && self.mesh.failed.take().is_some() {
                     self.mesh_publish();

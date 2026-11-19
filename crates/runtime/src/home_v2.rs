@@ -5,6 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use nikgob_core::i18n::activity::{fmt_count_in, fmt_heard_when_in, fmt_newest_in, fmt_track_number_in};
+use nikgob_core::i18n::{Locale, activity_in, common_in, hours_minutes_in};
 use nikgob_core::model::{ArtistId, EventContext, EventType, PlaylistId, ReleaseId, TrackId, UnixMs};
 use nikgob_library::{
     ArtistRow, ArtistSortKey, Library, PlaylistSummary, RecTrack, ReleaseRow, ReleaseSortKey, Sort, TrackFactsRow,
@@ -14,8 +16,6 @@ use nikgob_recs::rng::Rng;
 use nikgob_recs::tiles::franchise;
 use nikgob_view as v;
 use serde::{Deserialize, Serialize};
-
-use crate::streams::plural;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// The shortcuts' plays of now fade by half in this time…
@@ -208,7 +208,7 @@ impl Epoch {
 }
 
 /// What the parts depend on besides the library.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Visit {
     /// The track the player has now.
     pub playing: Option<TrackId>,
@@ -230,6 +230,25 @@ pub struct Visit {
     /// Songs of «Слушать снова» asked for past [`LISTEN_AGAIN`] (its row
     /// scrolled to the end): the epoch's draw goes on.
     pub again_more: usize,
+    /// The locale the parts are worded in.
+    pub loc: Locale,
+}
+
+impl Default for Visit {
+    fn default() -> Self {
+        Self {
+            playing: None,
+            local_only: false,
+            hidden_worlds: Vec::new(),
+            utc_offset_min: 0,
+            now: 0,
+            sound: None,
+            profiles: None,
+            epoch: Epoch::default(),
+            again_more: 0,
+            loc: Locale::Ru,
+        }
+    }
 }
 
 impl Visit {
@@ -255,6 +274,7 @@ impl Visit {
             profiles: None,
             epoch: Epoch::default(),
             again_more: 0,
+            loc: prefs.resolved_locale(),
         }
     }
 
@@ -828,31 +848,8 @@ fn series_name(name: &str) -> String {
 
 /// «Слушал вчера», «Слушал 4 дня назад», «Давно не слушал».
 fn heard_when(visit: &Visit, last: Option<UnixMs>) -> String {
-    let Some(ts) = last else { return "Ещё не начинал".to_owned() };
-    let d = visit.day(visit.now) - visit.day(ts);
-    match d {
-        ..=0 => "Слушал сегодня".to_owned(),
-        1 => "Слушал вчера".to_owned(),
-        2 => "Слушал позавчера".to_owned(),
-        3..=6 => format!("Слушал {d} {} назад", plural(d as usize, "день", "дня", "дней")),
-        7..=9 => "Слушал неделю назад".to_owned(),
-        10..=17 => "Слушал две недели назад".to_owned(),
-        _ => "Давно не слушал".to_owned(),
-    }
-}
-
-/// «1 ч 4 мин», «2 ч», «45 мин».
-fn hours_minutes(ms: u64) -> String {
-    let m = ((ms + 30_000) / 60_000).max(1);
-    match (m / 60, m % 60) {
-        (0, m) => format!("{m} мин"),
-        (h, 0) => format!("{h} ч"),
-        (h, m) => format!("{h} ч {m} мин"),
-    }
-}
-
-fn count(n: usize, one: &'static str, few: &'static str, many: &'static str) -> String {
-    format!("{n} {}", plural(n, one, few, many))
+    let days = last.map(|ts| visit.day(visit.now) - visit.day(ts));
+    fmt_heard_when_in(visit.loc, days)
 }
 
 /// A world before it is drawn: the view (without covers) and what its page
@@ -1226,6 +1223,8 @@ pub fn world_next(lib: &Library, track: TrackId, queued: &HashSet<TrackId>, loca
 /// the closest by sound to what plays (else to the last started track)
 /// first. Every one: the row pages through them all.
 fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> {
+    let loc = visit.loc;
+    let s = activity_in(loc);
     let usable: Vec<ReleaseRow> = releases.iter().filter(|r| r.local_tracks > 0 || !visit.local_only).cloned().collect();
     let mut groups = group_worlds(&usable);
     groups.retain(|g| g.albums.iter().any(|a| a.local_tracks > 0) && !visit.hidden_worlds.contains(&g.key));
@@ -1307,28 +1306,28 @@ fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> 
                 artists.sort_by(|a, b| b.1.cmp(&a.1));
                 facts.push(artists.iter().take(2).map(|a| a.0.as_str()).collect::<Vec<_>>().join(", "));
                 if k > 1 {
-                    facts.push(count(k, "альбом", "альбома", "альбомов"));
+                    facts.push(fmt_count_in(loc, k, &s.albums));
                 }
             }
             v::WorldKind::Artist => {
                 if k > 1 {
-                    facts.push(count(k, "релиз", "релиза", "релизов"));
+                    facts.push(fmt_count_in(loc, k, &s.releases));
                 }
             }
         }
-        facts.push(count(n, "трек", "трека", "треков"));
+        facts.push(fmt_count_in(loc, n, &common_in(loc).tracks));
         facts.retain(|x| !x.is_empty());
 
         let (start, primary) = world_start(&ids, &heard, local, visit.local_only);
         let primary_ms: u64 = primary.iter().map(duration).sum();
         let primary_tip = format!(
             "{}, {}: {}",
-            count(primary.len(), "трек", "трека", "треков"),
-            hours_minutes(primary_ms),
+            fmt_count_in(loc, primary.len(), &common_in(loc).tracks),
+            hours_minutes_in(loc, primary_ms),
             match start {
-                v::WorldStart::Finish => "что ещё не слышал, по порядку альбомов",
-                v::WorldStart::Begin => "с первого трека первого альбома",
-                v::WorldStart::Again => "всё с первого трека",
+                v::WorldStart::Finish => s.world_finish,
+                v::WorldStart::Begin => s.world_begin,
+                v::WorldStart::Again => s.world_again,
             }
         );
         let mut shuffled: Vec<TrackId> = ids.iter().copied().filter(|t| local(t) || !visit.local_only).collect();
@@ -1343,7 +1342,7 @@ fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> 
         if playing && let Some(t) = visit.playing {
             cards.push(v::WorldCard {
                 icon: v::WorldIcon::NowPlaying,
-                kicker: "Сейчас играет".into(),
+                kicker: s.card_playing.into(),
                 title: titles.get(&t).copied().unwrap_or_default().to_owned(),
                 go: v::WorldGo::Player,
             });
@@ -1359,22 +1358,22 @@ fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> 
             let next = if last_k + 1 < list.len() { last_k + 1 } else { 0 };
             cards.push(v::WorldCard {
                 icon: v::WorldIcon::Play,
-                kicker: "Продолжить".into(),
-                title: format!("{}, трек {}", short(r), next + 1),
+                kicker: s.card_continue.into(),
+                title: fmt_track_number_in(loc, &short(r), next + 1),
                 go: v::WorldGo::Play(from(r, next)),
             });
         } else if let Some(a) = g.albums.first() {
             cards.push(v::WorldCard {
                 icon: v::WorldIcon::Play,
-                kicker: "С начала".into(),
-                title: format!("{}, трек 1", short(a.release.id)),
+                kicker: s.card_from_start.into(),
+                title: fmt_track_number_in(loc, &short(a.release.id), 1),
                 go: v::WorldGo::Play(from(a.release.id, 0)),
             });
         }
         if !fresh && let Some(o) = order.iter().find(|o| !heard.contains(&o.2) && local(&o.2)) {
-            let title = format!("{}, трек {}", short(o.0), o.1 + 1);
+            let title = fmt_track_number_in(loc, &short(o.0), o.1 + 1);
             if !cards.iter().any(|c| c.title == title) {
-                cards.push(v::WorldCard { icon: v::WorldIcon::Next, kicker: "По порядку".into(), title, go: v::WorldGo::Play(from(o.0, o.1)) });
+                cards.push(v::WorldCard { icon: v::WorldIcon::Next, kicker: s.card_in_order.into(), title, go: v::WorldGo::Play(from(o.0, o.1)) });
             }
         }
         let untouched = g
@@ -1387,7 +1386,7 @@ fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> 
         if !fresh && let Some(a) = untouched {
             third.push(v::WorldCard {
                 icon: v::WorldIcon::Album,
-                kicker: "Ни разу не слушал".into(),
+                kicker: s.card_never_played.into(),
                 title: short(a.release.id),
                 go: v::WorldGo::Release(a.release.id),
             });
@@ -1395,15 +1394,15 @@ fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> 
         if liked.len() >= 3 {
             third.push(v::WorldCard {
                 icon: v::WorldIcon::Favorite,
-                kicker: "Любимое".into(),
-                title: count(liked.len(), "трек", "трека", "треков"),
+                kicker: s.card_favorites.into(),
+                title: fmt_count_in(loc, liked.len(), &common_in(loc).tracks),
                 go: v::WorldGo::Play(liked.clone()),
             });
         }
         if k > 1 && let Some(a) = newest {
             third.push(v::WorldCard {
                 icon: v::WorldIcon::Album,
-                kicker: a.release.year.map_or_else(|| "Новее всего".to_owned(), |y| format!("Новее всего, {y}")),
+                kicker: fmt_newest_in(loc, a.release.year),
                 title: short(a.release.id),
                 go: v::WorldGo::Release(a.release.id),
             });
@@ -1442,7 +1441,7 @@ fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> 
                 (a.clone(), h, list.len() as u32)
             })
             .collect();
-        let kicker = if playing { "Слушаешь сейчас".to_owned() } else { heard_when(visit, last) };
+        let kicker = if playing { s.listening_now.to_owned() } else { heard_when(visit, last) };
         out.push((
             last,
             closeness,
@@ -1555,8 +1554,9 @@ mod tests {
         assert_eq!(heard_when(&visit, Some(20_000 * DAY_MS - 4 * DAY_MS)), "Слушал 4 дня назад");
         assert_eq!(heard_when(&visit, Some(20_000 * DAY_MS - 8 * DAY_MS)), "Слушал неделю назад");
         assert_eq!(heard_when(&visit, None), "Ещё не начинал");
-        assert_eq!(hours_minutes(64 * 60_000), "1 ч 4 мин");
-        assert_eq!(hours_minutes(120 * 60_000), "2 ч");
+        assert_eq!(hours_minutes_in(Locale::Ru, 64 * 60_000), "1 ч 4 мин");
+        assert_eq!(hours_minutes_in(Locale::Ru, 120 * 60_000), "2 ч");
+        assert_eq!(hours_minutes_in(Locale::En, 64 * 60_000), "1 hr 4 min");
     }
 
     fn rel(title: &str, artist: &str, id: ArtistId, local: u32, kind: nikgob_core::model::ReleaseType) -> ReleaseRow {

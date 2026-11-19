@@ -39,6 +39,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nikgob_core::i18n::Locale;
+use nikgob_core::i18n::activity::{
+    fmt_search_no_connection_in, fmt_search_overloaded_in, fmt_wait_busy_in, fmt_wait_busy_other_in,
+    fmt_wait_busy_retry_in, fmt_wait_short_in, fmt_wait_until_in,
+};
 use nikgob_core::model::TrackId;
 use nikgob_core::streaming::{RemoteId, SearchKind, Service, StreamError, StreamSearch, StreamTrack, TrackKind};
 use nikgob_metadata::text::{TitleKey, album_key, artist_key, similarity, title_key};
@@ -169,16 +174,16 @@ enum Wait {
 }
 
 /// The quiet line of a waiting section (`other`: a service also asked).
-fn wait_note(service: Service, wait: &Wait, other: Option<Service>) -> String {
+fn wait_note(service: Service, wait: &Wait, other: Option<Service>, loc: Locale) -> String {
     let name = service.display_name();
     match wait {
-        Wait::Short => format!("{name} отвечает с задержкой — результаты появятся сами"),
+        Wait::Short => fmt_wait_short_in(loc, name),
         Wait::Long { until, retry } => {
-            let until = until.as_ref().map(|hm| format!(" до {hm}")).unwrap_or_default();
+            let until = until.as_deref().map(|hm| fmt_wait_until_in(loc, hm)).unwrap_or_default();
             match other {
-                Some(o) => format!("{name} сейчас перегружен{until} — ищу в {}", o.display_name()),
-                None if *retry => format!("{name} сейчас перегружен{until} — поищу ещё раз сам"),
-                None => format!("{name} сейчас перегружен{until}"),
+                Some(o) => fmt_wait_busy_other_in(loc, name, &until, o.display_name()),
+                None if *retry => fmt_wait_busy_retry_in(loc, name, &until),
+                None => fmt_wait_busy_in(loc, name, &until),
             }
         }
     }
@@ -604,7 +609,7 @@ impl Worker {
             let mut section = v::StreamSearchSection::new(service);
             section.searching = !done;
             let other = asked.iter().copied().find(|&s| s != service);
-            section.note = wait.as_ref().map(|w| wait_note(service, w, other));
+            section.note = wait.as_ref().map(|w| wait_note(service, w, other, self.locale()));
             match result {
                 None => {}
                 // An old error is not shown while the new query runs.
@@ -612,7 +617,7 @@ impl Worker {
                 // Never a failure (see the module docs).
                 Some(Err(StreamError::RateLimited { .. })) => {
                     let w = Wait::Long { until: None, retry: false };
-                    section.note = Some(wait_note(service, &w, other));
+                    section.note = Some(wait_note(service, &w, other, self.locale()));
                 }
                 Some(Err(e)) => section.error = Some(search_error(service, &e, self.locale())),
                 Some(Ok(r)) => {
@@ -985,7 +990,7 @@ impl Worker {
         let note = st.raw.iter().find_map(|s| {
             let w = s.wait.as_ref()?;
             let other = st.raw.iter().map(|x| x.service).find(|&x| x != s.service);
-            Some(wait_note(s.service, w, other))
+            Some(wait_note(s.service, w, other, loc))
         });
         let mut answer = v::SearchAnswer {
             query: query.clone(),
@@ -1108,17 +1113,10 @@ fn interleave(first: Vec<StreamTrack>, more: Vec<Vec<StreamTrack>>) -> Vec<Strea
 
 /// Why a service's section is empty, as the user reads it.
 fn search_error(service: Service, e: &StreamError, loc: nikgob_core::i18n::Locale) -> String {
-    use nikgob_core::i18n::Locale;
     let who = service.display_name();
     match e {
-        StreamError::RateLimited { .. } => match loc {
-            Locale::Ru => format!("{who} сейчас перегружен"),
-            Locale::En => format!("{who} is overloaded right now"),
-        },
-        StreamError::Network(_) => match loc {
-            Locale::Ru => format!("Нет связи с {who}"),
-            Locale::En => format!("Cannot reach {who}"),
-        },
+        StreamError::RateLimited { .. } => fmt_search_overloaded_in(loc, who),
+        StreamError::Network(_) => fmt_search_no_connection_in(loc, who),
         other => super::error_text_in(other, loc),
     }
 }

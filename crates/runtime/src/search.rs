@@ -5,6 +5,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use nikgob_core::i18n::Locale;
+use nikgob_core::i18n::activity::{fmt_prowlarr_answers_in, fmt_prowlarr_http_error_in};
+use nikgob_core::i18n::activity_in;
 use nikgob_core::indexer::{Candidate, Indexer, SearchQuery};
 use nikgob_view as v;
 
@@ -182,10 +185,11 @@ impl Worker {
             return;
         }
         let Some(indexer) = self.indexer.clone() else {
+            let text = activity_in(self.locale()).prowlarr_not_set_up_sources;
             self.publish(|s| {
                 s.search.torrents = v::TorrentSearch {
                     query: q,
-                    error: Some("Prowlarr не настроен — адрес и ключ в Настройках → Источники → Торренты".into()),
+                    error: Some(text.into()),
                     ..Default::default()
                 };
             });
@@ -194,12 +198,13 @@ impl Worker {
         let Some(svc) = &self.import else { return };
         let tx = svc.internal();
         let q2 = q.clone();
+        let loc = self.locale();
         svc.spawn(async move {
             let mut query = SearchQuery::new(q2.clone());
             query.limit = Some(100);
             let r = tokio::time::timeout(Duration::from_secs(90), indexer.search(&query))
                 .await
-                .map_err(|_| "Prowlarr не ответил за 90 с".to_owned())
+                .map_err(|_| activity_in(loc).prowlarr_no_answer_90.to_owned())
                 .and_then(|r| r.map_err(|e| e.to_string()));
             let _ = tx.send(Internal::TorrentResults(q2, r));
         });
@@ -215,10 +220,11 @@ impl Worker {
     /// `Command::CheckIndexer`: asks Prowlarr whether it answers (no search),
     /// at the typed address and key when there are any, else at the saved ones.
     pub(crate) fn check_indexer(&mut self, url: String, api_key: String) {
+        let loc = self.locale();
         let indexer = if url.trim().is_empty() {
-            self.indexer.clone().ok_or("Prowlarr не настроен")
+            self.indexer.clone().ok_or(activity_in(loc).prowlarr_not_set_up)
         } else {
-            self.typed_indexer(url, api_key)
+            self.typed_indexer(url, api_key, loc)
         };
         let indexer = match indexer {
             Ok(i) => i,
@@ -238,31 +244,32 @@ impl Worker {
             let _ = tx.send(Internal::IndexerChecked(r));
         });
         self.publish(|s| {
-            s.indexer_check = Some(v::IndexerCheck { checking: true, ok: false, text: "Проверяю…".into() });
+            s.indexer_check = Some(v::IndexerCheck { checking: true, ok: false, text: activity_in(loc).checking.into() });
         });
     }
 
     /// Prowlarr at an address typed in the settings; an empty key is the saved one.
-    fn typed_indexer(&self, url: String, api_key: String) -> Result<Arc<dyn Indexer>, &'static str> {
+    fn typed_indexer(&self, url: String, api_key: String, loc: Locale) -> Result<Arc<dyn Indexer>, &'static str> {
+        let s = activity_in(loc);
         let api_key = if api_key.trim().is_empty() {
             let saved = self.settings_path.as_deref().and_then(|p| nikgob_core::settings::Settings::load(p).ok());
             match saved.and_then(|s| s.indexer.prowlarr) {
                 Some(p) => p.api_key,
-                None => return Err("Введи API-ключ Prowlarr"),
+                None => return Err(s.enter_prowlarr_key),
             }
         } else {
             api_key
         };
         nikgob_indexer_prowlarr::Prowlarr::new(&nikgob_core::settings::ProwlarrSettings { url, api_key })
             .map(|p| Arc::new(p) as Arc<dyn Indexer>)
-            .map_err(|_| "Адрес Prowlarr не подходит — нужен http:// или https://")
+            .map_err(|_| s.prowlarr_bad_address)
     }
 
     pub(crate) fn indexer_checked(&mut self, r: Result<usize, nikgob_core::indexer::IndexerError>) {
         if let Err(e) = &r {
             log::warn!("prowlarr check: {e}");
         }
-        let check = check_view(&r);
+        let check = check_view(&r, self.locale());
         self.publish(|s| s.indexer_check = Some(check));
     }
 
@@ -275,9 +282,10 @@ impl Worker {
                 cands.sort_by(|a, b| b.seeders.unwrap_or(0).cmp(&a.seeders.unwrap_or(0)));
                 let results = results_view(&cands, &query);
                 self.candidates = cands;
+                let text = activity_in(self.locale()).no_torrents_found;
                 self.publish(|s| {
                     s.search.torrents.searching = false;
-                    s.search.torrents.error = results.is_empty().then(|| "Раздач не нашлось".to_owned());
+                    s.search.torrents.error = results.is_empty().then(|| text.to_owned());
                     s.search.torrents.results = results;
                 });
             }
@@ -293,16 +301,17 @@ impl Worker {
 }
 
 /// What a check of Prowlarr says, in words.
-fn check_view(r: &Result<usize, nikgob_core::indexer::IndexerError>) -> v::IndexerCheck {
+fn check_view(r: &Result<usize, nikgob_core::indexer::IndexerError>, loc: Locale) -> v::IndexerCheck {
     use nikgob_core::indexer::IndexerError as E;
+    let s = activity_in(loc);
     let (ok, text) = match r {
-        Ok(0) => (true, "Prowlarr отвечает, но трекеры в нём не включены".to_owned()),
-        Ok(n) => (true, format!("Prowlarr отвечает · {n} {}", crate::streams::plural(*n, "трекер", "трекера", "трекеров"))),
-        Err(E::Unauthorized) => (false, "Prowlarr не принял ключ — проверь API-ключ".to_owned()),
-        Err(E::Unreachable(_)) => (false, "Prowlarr не отвечает по этому адресу".to_owned()),
-        Err(E::Http { status }) => (false, format!("Prowlarr ответил ошибкой {status}")),
-        Err(E::NotConfigured) => (false, "Prowlarr не настроен".to_owned()),
-        Err(E::Parse(_) | E::NothingToFetch) => (false, "По этому адресу отвечает не Prowlarr".to_owned()),
+        Ok(0) => (true, s.prowlarr_no_trackers.to_owned()),
+        Ok(n) => (true, fmt_prowlarr_answers_in(loc, *n)),
+        Err(E::Unauthorized) => (false, s.prowlarr_key_refused.to_owned()),
+        Err(E::Unreachable(_)) => (false, s.prowlarr_unreachable.to_owned()),
+        Err(E::Http { status }) => (false, fmt_prowlarr_http_error_in(loc, *status)),
+        Err(E::NotConfigured) => (false, s.prowlarr_not_set_up.to_owned()),
+        Err(E::Parse(_) | E::NothingToFetch) => (false, s.not_prowlarr.to_owned()),
     };
     v::IndexerCheck { checking: false, ok, text }
 }
@@ -359,7 +368,7 @@ mod tests {
     fn a_check_of_prowlarr_says_what_it_found() {
         use nikgob_core::indexer::IndexerError as E;
         let text = |r: Result<usize, E>| {
-            let c = check_view(&r);
+            let c = check_view(&r, Locale::Ru);
             (c.ok, c.text)
         };
         assert_eq!(text(Ok(12)), (true, "Prowlarr отвечает · 12 трекеров".to_owned()));

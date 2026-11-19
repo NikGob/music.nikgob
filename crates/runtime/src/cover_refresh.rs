@@ -48,6 +48,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use nikgob_core::cover_frame;
+use nikgob_core::i18n::{Locale, activity_in};
 use nikgob_core::model::{Palette, ReleaseId, SourceKind};
 use nikgob_core::streaming::{Service, StreamService};
 use nikgob_import::cover::{ProcessedCover, derive_visuals, process_cover};
@@ -75,8 +76,10 @@ const GUARD: Duration = Duration::from_secs(30);
 /// Without the importer's settings.
 const MAX_EDGE: u32 = 1200;
 const FALLBACK_SEED: u32 = 0xFF67_50A4;
-/// What «Обновить обложку» says as it starts (of a service's album too).
-pub(crate) const LOOKING: &str = "Ищу обложку…";
+/// What «Обновить обложку» says as it starts (of a service's album too), in `loc`.
+pub(crate) fn looking(loc: Locale) -> &'static str {
+    activity_in(loc).cover_looking
+}
 /// Two pictures are one when each colour's steps differ in at most this
 /// many of 64 and their mean colours are at most this far apart.
 const SAME_BITS: u32 = 8;
@@ -960,7 +963,7 @@ impl Worker {
         if !self.cover_refresh.insert(id) {
             return;
         }
-        self.toast_work(LOOKING, None);
+        self.toast_work(looking(self.locale()), None);
         let lib = self.lib.clone();
         let root = self.res.root().to_owned();
         let masters = self.import.as_ref().map(|s| s.config().masters_dir());
@@ -1012,6 +1015,8 @@ impl Worker {
     /// better, or a failure: what it shows stays, with a toast.
     pub(crate) fn release_cover_refreshed(&mut self, id: ReleaseId, result: Result<Refreshed, String>) {
         self.cover_refresh.remove(&id);
+        let loc = self.locale();
+        let s = activity_in(loc);
         let current = self.lib.get_release(id).ok().flatten().and_then(|r| r.cover_ref);
         let now = now_ms();
         match result {
@@ -1036,12 +1041,12 @@ impl Worker {
                     Ok(()) => {
                         self.reload_after_import();
                         if !changed {
-                            self.toast_info("Лучшей обложки не нашлось", None);
+                            self.toast_info(s.no_better_cover, None);
                         }
                     }
                     Err(e) => {
                         log::warn!("cover refresh of {id}: {e}");
-                        self.toast_err("Не получилось обновить обложку", None);
+                        self.toast_err(s.cover_refresh_failed, None);
                     }
                 }
             }
@@ -1061,17 +1066,17 @@ impl Worker {
                     }
                     Err(e) => {
                         log::warn!("cover refresh of {id}: {e}");
-                        self.toast_err("Не получилось обновить обложку", None);
+                        self.toast_err(s.cover_refresh_failed, None);
                     }
                 }
             }
             Ok(Refreshed::Nothing) => {
                 log::info!("cover refresh of {id}: nothing to pick from");
-                self.toast_info("Лучшей обложки не нашлось", None);
+                self.toast_info(s.no_better_cover, None);
             }
             Err(e) => {
                 log::warn!("cover refresh of {id}: {e}");
-                self.toast_err("Не получилось обновить обложку", None);
+                self.toast_err(s.cover_refresh_failed, None);
             }
         }
     }

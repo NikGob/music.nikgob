@@ -24,6 +24,7 @@ use nikgob_align::deep::Deep;
 use nikgob_align::fit::{Fit, Timing};
 use nikgob_align::pipeline::{Route, fallback};
 use nikgob_align::{Aligner, Catalog, Device, Error, Prepared, Stage};
+use nikgob_core::i18n::{Locale, activity_in};
 use nikgob_core::lyrics::{LyricLine, LyricsSource, LyricsSync};
 use nikgob_core::model::{SourceKind, TrackId, score};
 use nikgob_library::{AlignCounts, AlignedLyrics, Library};
@@ -358,19 +359,20 @@ fn shares(downloading: &HashMap<ModelId, f32>, waiting: &Mutex<Vec<ModelId>>) ->
 }
 
 /// The models a part list shows, with their labels.
-pub(crate) fn label(id: ModelId) -> &'static str {
+pub(crate) fn label(id: ModelId, loc: Locale) -> &'static str {
+    let s = activity_in(loc);
     match id {
-        ModelId::Runtime => "Основа для моделей (ONNX Runtime)",
-        ModelId::Separator => "Отделение голоса от музыки",
-        ModelId::AlignerRu => "Слова по голосу: русский",
-        ModelId::AlignerJa => "Слова по голосу: японский",
-        ModelId::AlignerEn => "Слова по голосу: английский",
-        ModelId::AlignerMms => "Слова по голосу: другие языки",
-        ModelId::Whisper => "Расслышать текст",
-        ModelId::SeparatorDeep => "Глубокое создание: отделение голоса",
-        ModelId::AlignerRuDeep => "Глубокое создание: русский",
-        ModelId::AlignerSung => "Глубокое создание: английский и другие языки",
-        ModelId::SoundEffnet => "Нейросетевой анализ звука",
+        ModelId::Runtime => s.model_runtime,
+        ModelId::Separator => s.model_separator,
+        ModelId::AlignerRu => s.model_aligner_ru,
+        ModelId::AlignerJa => s.model_aligner_ja,
+        ModelId::AlignerEn => s.model_aligner_en,
+        ModelId::AlignerMms => s.model_aligner_mms,
+        ModelId::Whisper => s.model_whisper,
+        ModelId::SeparatorDeep => s.model_separator_deep,
+        ModelId::AlignerRuDeep => s.model_aligner_ru_deep,
+        ModelId::AlignerSung => s.model_aligner_sung,
+        ModelId::SoundEffnet => s.model_sound_effnet,
     }
 }
 
@@ -395,12 +397,12 @@ pub(crate) fn id_of(key_: &str) -> Option<ModelId> {
 }
 
 /// The parts as the settings list them.
-pub(crate) fn models_view(catalog: &Catalog, downloading: &HashMap<ModelId, f32>) -> Vec<v::AlignModel> {
+pub(crate) fn models_view(catalog: &Catalog, downloading: &HashMap<ModelId, f32>, loc: Locale) -> Vec<v::AlignModel> {
     catalog::ALL
         .iter()
         .map(|s| v::AlignModel {
             key: key(s.id).to_owned(),
-            label: label(s.id).to_owned(),
+            label: label(s.id, loc).to_owned(),
             size: s.size(),
             state: match (downloading.get(&s.id), catalog.state(s.id)) {
                 (Some(f), _) => v::ModelState::Downloading(*f),
@@ -526,7 +528,7 @@ impl Thread {
     }
 
     fn models(&self) {
-        self.send(Msg::Models(models_view(self.aligner.catalog(), &shares(&self.downloading, &self.waiting))));
+        self.send(Msg::Models(models_view(self.aligner.catalog(), &shares(&self.downloading, &self.waiting), self.locale())));
     }
 
     fn stopped(&self) -> bool {
@@ -629,7 +631,7 @@ impl Thread {
                     match asked {
                         Some((track, None)) => self.send(Msg::Checked { track, rows: Vec::new(), heard: None }),
                         Some((track, Some(source))) => {
-                            self.send(Msg::Crafted { track, source, result: Err("Не получилось сделать подсветку".to_owned()) });
+                            self.send(Msg::Crafted { track, source, result: Err(activity_in(self.locale()).highlight_failed.to_owned()) });
                         }
                         None => {}
                     }
@@ -785,9 +787,10 @@ impl Thread {
                     self.send(Msg::Job(None));
                     return;
                 }
+                let s = activity_in(self.locale());
                 let result = result.map_err(|e| match e {
-                    Error::Missing(_) | Error::Download(_) => "Не удалось скачать модели".to_owned(),
-                    Error::Unavailable(_) => "Файл недоступен".to_owned(),
+                    Error::Missing(_) | Error::Download(_) => s.models_download_failed.to_owned(),
+                    Error::Unavailable(_) => s.file_unavailable.to_owned(),
                     e => e.to_string(),
                 });
                 self.send(Msg::Crafted { track, source: text.source, result });
@@ -809,6 +812,7 @@ impl Thread {
     /// aligner with a stand-in that is there is not downloaded unless the
     /// settings let it.
     fn ensure(&mut self, ids: &[ModelId], asked: bool, track: Option<TrackId>) -> Result<(), Error> {
+        let loc = self.locale();
         let lacking: Vec<ModelId> = ids
             .iter()
             .copied()
@@ -827,7 +831,7 @@ impl Thread {
                 if id.deep() || fallback(id).is_some_and(|f| self.aligner.catalog().ready(f)) {
                     continue;
                 }
-                return Err(Error::Missing(label(id)));
+                return Err(Error::Missing(label(id, loc)));
             }
             self.downloading.insert(id, 0.0);
             self.models();
@@ -849,7 +853,7 @@ impl Thread {
                     let mut d = downloading.clone();
                     d.insert(id, f);
                     // The parts that wait their turn still show as coming.
-                    let _ = tx.send(Internal::Align(Msg::Models(models_view(&catalog, &shares(&d, &waiting)))));
+                    let _ = tx.send(Internal::Align(Msg::Models(models_view(&catalog, &shares(&d, &waiting), loc))));
                     let all = before + done.min(size);
                     let job = v::AlignJob {
                         track,
@@ -871,7 +875,7 @@ impl Thread {
                     return Err(e);
                 }
                 log::warn!("align: downloading {id:?}: {e}");
-                self.send(Msg::Error(format!("{}: {e}", label(id))));
+                self.send(Msg::Error(format!("{}: {e}", label(id, loc))));
                 // A deep mode part that would not come: the timing is made
                 // as usual (it is tried again next time).
                 if id.deep() {
@@ -1025,7 +1029,7 @@ impl Thread {
         self.ensure_for(std::slice::from_ref(text), true, Some(track))?;
         let main = Route::of(&text.lines).map(|r| self.aligner.usable(r.main));
         let mut prep = self.prepare(track, path, main, true)?;
-        let fit = self.fit(track, &mut prep, text, true)?.ok_or_else(|| Error::Model("Этот текст не выровнять".into()))?;
+        let fit = self.fit(track, &mut prep, text, true)?.ok_or_else(|| Error::Model(activity_in(self.locale()).text_not_alignable.into()))?;
         Ok(if target == LyricsSync::Line { to_lines(&fit.lines) } else { fit.lines })
     }
 
@@ -1293,7 +1297,7 @@ impl Worker {
                 }
                 let Some(src) = self.timing_stream(track) else { return };
                 let Some(yt) = self.service(nikgob_core::streaming::Service::Youtube) else {
-                    let failed = Some("YouTube Music выключен".to_owned());
+                    let failed = Some(activity_in(self.locale()).yt_music_off.to_owned());
                     self.publish(|s| s.align.craft = Some(v::Craft { track, source, target, lines: None, failed }));
                     return;
                 };
@@ -1347,10 +1351,11 @@ impl Worker {
             }
             Err(e) => {
                 log::warn!("align: fetching the stream of {track}: {e}");
+                let failed = activity_in(self.locale()).song_audio_failed.to_owned();
                 self.publish(|s| {
                     s.align.job = None;
                     if let Some(c) = s.align.craft.as_mut().filter(|c| c.track == track) {
-                        c.failed = Some("Не удалось получить звук песни".into());
+                        c.failed = Some(failed);
                     }
                 });
             }
@@ -1802,7 +1807,7 @@ mod tests {
         let c = Catalog::new(dir.path());
         let mut d = HashMap::new();
         d.insert(ModelId::Whisper, 0.5);
-        let view = models_view(&c, &d);
+        let view = models_view(&c, &d, Locale::Ru);
         assert_eq!(view.len(), catalog::ALL.len());
         assert!(view.iter().any(|m| m.key == "whisper" && m.state == v::ModelState::Downloading(0.5)));
         assert!(view.iter().all(|m| m.size > 0 && !m.label.is_empty()));

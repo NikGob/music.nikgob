@@ -460,16 +460,17 @@ pub(crate) fn on_two_albums(o: &SameAudioOffer) -> bool {
 /// The «Подтверди» card of a pair in `loc`: on one album, which file holds the
 /// other song; on two albums, whether the two are one song.
 pub(crate) fn pair_card_in(id: u64, o: &SameAudioOffer, loc: nikgob_core::i18n::Locale) -> v::Confirm {
+    let s = nikgob_core::i18n::activity_in(loc);
     let (first, second) = card_sides(o);
     if on_two_albums(o) {
         return v::Confirm {
             id,
             title: o.artist.clone(),
             origin: String::new(),
-            question: "Одна и та же песня?".into(),
+            question: s.same_song_q.into(),
             options: vec![album_option_in(first, loc), album_option_in(second, loc)],
-            skip_label: "Разные песни".into(),
-            accept_label: "Одна песня".into(),
+            skip_label: s.different_songs.into(),
+            accept_label: s.one_song.into(),
             pick: None,
             yes_no: true,
         };
@@ -478,10 +479,10 @@ pub(crate) fn pair_card_in(id: u64, o: &SameAudioOffer, loc: nikgob_core::i18n::
         id,
         title: o.album.clone(),
         origin: String::new(),
-        question: "В каком файле другая песня?".into(),
+        question: s.which_file_other.into(),
         options: vec![side_option_in(first, loc), side_option_in(second, loc)],
-        skip_label: "Всё верно".into(),
-        accept_label: "В файле другая песня".into(),
+        skip_label: s.all_correct.into(),
+        accept_label: s.file_has_other.into(),
         pick: None,
         yes_no: false,
     }
@@ -671,7 +672,7 @@ impl Worker {
             return;
         }
         let Some(svc) = &self.import else {
-            self.toast_err("Импорт недоступен", None);
+            self.toast_err(nikgob_core::i18n::activity_in(self.locale()).import_unavailable, None);
             return;
         };
         let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
@@ -754,6 +755,8 @@ impl Worker {
             }
             Msg::Marked { track, title, result } => {
                 self.same_audio.busy.remove(&track);
+                let loc = self.locale();
+                let s = nikgob_core::i18n::activity_in(loc);
                 match result {
                     Ok(w) => {
                         self.same_audio.undo.insert(track, w);
@@ -761,33 +764,35 @@ impl Worker {
                         // The track is looked for again, without that file.
                         self.wish_again(track);
                         self.toast_ok(
-                            format!("«{title}»: файл в Корзине, ищу заново"),
-                            Some(("Вернуть".into(), Command::UndoWrongFile(track))),
+                            nikgob_core::i18n::activity::fmt_file_in_trash_in(loc, &title),
+                            Some((s.put_back.into(), Command::UndoWrongFile(track))),
                         );
                     }
                     Err(e) => {
                         log::warn!("same audio: «{title}» stays: {e}");
-                        self.toast_err(format!("Не получилось убрать файл «{title}»"), None);
+                        let text = nikgob_core::i18n::activity::fmt_could_not_remove_file_in(loc, &title);
+                        self.toast_err(text, None);
                     }
                 }
                 self.publish_same_audio();
             }
             Msg::Undone { track, result } => {
                 self.same_audio.busy.remove(&track);
+                let s = nikgob_core::i18n::activity_in(self.locale());
                 match result {
                     Ok(true) => {
                         self.reload_after_import();
                         // The file is back: what looks for it stops.
                         self.wish_file_back(track);
-                        self.toast_ok("Файл вернулся", None);
+                        self.toast_ok(s.file_back, None);
                     }
                     Ok(false) => {
                         self.reload_after_import();
-                        self.toast_err("Файл не вернулся: его место занято", None);
+                        self.toast_err(s.file_not_back, None);
                     }
                     Err(e) => {
                         log::warn!("same audio: undo of {track}: {e}");
-                        self.toast_err("Не получилось вернуть файл", None);
+                        self.toast_err(s.could_not_restore_file, None);
                     }
                 }
                 self.publish_same_audio();

@@ -17,23 +17,32 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use nikgob_core::i18n::activity::{fmt_login_window_failed_in, fmt_sc_window_failed_in};
+use nikgob_core::i18n::{Locale, activity_in};
 use nikgob_core::streaming::{Account, LoginInput, LoginPrompt, Service};
 
 use super::Msg;
 use crate::Worker;
 use crate::import::Internal;
 
-/// What the window shows next to the account while it is open.
+/// What the window shows next to the account while it is open, in Russian:
+/// kept for callers outside the runtime, which should use [`window_hint_in`].
 pub const WINDOW_HINT: &str = "Войди в аккаунт Google в открывшемся окне. Пароль вводится только на странице Google — приложение его не видит.";
-/// The same for SoundCloud's window.
+/// The same for SoundCloud's window, in Russian: see [`WINDOW_HINT`].
 pub const SOUNDCLOUD_WINDOW_HINT: &str = "Войди в SoundCloud в открывшемся окне. Пароль вводится только на странице SoundCloud — приложение его не видит.";
 
-/// The hint of a service's window.
-pub fn window_hint(service: Service) -> &'static str {
+/// The hint of a service's window, in `loc`.
+pub fn window_hint_in(service: Service, loc: Locale) -> &'static str {
+    let s = activity_in(loc);
     match service {
-        Service::Soundcloud => SOUNDCLOUD_WINDOW_HINT,
-        _ => WINDOW_HINT,
+        Service::Soundcloud => s.soundcloud_window_hint,
+        _ => s.window_hint,
     }
+}
+
+/// The hint of a service's window, in Russian.
+pub fn window_hint(service: Service) -> &'static str {
+    window_hint_in(service, Locale::Ru)
 }
 
 /// A sign-in window of the app.
@@ -61,27 +70,38 @@ pub enum WebLoginError {
 }
 
 impl WebLoginError {
-    /// As the user reads it, for a service's window.
-    pub fn text_for(&self, service: Service) -> String {
+    /// As the user reads it, for a service's window, in `loc`.
+    pub fn text_for_in(&self, service: Service, loc: Locale) -> String {
         if service != Service::Soundcloud {
-            return self.text();
+            return self.text_in(loc);
         }
         match self {
-            Self::Refused => "SoundCloud не разрешил вход во встроенном окне. Можно вставить токен: «Вставить токен…»".into(),
-            Self::Failed(m) => format!("Окно входа не открылось ({m}). Можно вставить токен: «Вставить токен…»"),
-            other => other.text(),
+            Self::Refused => activity_in(loc).sc_refused.to_owned(),
+            Self::Failed(m) => fmt_sc_window_failed_in(loc, m),
+            other => other.text_in(loc),
         }
     }
 
-    /// As the user reads it.
-    pub fn text(&self) -> String {
+    /// As the user reads it, for a service's window, in Russian.
+    pub fn text_for(&self, service: Service) -> String {
+        self.text_for_in(service, Locale::Ru)
+    }
+
+    /// As the user reads it, in `loc`.
+    pub fn text_in(&self, loc: Locale) -> String {
+        let s = activity_in(loc);
         match self {
-            Self::Closed => "Вход отменён: окно закрыто раньше, чем вход завершился".into(),
-            Self::TimedOut => "Вход не завершился за 10 минут — попробуй ещё раз".into(),
-            Self::Refused => "Google не разрешил вход во встроенном окне. Войди по cookies: «Вставить cookies…»".into(),
-            Self::Cancelled => "Вход отменён".into(),
-            Self::Failed(m) => format!("Окно входа не открылось ({m}). Можно войти по cookies: «Вставить cookies…»"),
+            Self::Closed => s.login_closed.to_owned(),
+            Self::TimedOut => s.login_timed_out.to_owned(),
+            Self::Refused => s.login_refused.to_owned(),
+            Self::Cancelled => s.login_cancelled.to_owned(),
+            Self::Failed(m) => fmt_login_window_failed_in(loc, m),
         }
+    }
+
+    /// As the user reads it, in Russian.
+    pub fn text(&self) -> String {
+        self.text_in(Locale::Ru)
     }
 }
 
@@ -100,7 +120,9 @@ impl Worker {
     /// wins over what the service says (it knows nothing of the window).
     pub(crate) fn web_account(&self, service: Service, account: Account) -> Account {
         match self.streaming.web_state.get(&service) {
-            Some(WebState::Running(_)) => Account::LoggingIn(Some(LoginPrompt::Window(window_hint(service).into()))),
+            Some(WebState::Running(_)) => {
+                Account::LoggingIn(Some(LoginPrompt::Window(window_hint_in(service, self.locale()).into())))
+            }
             Some(WebState::Failed(m)) if !account.is_logged_in() => Account::Failed(m.clone()),
             _ => account,
         }
@@ -129,9 +151,8 @@ impl Worker {
                 let _ = tx.send(Internal::Stream(Msg::WebLoginDone(service, r)));
             });
         if let Err(e) = spawned {
-            self.streaming
-                .web_state
-                .insert(service, WebState::Failed(WebLoginError::Failed(e.to_string()).text_for(service)));
+            let text = WebLoginError::Failed(e.to_string()).text_for_in(service, self.locale());
+            self.streaming.web_state.insert(service, WebState::Failed(text));
         }
         self.publish_accounts();
         true
@@ -151,7 +172,8 @@ impl Worker {
             Err(WebLoginError::Cancelled) => {}
             Err(e) => {
                 log::warn!("{service}: sign-in window: {e:?}");
-                self.streaming.web_state.insert(service, WebState::Failed(e.text_for(service)));
+                let text = e.text_for_in(service, self.locale());
+                self.streaming.web_state.insert(service, WebState::Failed(text));
             }
         }
         self.publish_accounts();

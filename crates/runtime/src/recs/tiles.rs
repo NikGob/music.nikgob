@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use nikgob_core::i18n::{Locale, tracks_count_in};
+use nikgob_core::i18n::{Locale, activity_in, hours_minutes_in, tracks_count_in};
 use nikgob_core::model::{ArtistId, Event, TrackId};
 use nikgob_library::{Library, LyricsLevel, RecTrack};
 use nikgob_recs::{
@@ -105,7 +105,7 @@ impl TileHome {
         let (title, subtitle) = lines(self.kind, &self.param, &self.subject, self.picks.len(), self.today, loc);
         self.title = title;
         self.subtitle = subtitle;
-        self.duration = hours_minutes(self.ms, loc);
+        self.duration = hours_minutes_in(loc, self.ms);
     }
 }
 
@@ -231,29 +231,9 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         .collect()
 }
 
-/// «1 ч 4 мин» / «1 hr 4 min», «2 ч» / «2 hr», «45 мин» / «45 min» of `ms`.
-pub(crate) fn hours_minutes(ms: u64, loc: Locale) -> String {
-    let m = ((ms + 30_000) / 60_000).max(1);
-    match loc {
-        Locale::Ru => match (m / 60, m % 60) {
-            (0, m) => format!("{m} мин"),
-            (h, 0) => format!("{h} ч"),
-            (h, m) => format!("{h} ч {m} мин"),
-        },
-        Locale::En => match (m / 60, m % 60) {
-            (0, m) => format!("{m} min"),
-            (h, 0) => format!("{h} hr"),
-            (h, m) => format!("{h} hr {m} min"),
-        },
-    }
-}
-
 /// «каждый раз другое — жми и узнаешь»: the lottery's line, all it says.
 pub(crate) const fn lottery_subtitle_in(loc: Locale) -> &'static str {
-    match loc {
-        Locale::Ru => "каждый раз другое — жми и узнаешь",
-        Locale::En => "different every time — tap to find out",
-    }
+    activity_in(loc).lottery_subtitle
 }
 
 /// A tile as the home shows it: what is still allowed of it, its lines and
@@ -280,7 +260,7 @@ fn home_of(snap: &Snapshot, facts: &TilesInput, today: i64, t: TileMix, loc: Loc
         subject: t.subject,
         today,
         ms,
-        duration: hours_minutes(ms, loc),
+        duration: hours_minutes_in(loc, ms),
         title,
         subtitle,
         picks,

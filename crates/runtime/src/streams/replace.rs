@@ -22,6 +22,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use nikgob_core::i18n::activity::fmt_replaced_with_in;
+use nikgob_core::i18n::activity_in;
 use nikgob_core::model::TrackId;
 use nikgob_core::streaming::{RemoteId, SearchKind, Service, StreamError, StreamTrack, TrackKind};
 use nikgob_library::{RemoteLike, TrackSnapshot};
@@ -128,7 +130,7 @@ impl Worker {
                 });
             }
         }
-        let error = (asked.is_empty() && !query.is_empty()).then(|| "YouTube Music и Deezer выключены".to_owned());
+        let error = (asked.is_empty() && !query.is_empty()).then(|| activity_in(self.locale()).yt_deezer_off.to_owned());
         self.streaming.replace.asked = asked;
         let view = v::FindSongView {
             track,
@@ -149,11 +151,12 @@ impl Worker {
 
     /// Why the like cannot move to YouTube Music for `track`, if it cannot.
     fn youtube_off(&self, track: TrackId, clip: bool) -> Option<String> {
+        let s = activity_in(self.locale());
         let signed_in = self
             .service(Service::Youtube)
             .is_some_and(|s| s.account().is_logged_in());
         if !signed_in {
-            return Some("Нужен вход в YouTube Music".into());
+            return Some(s.need_yt_sign_in.to_owned());
         }
         let liked = self
             .lib
@@ -161,7 +164,7 @@ impl Worker {
             .unwrap_or_default()
             .iter()
             .any(|l| l.remote.service == Service::Youtube);
-        (!liked).then(|| if clip { "Клип не лайкнут в YouTube Music" } else { "Трек не лайкнут в YouTube Music" }.into())
+        (!liked).then(|| if clip { s.clip_not_liked_yt } else { s.track_not_liked_yt }.to_owned())
     }
 
     /// An answer of the dialog's search.
@@ -324,7 +327,7 @@ impl Worker {
             .collect();
         let mut songs = vec![pick.clone()];
         songs.extend(youtube_song.clone());
-        let Some(snapshot) = self.log_err("замена трека", self.lib.replace_with_song(track, &songs)) else {
+        let Some(snapshot) = self.log_err(activity_in(self.locale()).replace_err, self.lib.replace_with_song(track, &songs)) else {
             self.publish(|s| {
                 if let Some(f) = s.find_song.as_mut() {
                     f.busy = false;
@@ -341,7 +344,8 @@ impl Worker {
         // The like there follows: the clip unliked, the song liked.
         let song_there = if pick.id.service == Service::Youtube { Some(pick.id.clone()) } else { youtube_song.map(|s| s.id) };
         let mut remote = None;
-        let mut text = format!("Заменено на «{}»", pick.title);
+        let loc = self.locale();
+        let mut text = fmt_replaced_with_in(loc, &pick.title);
         if allowed {
             match song_there {
                 Some(to) => {
@@ -349,7 +353,7 @@ impl Worker {
                     self.move_like(track, &from, &to);
                     remote = Some((from, to));
                 }
-                None => text.push_str(" · только здесь: в YouTube Music нет этой песни"),
+                None => text.push_str(activity_in(loc).only_here_no_yt),
             }
         }
         self.streaming.replace.undo_seq += 1;
@@ -389,7 +393,8 @@ impl Worker {
     pub(crate) fn undo_replace(&mut self, id: u64) {
         let Some(undo) = self.streaming.replace.undo.remove(&id) else { return };
         let track = undo.snapshot.track;
-        if self.log_err("отмена замены", self.lib.restore_track(&undo.snapshot)).is_none() {
+        let loc = self.locale();
+        if self.log_err(activity_in(loc).undo_replace_err, self.lib.restore_track(&undo.snapshot)).is_none() {
             return;
         }
         if let Some((from, to)) = undo.remote {
@@ -401,7 +406,7 @@ impl Worker {
             }
         }
         self.track_replaced(track);
-        self.toast_info("Замена отменена", None);
+        self.toast_info(activity_in(loc).replace_undone, None);
     }
 
     /// The track's metadata and audio changed by hand: what shows or plays

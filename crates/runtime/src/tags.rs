@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use nikgob_core::i18n::activity_in;
 use nikgob_core::model::TrackId;
 use nikgob_view as v;
 
@@ -103,15 +104,18 @@ impl Worker {
             }
             Err(e) => {
                 log::warn!("tags of {track}: {e}");
-                self.toast_err("У трека нет локального файла", None);
+                let text = activity_in(self.locale()).no_local_file;
+                self.toast_err(text, None);
             }
         }
     }
 
     pub(crate) fn lookup_tags(&mut self, track: TrackId, q: v::TagEdit) {
+        let loc = self.locale();
         let Some(svc) = &self.import else { return };
         let Some(meta) = svc.metadata() else {
-            self.publish(|s| s.tag_editor.error = Some("Онлайн-поиск выключен".into()));
+            let text = activity_in(loc).online_search_off;
+            self.publish(|s| s.tag_editor.error = Some(text.into()));
             return;
         };
         let duration = self
@@ -132,7 +136,7 @@ impl Worker {
                 meta.musicbrainz.search_recordings(&query),
             )
             .await
-            .map_err(|_| "MusicBrainz не ответил".to_owned())
+            .map_err(|_| activity_in(loc).musicbrainz_no_answer.to_owned())
             .and_then(|r| r.map_err(|e| e.to_string()))
             .map(|recs| suggestions(&recs, &q.genre));
             let _ = tx.send(Internal::TagSuggestions(track, result));
@@ -158,6 +162,7 @@ impl Worker {
     }
 
     pub(crate) fn tag_result(&mut self, msg: Internal) {
+        let loc = self.locale();
         match msg {
             Internal::TagSuggestions(track, r) => self.publish(|s| {
                 if s.tag_editor.track != Some(track) {
@@ -166,7 +171,7 @@ impl Worker {
                 s.tag_editor.looking_up = false;
                 match r {
                     Ok(list) if list.is_empty() => {
-                        s.tag_editor.error = Some("Ничего не нашлось".into());
+                        s.tag_editor.error = Some(activity_in(loc).nothing_found.into());
                     }
                     Ok(list) => s.tag_editor.suggestions = list,
                     Err(e) => s.tag_editor.error = Some(e),
@@ -178,15 +183,17 @@ impl Worker {
                         s.tag_editor = v::TagEditor::default();
                     }
                 });
-                self.toast_ok("Теги сохранены", None);
+                let text = activity_in(loc).tags_saved;
+                self.toast_ok(text, None);
                 self.reload_after_import();
                 self.retagged_playing(&[track]);
             }
             Internal::Retagged(_, Err(e)) => {
                 log::warn!("retag: {e}");
+                let text = format!("{}: {e}", activity_in(loc).save_failed);
                 self.publish(|s| {
                     s.tag_editor.loading = false;
-                    s.tag_editor.error = Some(format!("Не удалось сохранить: {e}"));
+                    s.tag_editor.error = Some(text);
                 });
             }
             _ => {}
@@ -221,7 +228,7 @@ impl Worker {
     /// is listed in `outside` and never read.
     pub(crate) fn api_read_tags(&mut self, tracks: Vec<TrackId>, reply: v::ApiReply) {
         let Some(svc) = &self.import else {
-            reply.send(Err("Файлы библиотеки недоступны".to_owned()));
+            reply.send(Err(activity_in(self.locale()).library_files_unavailable.to_owned()));
             return;
         };
         let importer = svc.importer().clone();
@@ -252,7 +259,7 @@ impl Worker {
     /// `{"done", "failed"}`.
     pub(crate) fn api_retag(&mut self, tracks: Vec<(TrackId, v::TagPatch, v::TagPatch)>, reply: v::ApiReply) {
         let Some(svc) = &self.import else {
-            reply.send(Err("Файлы библиотеки недоступны".to_owned()));
+            reply.send(Err(activity_in(self.locale()).library_files_unavailable.to_owned()));
             return;
         };
         let importer = svc.importer().clone();
@@ -287,12 +294,13 @@ impl Worker {
 
     /// The API's retag came back: one snackbar, the library read again.
     pub(crate) fn api_retagged(&mut self, done: &[TrackId], failed: usize) {
+        let s = activity_in(self.locale());
         match (done.len(), failed) {
             (0, 0) => return,
-            (0, _) => self.toast_err("Не удалось сохранить теги", None),
-            (1, 0) => self.toast_ok("Теги сохранены", None),
-            (n, 0) => self.toast_ok(format!("Теги сохранены: {n}"), None),
-            (n, f) => self.toast_err(format!("Теги сохранены: {n}, не удалось: {f}"), None),
+            (0, _) => self.toast_err(s.tags_save_failed, None),
+            (1, 0) => self.toast_ok(s.tags_saved, None),
+            (n, 0) => self.toast_ok(format!("{}: {n}", s.tags_saved), None),
+            (n, f) => self.toast_err(format!("{}: {n}, {}: {f}", s.tags_saved, s.could_not), None),
         }
         self.reload_after_import();
         self.retagged_playing(done);

@@ -341,9 +341,9 @@ pub fn row_label_in(codec: &Codec, check: Option<&CheckSummary>, loc: Locale) ->
     label_in(codec, None, check.filter(|c| c.sure()), loc)
 }
 
-/// [`row_label_in`] in Russian (preserved for callers not yet localized).
+/// [`row_label_in`] in the active locale.
 pub fn row_label(codec: &Codec, check: Option<&CheckSummary>) -> String {
-    row_label_in(codec, check, Locale::Ru)
+    row_label_in(codec, check, crate::i18n::locale())
 }
 
 /// The check found the file (or the lossless one it was made from) made
@@ -456,9 +456,9 @@ pub fn label_in(codec: &Codec, bitrate: Option<u32>, check: Option<&CheckSummary
     with_rate
 }
 
-/// [`label_in`] in Russian (preserved for callers not yet localized).
+/// [`label_in`] in the active locale.
 pub fn label(codec: &Codec, bitrate: Option<u32>, check: Option<&CheckSummary>) -> String {
-    label_in(codec, bitrate, check, Locale::Ru)
+    label_in(codec, bitrate, check, crate::i18n::locale())
 }
 
 /// Localized frequency label (`"16,1 кГц"` / `"16.1 kHz"`).
@@ -469,9 +469,9 @@ pub fn khz_in(hz: f32, loc: Locale) -> String {
     }
 }
 
-/// "16,1 кГц".
+/// "16,1 кГц" in the active locale.
 pub fn khz(hz: f32) -> String {
-    khz_in(hz, Locale::Ru)
+    khz_in(hz, crate::i18n::locale())
 }
 
 /// The verdict in plain words for the quality panel in `loc`. `codec` and
@@ -540,9 +540,9 @@ pub fn verdict_text_in(codec: &Codec, bitrate: Option<u32>, check: &QualityCheck
     }
 }
 
-/// [`verdict_text_in`] in Russian (preserved for callers not yet localized).
+/// [`verdict_text_in`] in the active locale.
 pub fn verdict_text(codec: &Codec, bitrate: Option<u32>, check: &QualityCheck) -> String {
-    verdict_text_in(codec, bitrate, check, Locale::Ru)
+    verdict_text_in(codec, bitrate, check, crate::i18n::locale())
 }
 
 /// «до 16,1 кГц» / «up to 16.1 kHz»; for a full band, «до 22,0 кГц, без среза» / «up to 22.0 kHz, no cutoff».
@@ -570,9 +570,9 @@ pub fn cutoff_text_in(check: &QualityCheck, loc: Locale) -> Option<String> {
     })
 }
 
-/// [`cutoff_text_in`] in Russian (preserved for callers not yet localized).
+/// [`cutoff_text_in`] in the active locale.
 pub fn cutoff_text(check: &QualityCheck) -> Option<String> {
-    cutoff_text_in(check, Locale::Ru)
+    cutoff_text_in(check, crate::i18n::locale())
 }
 
 /// Averages `levels_db` (dB, bin `k` of `0..=n-1` spanning 0..nyquist) into

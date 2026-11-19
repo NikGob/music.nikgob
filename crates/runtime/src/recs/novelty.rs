@@ -11,6 +11,8 @@
 //! session was background; a log of before the profiles is keyed once from
 //! its previews ([`keyed`]).
 
+use nikgob_core::i18n::activity::fmt_quoted_in;
+use nikgob_core::i18n::activity_in;
 use nikgob_core::model::{EventContext, EventOrigin, LikeTarget, TrackId};
 use nikgob_library::now_ms;
 use nikgob_recs::{Ended, Heard, NewEvent, NewLog, Source, Vector, song_key};
@@ -166,9 +168,11 @@ impl Worker {
             self.recs.newlog.log.offered.insert(p.song.clone());
             self.new_log_save();
             log::info!("new music: «{}» heard out twice, offered to keep", p.title);
+            let loc = self.locale();
+            let s = activity_in(loc);
             self.toast_info(
-                format!("Оставить у себя «{}»?", p.title),
-                Some(("♡ Оставить".into(), Command::Like(LikeTarget::Track(track), true))),
+                format!("{} {}?", s.keep_it, fmt_quoted_in(loc, &p.title)),
+                Some((format!("♡ {}", s.keep), Command::Like(LikeTarget::Track(track), true))),
             );
         }
     }

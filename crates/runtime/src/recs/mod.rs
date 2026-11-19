@@ -58,7 +58,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
-use nikgob_core::i18n::{Locale, PerLocale, TileStatic, home_recs_in, tracks_count_in};
+use nikgob_core::i18n::activity::fmt_quoted_in;
+use nikgob_core::i18n::{Locale, PerLocale, TileStatic, activity_in, home_recs_in, tracks_count_in};
 use nikgob_core::model::{ArtistId, EventContext, ReleaseId, TrackId, UnixMs};
 use nikgob_core::streaming::{RemoteId, StreamTrack};
 use nikgob_library::{Library, now_ms};
@@ -624,17 +625,12 @@ pub(crate) fn from_view_mood(m: v::Mood) -> Mood {
 
 /// «A, B и другие» / «A, B & more» (two artists: «A и B» / «A & B»; one: its name).
 fn style_title(names: &[String], artists: usize, loc: Locale) -> String {
+    let s = activity_in(loc);
     match names {
         [] => home_recs_in(loc).your_mix.to_owned(),
         [a] => a.clone(),
-        [a, b, ..] if artists > 2 => match loc {
-            Locale::Ru => format!("{a}, {b} и другие"),
-            Locale::En => format!("{a}, {b} & more"),
-        },
-        [a, b, ..] => match loc {
-            Locale::Ru => format!("{a} и {b}"),
-            Locale::En => format!("{a} & {b}"),
-        },
+        [a, b, ..] if artists > 2 => format!("{a}, {b} {}", s.and_more),
+        [a, b, ..] => format!("{a} {} {b}", s.and_last),
     }
 }
 
@@ -645,16 +641,11 @@ fn tracks_count(n: usize, loc: Locale) -> String {
 
 /// Hero subtitle under «Твой микс» / «Your Mix».
 fn hero_subtitle(history: bool, n: usize, loc: Locale) -> String {
+    let s = activity_in(loc);
     if history {
-        match loc {
-            Locale::Ru => format!("{} · любимое и похожее", tracks_count(n, loc)),
-            Locale::En => format!("{} · favorites and similar", tracks_count(n, loc)),
-        }
+        format!("{} · {}", tracks_count(n, loc), s.hero_favorites)
     } else {
-        match loc {
-            Locale::Ru => "Слушай — микс соберётся из того, что нравится".to_owned(),
-            Locale::En => "Listen — your mix will form from what you enjoy".to_owned(),
-        }
+        s.hero_listen.to_owned()
     }
 }
 
@@ -662,61 +653,38 @@ fn hero_subtitle(history: bool, n: usize, loc: Locale) -> String {
 /// мрачное» / «sound: calm and dark», or «12 исполнителей похожего звука» /
 /// «12 artists with a similar sound» for a style in the middle of everything.
 fn style_subtitle(m: &StyleMix, loc: Locale) -> String {
+    let s = activity_in(loc);
     match style_words_in(m.axes, loc) {
-        Some(words) => match loc {
-            Locale::Ru => format!("по звуку: {words}"),
-            Locale::En => format!("sound: {words}"),
-        },
+        Some(words) => format!("{}: {words}", s.by_sound),
         None => {
             let n = m.artists.len();
-            match loc {
-                Locale::Ru => format!("{n} {} похожего звука", crate::streams::plural(n, "исполнитель", "исполнителя", "исполнителей")),
-                Locale::En => {
-                    let unit = nikgob_core::i18n::plural_forms(loc, n as u64, &nikgob_core::i18n::common_in(loc).artists);
-                    format!("{n} {unit} with a similar sound")
-                }
-            }
+            let unit = nikgob_core::i18n::plural_forms(loc, n as u64, &nikgob_core::i18n::common_in(loc).artists);
+            format!("{n} {unit} {}", s.similar_sound)
         }
     }
 }
 
 /// What a mood card plays, in a few words.
 pub(crate) const fn mood_subtitle(m: v::Mood, loc: Locale) -> &'static str {
-    match loc {
-        Locale::Ru => match m {
-            v::Mood::Calm => "тихое и неспешное",
-            v::Mood::Energetic => "быстрое и громкое",
-            v::Mood::Dark => "минорное, тёмное по звуку",
-            v::Mood::Bright => "мажорное, светлое по звуку",
-            v::Mood::Focus => "ровное и негромкое",
-            v::Mood::Drive => "громкое и ровное, в дорогу",
-        },
-        Locale::En => match m {
-            v::Mood::Calm => "quiet and unhurried",
-            v::Mood::Energetic => "fast and loud",
-            v::Mood::Dark => "minor, dark in tone",
-            v::Mood::Bright => "major, bright in tone",
-            v::Mood::Focus => "steady and gentle",
-            v::Mood::Drive => "loud and steady, for the road",
-        },
+    let s = activity_in(loc);
+    match m {
+        v::Mood::Calm => s.mood_calm,
+        v::Mood::Energetic => s.mood_energetic,
+        v::Mood::Dark => s.mood_dark,
+        v::Mood::Bright => s.mood_bright,
+        v::Mood::Focus => s.mood_focus,
+        v::Mood::Drive => s.mood_drive,
     }
 }
 
 /// The daylist's kicker: the part of the day it is for.
 const fn daylist_kicker(part: DayPart, loc: Locale) -> &'static str {
-    match loc {
-        Locale::Ru => match part {
-            DayPart::Morning => "НА УТРО",
-            DayPart::Day => "НА ДЕНЬ",
-            DayPart::Evening => "НА ВЕЧЕР",
-            DayPart::Night => "НА НОЧЬ",
-        },
-        Locale::En => match part {
-            DayPart::Morning => "MORNING",
-            DayPart::Day => "DAYTIME",
-            DayPart::Evening => "EVENING",
-            DayPart::Night => "NIGHT",
-        },
+    let s = activity_in(loc);
+    match part {
+        DayPart::Morning => s.daylist_morning,
+        DayPart::Day => s.daylist_day,
+        DayPart::Evening => s.daylist_evening,
+        DayPart::Night => s.daylist_night,
     }
 }
 
@@ -2394,11 +2362,7 @@ pub(crate) fn card_first(home: &mut v::HomeView, loc: Locale) {
                 }
                 let card = v::WorldCard {
                     icon: v::WorldIcon::Album,
-                    kicker: match loc {
-                        Locale::Ru => "Новый альбом",
-                        Locale::En => "New Album",
-                    }
-                    .into(),
+                    kicker: activity_in(loc).new_album.into(),
                     title: name,
                     go: v::WorldGo::Stream(a.remote.clone()),
                 };
@@ -2865,7 +2829,8 @@ impl Worker {
         let key = m.key;
         self.patch_home(move |home| home.lanes.retain(|l| l.key != key));
         let undo = self.undo_action(Command::SetPref(v::PrefPatch::ShowMix(m.key)));
-        self.toast_info(format!("Не буду предлагать «{}»", m.title), Some(undo));
+        let text = format!("{} {}", activity_in(self.locale()).not_recommend_mix, fmt_quoted_in(self.locale(), &m.title));
+        self.toast_info(text, Some(undo));
     }
 
     /// «Миксы для тебя» scrolled to its end: [`ROW_MORE`] more cards, built
@@ -3763,8 +3728,10 @@ impl Worker {
             log::warn!("rec feedback for an unknown {target:?}");
             return;
         }
+        let loc = self.locale();
+        let s = activity_in(loc);
         for (kind, id) in &marks {
-            if self.log_err("отзыв", self.lib.set_rec_feedback(kind, id, dislike)).is_none() {
+            if self.log_err(s.feedback_err, self.lib.set_rec_feedback(kind, id, dislike)).is_none() {
                 return;
             }
         }
@@ -3772,15 +3739,16 @@ impl Worker {
         let name = name.unwrap_or_default();
         if dislike {
             let text = if artist {
-                format!("Не буду рекомендовать исполнителя «{name}»")
+                format!("{} {}", s.not_recommend_artist, fmt_quoted_in(loc, &name))
             } else {
-                format!("Не буду рекомендовать «{name}»")
+                format!("{} {}", s.not_recommend_name, fmt_quoted_in(loc, &name))
             };
             let undo = self.undo_action(Command::RecFeedback { target, dislike: false });
             self.toast_info(text, Some(undo));
         } else {
             let undo = self.undo_action(Command::RecFeedback { target, dislike: true });
-            self.toast_info(format!("«{name}» снова в рекомендациях"), Some(undo));
+            let text = format!("{} {}", fmt_quoted_in(loc, &name), s.back_in_recs);
+            self.toast_info(text, Some(undo));
         }
         // Discoveries follow at once; the mixes after the next build.
         self.dislikes_load(true);

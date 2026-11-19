@@ -37,6 +37,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use nikgob_core::i18n::activity::{fmt_cannot_change_in, fmt_quoted_in, fmt_sync_done_in};
+use nikgob_core::i18n::{Locale, activity_in};
 use nikgob_core::model::{EntryId, PlaylistId};
 use nikgob_core::streaming::{
     EntityKind, PlaylistSyncMode, RemoteId, Service, StreamError, StreamPlaylist,
@@ -201,13 +203,14 @@ fn parse_base(json: Option<&str>) -> Option<Vec<String>> {
     serde_json::from_str(json?).ok()
 }
 
-fn ago(ms: i64) -> String {
+fn ago(ms: i64, loc: Locale) -> String {
+    let s = activity_in(loc);
     let mins = (nikgob_library::now_ms() - ms).max(0) / 60_000;
     match mins {
-        0 => "только что".into(),
-        1..=59 => format!("{mins} мин назад"),
-        60..=1439 => format!("{} ч назад", mins / 60),
-        _ => format!("{} дн. назад", mins / 1440),
+        0 => s.just_now.into(),
+        1..=59 => format!("{mins} {}", s.mins_ago),
+        60..=1439 => format!("{} {}", mins / 60, s.hours_ago),
+        _ => format!("{} {}", mins / 1440, s.days_ago),
     }
 }
 
@@ -471,7 +474,7 @@ impl Worker {
                             self.sync_rate_limited(service, retry_after);
                             if self.streaming.sync.announce.remove(&playlist) {
                                 self.toast_info(
-                                    format!("{} просит подождать — синхронизирую сам", service.display_name()),
+                                    format!("{} {} — {}", service.display_name(), activity_in(self.locale()).asks_to_wait, activity_in(self.locale()).syncing_myself),
                                     None,
                                 );
                             }
@@ -597,7 +600,7 @@ impl Worker {
             link.sync_mode = PlaylistSyncMode::Follow;
             let _ = self.lib.put_playlist_remote(&link);
             self.toast_info(
-                format!("«{}» в {} менять нельзя — только получать изменения", remote.name, remote.id.service.display_name()),
+                fmt_cannot_change_in(self.locale(), &remote.name, remote.id.service.display_name()),
                 None,
             );
         }
@@ -616,7 +619,7 @@ impl Worker {
                 .collect();
             let ids = self.upsert_streams(&tracks);
             out.added = ids.len();
-            let _ = self.log_err("плейлист", self.lib.playlist_add_many(playlist, &ids));
+            let _ = self.log_err(activity_in(self.locale()).playlist_err, self.lib.playlist_add_many(playlist, &ids));
         }
         for e in &p.remove_here {
             if self.lib.playlist_remove(*e).is_ok() {
@@ -667,17 +670,12 @@ impl Worker {
         );
         if self.streaming.sync.announce.remove(&playlist) {
             let there = out.pushed_add.len() + out.pushed_remove.len();
+            let loc = self.locale();
             if out.added + out.removed + there == 0 {
-                self.toast_info("Плейлист синхронизирован: изменений нет", None);
+                self.toast_info(activity_in(loc).sync_no_changes, None);
             } else {
                 self.toast_ok(
-                    format!(
-                        "Плейлист синхронизирован: +{} −{} здесь, {} в {}",
-                        out.added,
-                        out.removed,
-                        there,
-                        service.display_name()
-                    ),
+                    fmt_sync_done_in(loc, out.added, out.removed, there, service.display_name()),
                     None,
                 );
             }
@@ -691,21 +689,23 @@ impl Worker {
 
     /// `Command::SetPlaylistSync`.
     pub(crate) fn set_playlist_sync(&mut self, playlist: PlaylistId, mode: PlaylistSyncMode) {
+        let loc = self.locale();
+        let s = activity_in(loc);
         if playlist == LIKED_PLAYLIST {
-            self.toast_info("«Любимые» синхронизируются лайками", None);
+            self.toast_info(s.liked_syncs_by_likes, None);
             return;
         }
         let Some(local) = self.lib.get_playlist(playlist).ok().flatten() else { return };
         let label = match mode {
-            PlaylistSyncMode::TwoWay => "изменения в обе стороны",
-            PlaylistSyncMode::Follow => "только получать изменения",
-            PlaylistSyncMode::Once => "выключена",
+            PlaylistSyncMode::TwoWay => s.sync_two_way,
+            PlaylistSyncMode::Follow => s.follow_only,
+            PlaylistSyncMode::Once => s.sync_off,
         };
         match self.lib.playlist_remote(playlist).ok().flatten() {
             Some(mut link) => {
                 link.sync_mode = mode;
-                let _ = self.log_err("плейлист", self.lib.put_playlist_remote(&link));
-                self.toast_info(format!("Синхронизация: {label}"), None);
+                let _ = self.log_err(s.playlist_err, self.lib.put_playlist_remote(&link));
+                self.toast_info(format!("{}: {label}", s.sync_label), None);
                 if mode != PlaylistSyncMode::Once {
                     self.streaming.sync.announce.insert(playlist);
                     self.sync_playlist(playlist);
@@ -717,7 +717,10 @@ impl Worker {
                     return;
                 };
                 let Some(svc) = self.service(service) else { return };
-                self.toast_work(format!("Создаю «{}» в {}…", local.name, service.display_name()), None);
+                self.toast_work(
+                    format!("{} {} {} {}…", s.creating, fmt_quoted_in(loc, &local.name), s.in, service.display_name()),
+                    None,
+                );
                 self.streaming.sync.announce.insert(playlist);
                 let name = local.name.clone();
                 self.streaming.spawn(async move {
@@ -725,7 +728,7 @@ impl Worker {
                     Msg::Sync(SyncMsg::Created { playlist, service, result })
                 });
             }
-            None => self.toast_info("Плейлист не связан с сервисом", None),
+            None => self.toast_info(s.playlist_not_linked, None),
         }
         self.publish_playlist_sync(playlist);
     }
@@ -763,10 +766,11 @@ impl Worker {
     /// The sync line of a playlist page ([`v::PlaylistDetail::sync`]).
     pub(crate) fn playlist_sync_view(&self, playlist: PlaylistId) -> Option<v::PlaylistSyncView> {
         let link = self.lib.playlist_remote(playlist).ok().flatten()?;
+        let loc = self.locale();
         Some(v::PlaylistSyncView {
             remote: link.remote.clone(),
             mode: link.sync_mode,
-            synced: link.synced_at.map(ago),
+            synced: link.synced_at.map(|ms| ago(ms, loc)),
             syncing: self.streaming.sync.fetching.contains(&playlist),
             error: self.streaming.sync.errors.get(&playlist).cloned(),
         })
