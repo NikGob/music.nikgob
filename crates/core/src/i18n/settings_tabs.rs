@@ -326,7 +326,7 @@ pub static EN: SettingsTabsStrings = SettingsTabsStrings {
     g_torrents: "Torrents",
     g_seeding: "Seeding",
     g_dev: "Developer",
-    g_api: "API & MCP",
+    g_api: "API and MCP",
     g_devices: "Devices",
     g_you: "You",
     g_startup: "Startup",
@@ -337,32 +337,32 @@ pub static EN: SettingsTabsStrings = SettingsTabsStrings {
     g_sound: "Sound",
     g_album_songs: "Album songs",
     g_recs: "Recommendations",
-    g_dislikes: "Dislikes",
+    g_dislikes: "Don't recommend",
     g_theme: "Theme",
-    g_library_album: "Library & album",
+    g_library_album: "Library and albums",
     g_window: "Window",
     g_right_pane: "Right panel",
     g_track_screen: "Track screen",
     g_cover: "Cover",
     g_ring: "Ring",
     g_background: "Background",
-    g_progress_volume: "Progress & volume",
+    g_progress_volume: "Progress and volume",
     g_controls: "Controls",
     g_buttons: "Buttons",
     models: "Models",
     g_lyrics_search: "Lyrics search",
-    g_lyrics_auto: "Auto highlight",
-    g_lyrics_look: "Lyrics look",
-    g_sung_line: "Sung line",
-    g_full_text: "Full text",
-    g_song_pause: "Song pause",
+    g_lyrics_auto: "Automatic sync",
+    g_lyrics_look: "Lyrics appearance",
+    g_sung_line: "Current line",
+    g_full_text: "Full lyrics",
+    g_song_pause: "Instrumental sections",
     not_in_this_build: "Not available in this build",
     logout: "Sign out",
     connect: "Connect",
     enable_sound: "Enable audio",
-    key_rejected: "Key didn't work",
+    key_rejected: "Key rejected",
     download: "Download",
-    enter_key: "Enter key",
+    enter_key: "Enter key…",
     turn_off: "Turn off",
     turn_on: "Turn on",
     solo_sound_title: "Spotify audio",
@@ -374,9 +374,9 @@ pub static EN: SettingsTabsStrings = SettingsTabsStrings {
     solo_paste_here: "Paste it here",
     key_label: "Key",
     solo_pair_title: "Connect Soloist",
-    solo_pair_step1: "Open Spotify on a phone or computer on the same network",
+    solo_pair_step1: "Open Spotify on a phone or computer on the same network.",
     open_dashboard: "Open Spotify for Developers",
-    create_app: "Create an app (Create app), Redirect URI:",
+    create_app: "Select “Create app” and set the Redirect URI:",
     mark_apis: "Enable Web API and Web Playback SDK, then save.",
     copy_client_id: "Copy the Client ID from the app's Settings:",
     saved: "Saved",
@@ -384,10 +384,10 @@ pub static EN: SettingsTabsStrings = SettingsTabsStrings {
     login_spotify: "Sign in with Spotify",
     reconnect: "Reconnect",
     import: "Import",
-    finish_in_browser: "Finish signing in in the browser",
+    finish_in_browser: "Complete sign-in in your browser.",
     open_page_enter_code: "Open the page and enter the code:",
     browser_not_opened: "If the browser didn't open by itself, open this link:",
-    finish_in_window: "Finish signing in in the window",
+    finish_in_window: "Complete sign-in in the window.",
     login_google: "Sign in with Google",
     paste_cookies: "Paste cookies…",
     login: "Sign in",
@@ -406,12 +406,12 @@ pub static EN: SettingsTabsStrings = SettingsTabsStrings {
     archive_filter: "Archive",
     copied: "Copied",
     restore: "Restore",
-    need_prowlarr: "Prowlarr needed",
-    need_account: "Account needed",
+    need_prowlarr: "Prowlarr required",
+    need_account: "Account required",
     not_connected: "Couldn't connect",
     up: "Up",
     down: "Down",
-    util_address: "Utility address",
+    util_address: "Server address",
     token_label: "Token",
     nick: "Username",
     password: "Password",
@@ -420,7 +420,7 @@ pub static EN: SettingsTabsStrings = SettingsTabsStrings {
     check: "Check",
     configure: "Configure",
     system_default: "System default",
-    model_failed: "Couldn't download the model",
+    model_failed: "Could not load the model",
     gpu_unavailable: "GPU unavailable",
     show: "Show",
     contact_placeholder: "email or website",
@@ -428,7 +428,7 @@ pub static EN: SettingsTabsStrings = SettingsTabsStrings {
     remove_token: "Remove token",
     reset_demo_title: "Reset the demo profile?",
     name_hint: "Name",
-    need_youtube: "YouTube Music needed",
+    need_youtube: "YouTube Music required",
     move_btn: "Move…",
     masters_dir_title: "Choose a disk or folder for FLAC masters",
     open_folder: "Open folder",
@@ -436,26 +436,26 @@ pub static EN: SettingsTabsStrings = SettingsTabsStrings {
     add_device: "Add device",
     network_map: "Network map",
     no_settings_file: "No settings file",
-    mesh_off: "Device connection is off",
+    mesh_off: "Device connections are off",
     open_docs: "Open /docs",
-    new_token: "New token",
+    new_token: "New token…",
     token_agent_pc: "Agent on this PC",
     token_assistant: "Voice assistant",
     for_agent_pc: "For an agent on this PC",
     for_assistant: "For a voice assistant",
-    player_no_answer: "The player didn't respond",
+    player_no_answer: "The player did not respond",
     revoke: "Revoke",
     create: "Create",
     token_name: "Name",
     token_placeholder: "Assistant on Pi",
     rights: "Permissions",
-    who_uses: "Who can use",
-    token_failed: "Couldn't create the token",
-    local_only_notice: "Access is open only to this computer",
+    who_uses: "Who uses it",
+    token_failed: "Could not create the token",
+    local_only_notice: "Access is limited to this computer",
     enable_home_network: "Enable home network",
     beta: "Beta",
     no_limit: "no limit",
-    no_cap: "no cap",
+    no_cap: "no limit",
     kibps: "KiB/s",
     mibps: "MiB/s",
     suffix_mb: " MB",
@@ -489,7 +489,7 @@ pub const fn decimal_point_in(loc: Locale) -> char {
 pub const fn snippets_in(loc: Locale) -> [&'static str; 4] {
     match loc {
         Locale::Ru => ["Claude Code", "mcpServers JSON", "curl", "MCP по сети"],
-        Locale::En => ["Claude Code", "mcpServers JSON", "curl", "MCP on the network"],
+        Locale::En => ["Claude Code", "mcpServers JSON", "curl", "MCP over the network"],
     }
 }
 
@@ -591,7 +591,7 @@ pub fn fmt_solo_need_in(loc: Locale, size: &str) -> String {
 pub fn fmt_pick_device_in(loc: Locale, name: &str) -> String {
     match loc {
         Locale::Ru => format!("В списке устройств выбери «{name}»"),
-        Locale::En => format!("In the device list, choose “{name}”"),
+        Locale::En => format!("Choose “{name}” from the device list."),
     }
 }
 
@@ -599,7 +599,7 @@ pub fn fmt_pick_device_in(loc: Locale, name: &str) -> String {
 pub fn fmt_asks_wait_until_in(loc: Locale, service: &str, hm: &str) -> String {
     match loc {
         Locale::Ru => format!("{service} просит подождать до {hm}"),
-        Locale::En => format!("{service} asks to wait until {hm}"),
+        Locale::En => format!("{service} is asking you to wait until {hm}"),
     }
 }
 
@@ -607,7 +607,7 @@ pub fn fmt_asks_wait_until_in(loc: Locale, service: &str, hm: &str) -> String {
 pub fn fmt_no_audio_until_in(loc: Locale, service: &str, hm: &str) -> String {
     match loc {
         Locale::Ru => format!("{service} не отдаёт звук до {hm}"),
-        Locale::En => format!("{service} won't play audio until {hm}"),
+        Locale::En => format!("{service} audio is unavailable until {hm}"),
     }
 }
 
@@ -668,11 +668,11 @@ mod tests {
             "To play Spotify audio, you need Spotify Soloist, the official Spotify player (≈25 MB)."
         );
         assert_eq!(fmt_pick_device_in(Locale::Ru, "Pi"), "В списке устройств выбери «Pi»");
-        assert_eq!(fmt_pick_device_in(Locale::En, "Pi"), "In the device list, choose “Pi”");
+        assert_eq!(fmt_pick_device_in(Locale::En, "Pi"), "Choose “Pi” from the device list.");
         assert_eq!(fmt_asks_wait_until_in(Locale::Ru, "Spotify", "14:05"), "Spotify просит подождать до 14:05");
-        assert_eq!(fmt_asks_wait_until_in(Locale::En, "Spotify", "14:05"), "Spotify asks to wait until 14:05");
+        assert_eq!(fmt_asks_wait_until_in(Locale::En, "Spotify", "14:05"), "Spotify is asking you to wait until 14:05");
         assert_eq!(fmt_no_audio_until_in(Locale::Ru, "Spotify", "14:05"), "Spotify не отдаёт звук до 14:05");
-        assert_eq!(fmt_no_audio_until_in(Locale::En, "Spotify", "14:05"), "Spotify won't play audio until 14:05");
+        assert_eq!(fmt_no_audio_until_in(Locale::En, "Spotify", "14:05"), "Spotify audio is unavailable until 14:05");
         assert_eq!(fmt_models_summary_in(Locale::Ru, 2, 5, "300 МБ"), "2 из 5 · 300 МБ");
         assert_eq!(fmt_models_summary_in(Locale::En, 2, 5, "300 MB"), "2 of 5 · 300 MB");
     }
@@ -680,7 +680,7 @@ mod tests {
     #[test]
     fn label_arrays_cover_both_locales() {
         assert_eq!(snippets_in(Locale::Ru)[3], "MCP по сети");
-        assert_eq!(snippets_in(Locale::En)[3], "MCP on the network");
+        assert_eq!(snippets_in(Locale::En)[3], "MCP over the network");
         assert_eq!(api_access_in(Locale::Ru), ["Этот компьютер", "Домашняя сеть"]);
         assert_eq!(api_access_in(Locale::En), ["This computer", "Home network"]);
         assert_eq!(keep_masters_in(Locale::Ru), ["Всегда", "После 1 копии", "После 2 копий"]);

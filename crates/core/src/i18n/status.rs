@@ -228,20 +228,20 @@ pub static EN: StatusStrings = StatusStrings {
     stage_fingerprinting: "fingerprinting",
     stage_identifying: "identifying track",
     stage_quality: "checking quality",
-    stage_deciding: "matching library",
+    stage_deciding: "checking against the library",
     stage_converting: "converting",
     stage_tagging: "writing tags",
-    stage_placing: "placing in library",
+    stage_placing: "adding to library",
     stage_deriving: "extracting cover colors",
     preparing_files: "preparing files",
     file_tags: "file tags",
-    liked_stream_track: "liked stream track, different duration",
+    liked_stream_track: "liked streaming track, different duration",
     unknown_artist: "unknown artist",
     import_button: "Import",
     which_track: "Which track is this?",
     import_title: "Import",
     import_from_inbox: "Import from Inbox",
-    cancelled_summary: "cancelled — added files taken back",
+    cancelled_summary: "cancelled — added files removed",
     parked: "sent for confirmation",
     moved_masters_title: "Moving the FLAC archive",
     today: "today",
@@ -259,34 +259,34 @@ pub static EN: StatusStrings = StatusStrings {
     track: "track",
 
     note_files_wait: "Files are waiting for confirmation",
-    note_not_found: "Couldn't find where to download it — searching again in a week",
-    note_has_copy: "A copy from YouTube is here — looking for better quality once a week",
+    note_not_found: "No download found — searching again in a week",
+    note_has_copy: "YouTube copy saved — checking weekly for better quality",
     note_searching: "Searching…",
-    note_sources_silent: "The sources did not answer — trying again in an hour",
+    note_sources_silent: "Sources did not respond — trying again in an hour",
     note_found_better: "Found better quality — confirm the replacement",
     note_not_sure: "Not sure this is it — pick one",
     note_torrent: "Torrent: {}",
-    note_own_torrent: "Own torrent",
-    note_own_file: "Own file",
+    note_own_torrent: "Your torrent",
+    note_own_file: "Your file",
     note_saving_youtube: "Saving from YouTube…",
     note_save_failed: "Could not save from YouTube",
     note_nothing_better: "Nothing better yet",
     note_kept_file: "Kept the previous file",
     note_kept_files: "Kept the previous files",
     note_files_back: "Previous files restored",
-    card_skip: "Not it — search later",
+    card_skip: "Not a match — search later",
     card_accept: "Download",
     card_question_track: "Which of these is the track?",
     card_question_album: "Which of these is the album?",
-    finds_only: "Finds but does not download",
-    site_check: "Blocked by a bot check — cannot get in",
-    no_answer: "Not answering",
-    sources_gave_nothing: "No source gave it",
+    finds_only: "Finds matches but cannot download",
+    site_check: "Blocked by the site's verification check",
+    no_answer: "Not responding",
+    sources_gave_nothing: "No source could provide a download",
     torrent_offer: "torrent",
     what_track: "this track",
     what_album: "this album",
     what_rest: "the rest",
-    next_doubtful: "other options wait in Confirm",
+    next_doubtful: "other options are in “Confirm”",
 
     better_quality: "better quality",
     lossless: "lossless",
@@ -295,13 +295,13 @@ pub static EN: StatusStrings = StatusStrings {
     better_track: "Better quality · track",
     replace_album_question: "Replace the album's files with these?",
     replace_track_question: "Replace the track's file with this?",
-    replace_tracks_question: "Replace the files of these tracks?",
+    replace_tracks_question: "Replace these tracks' files?",
     keep_as_is: "Keep as is",
     replace: "Replace",
     replaced_better: "Replaced with better quality",
-    maybe_lossy: ", possibly from lossy",
+    maybe_lossy: ", possibly from a lossy source",
     maybe_from: ", possibly from ",
-    from_lossy: " from lossy",
+    from_lossy: " from a lossy source",
     made_from: " from ",
 
     seeders: PluralForms { one: "seed", few: "seeds", many: "seeds" },
@@ -454,7 +454,7 @@ pub fn fmt_duplicates_in(loc: Locale, n: usize) -> String {
 pub fn fmt_left_out_in(loc: Locale, n: usize) -> String {
     match loc {
         Locale::Ru => format!("не из этого альбома {n}"),
-        Locale::En => format!("not of this album {n}"),
+        Locale::En => format!("not from this album {n}"),
     }
 }
 
@@ -486,11 +486,11 @@ pub fn fmt_failed_words_in(loc: Locale, failed: usize, wrong: &[String]) -> Opti
         },
         (false, 0) => match loc {
             Locale::Ru => format!("В файле другая песня: {titles}"),
-            Locale::En => format!("Another song is in the file: {titles}"),
+            Locale::En => format!("Wrong song in file: {titles}"),
         },
         (false, n) => match loc {
             Locale::Ru => format!("В файле другая песня: {titles} · не удалось ещё: {n}"),
-            Locale::En => format!("Another song is in the file: {titles} · {n} failed as well"),
+            Locale::En => format!("Wrong song in file: {titles} · {n} more failed"),
         },
     })
 }
@@ -544,7 +544,7 @@ pub fn fmt_search_again_in(loc: Locale, at: &str) -> String {
 pub fn fmt_search_again_days_in(loc: Locale, days: u64) -> String {
     match loc {
         Locale::Ru => format!("поищу снова через {days} дн."),
-        Locale::En => format!("searching again in {days} d."),
+        Locale::En => format!("searching again in {days} d"),
     }
 }
 
@@ -626,8 +626,8 @@ pub fn fmt_blocked_in(loc: Locale, hm: Option<&str>) -> String {
     match (loc, hm) {
         (Locale::Ru, Some(hm)) => format!("Не пускает — попробую в {hm}"),
         (Locale::Ru, None) => "Не пускает — попробую позже".to_owned(),
-        (Locale::En, Some(hm)) => format!("Not letting us in — trying again at {hm}"),
-        (Locale::En, None) => "Not letting us in — trying again later".to_owned(),
+        (Locale::En, Some(hm)) => format!("Access denied — trying again at {hm}"),
+        (Locale::En, None) => "Access denied — trying again later".to_owned(),
     }
 }
 
@@ -635,7 +635,7 @@ pub fn fmt_blocked_in(loc: Locale, hm: Option<&str>) -> String {
 pub fn fmt_day_limit_in(loc: Locale, hm: &str) -> String {
     match loc {
         Locale::Ru => format!("Лимит на сегодня — попробую в {hm}"),
-        Locale::En => format!("Today's limit is used up — trying again at {hm}"),
+        Locale::En => format!("Daily limit reached — trying again at {hm}"),
     }
 }
 
@@ -644,8 +644,8 @@ pub fn fmt_asks_to_wait_in(loc: Locale, hm: Option<&str>) -> String {
     match (loc, hm) {
         (Locale::Ru, Some(hm)) => format!("Просит подождать — попробую в {hm}"),
         (Locale::Ru, None) => "Просит подождать — попробую позже".to_owned(),
-        (Locale::En, Some(hm)) => format!("Asks to wait — trying again at {hm}"),
-        (Locale::En, None) => "Asks to wait — trying again later".to_owned(),
+        (Locale::En, Some(hm)) => format!("Please wait — trying again at {hm}"),
+        (Locale::En, None) => "Please wait — trying again later".to_owned(),
     }
 }
 
@@ -654,8 +654,8 @@ pub fn fmt_answers_with_in(loc: Locale, status: u16, hm: Option<&str>) -> String
     match (loc, hm) {
         (Locale::Ru, Some(hm)) => format!("Отвечает ошибкой {status} — попробую в {hm}"),
         (Locale::Ru, None) => format!("Отвечает ошибкой {status}"),
-        (Locale::En, Some(hm)) => format!("Answers with error {status} — trying again at {hm}"),
-        (Locale::En, None) => format!("Answers with error {status}"),
+        (Locale::En, Some(hm)) => format!("Returned error {status} — trying again at {hm}"),
+        (Locale::En, None) => format!("Returned error {status}"),
     }
 }
 
@@ -663,7 +663,7 @@ pub fn fmt_answers_with_in(loc: Locale, status: u16, hm: Option<&str>) -> String
 pub fn fmt_source_limit_today_in(loc: Locale, name: &str) -> String {
     match loc {
         Locale::Ru => format!("у {name} лимит на сегодня"),
-        Locale::En => format!("{name} has used up today's limit"),
+        Locale::En => format!("{name} has reached its daily limit"),
     }
 }
 
@@ -672,8 +672,8 @@ pub fn fmt_source_asks_to_wait_in(loc: Locale, name: &str, hm: Option<&str>) -> 
     match (loc, hm) {
         (Locale::Ru, Some(hm)) => format!("{name} просит подождать до {hm}"),
         (Locale::Ru, None) => format!("{name} просит подождать"),
-        (Locale::En, Some(hm)) => format!("{name} asks to wait until {hm}"),
-        (Locale::En, None) => format!("{name} asks to wait"),
+        (Locale::En, Some(hm)) => format!("{name} is asking you to wait until {hm}"),
+        (Locale::En, None) => format!("{name} is asking you to wait"),
     }
 }
 
@@ -689,7 +689,7 @@ pub fn fmt_source_check_in(loc: Locale, name: &str) -> String {
 pub fn fmt_source_blocked_in(loc: Locale, name: &str) -> String {
     match loc {
         Locale::Ru => format!("{name} не пускает"),
-        Locale::En => format!("{name} is not letting us in"),
+        Locale::En => format!("{name} denied access"),
     }
 }
 
@@ -697,7 +697,7 @@ pub fn fmt_source_blocked_in(loc: Locale, name: &str) -> String {
 pub fn fmt_source_finds_only_in(loc: Locale, name: &str) -> String {
     match loc {
         Locale::Ru => format!("{name} находит, но не скачивает"),
-        Locale::En => format!("{name} finds but does not download"),
+        Locale::En => format!("{name} finds matches but cannot download"),
     }
 }
 
@@ -705,7 +705,7 @@ pub fn fmt_source_finds_only_in(loc: Locale, name: &str) -> String {
 pub fn fmt_source_gives_no_in(loc: Locale, name: &str, what: &str) -> String {
     match loc {
         Locale::Ru => format!("{name} сейчас не отдаёт {what}"),
-        Locale::En => format!("{name} cannot give {what} right now"),
+        Locale::En => format!("{name} cannot provide {what} right now"),
     }
 }
 
@@ -721,7 +721,7 @@ pub fn fmt_source_server_down_in(loc: Locale, name: &str) -> String {
 pub fn fmt_source_no_download_in(loc: Locale, name: &str) -> String {
     match loc {
         Locale::Ru => format!("{name} не дал скачать"),
-        Locale::En => format!("{name} did not give it"),
+        Locale::En => format!("{name} could not provide a download"),
     }
 }
 
@@ -783,14 +783,14 @@ pub fn fmt_wrong_audio_in(loc: Locale, from: Option<&str>, sounds_like: Option<&
     let song = sounds_like.map(|s| format!(" — {}", quoted_in(loc, s))).unwrap_or_default();
     let tail = match (looks, loc) {
         (true, Locale::Ru) => " · ищу дальше",
-        (true, Locale::En) => " · searching on",
+        (true, Locale::En) => " · still searching",
         (false, _) => "",
     };
     match (loc, from) {
         (Locale::Ru, Some(f)) => format!("В файле от {f} другая песня{song}{tail}"),
         (Locale::Ru, None) => format!("В файле другая песня{song}{tail}"),
-        (Locale::En, Some(f)) => format!("The file from {f} holds another song{song}{tail}"),
-        (Locale::En, None) => format!("The file holds another song{song}{tail}"),
+        (Locale::En, Some(f)) => format!("Wrong song in the file from {f}{song}{tail}"),
+        (Locale::En, None) => format!("Wrong song in file{song}{tail}"),
     }
 }
 
@@ -906,7 +906,7 @@ pub fn fmt_downloaded_size_in(loc: Locale, size: &str, importing: bool) -> Strin
 pub fn fmt_seeding_cleanup_in(loc: Locale, days: u64) -> String {
     match loc {
         Locale::Ru => format!("чистка через {days} дн."),
-        Locale::En => format!("cleanup in {days} d."),
+        Locale::En => format!("cleanup in {days} d"),
     }
 }
 
@@ -982,7 +982,7 @@ pub fn fmt_upgrade_state_in(loc: Locale, have: Option<&str>, state: UpgradeState
 pub fn fmt_nothing_better_in(loc: Locale) -> String {
     match loc {
         Locale::Ru => "Скачанное не лучше прежних файлов — оставил их".to_owned(),
-        Locale::En => "What came is no better than the files here — kept them".to_owned(),
+        Locale::En => "Downloaded files are no better — kept the previous files".to_owned(),
     }
 }
 
@@ -1007,7 +1007,7 @@ pub fn fmt_better_import_title_in(loc: Locale, title: &str) -> String {
 pub fn fmt_doubtful_pick_in(loc: Locale, tab: &str) -> String {
     match loc {
         Locale::Ru => format!("есть варианты под вопросом — выбери в «{tab}»"),
-        Locale::En => format!("some options are doubtful — pick one in {tab}"),
+        Locale::En => format!("some matches need review — choose one in {tab}"),
     }
 }
 
@@ -1058,11 +1058,11 @@ pub fn fmt_upgrade_job_words_in(
             },
             (0, n, _) => match loc {
                 Locale::Ru => format!("скачанное не лучше прежнего ({n}) — оставил прежние файлы"),
-                Locale::En => format!("what came is no better ({n}) — kept the previous files"),
+                Locale::En => format!("downloads are no better ({n}) — kept the previous files"),
             },
             (_, n, _) => match loc {
                 Locale::Ru => format!("не лучше прежних {n}"),
-                Locale::En => format!("{n} no better than the previous"),
+                Locale::En => format!("{n} no better than the previous files"),
             },
         });
     }
@@ -1070,7 +1070,7 @@ pub fn fmt_upgrade_job_words_in(
         parts.push(if imported == 0 && duplicates == 0 {
             match loc {
                 Locale::Ru => "скачанное не из этого альбома — ничего не добавил".to_owned(),
-                Locale::En => "what came is not of this album — nothing added".to_owned(),
+                Locale::En => "downloads are not from this album — nothing added".to_owned(),
             }
         } else {
             fmt_left_out_in(loc, left_out)
@@ -1082,7 +1082,7 @@ pub fn fmt_upgrade_job_words_in(
     if parts.is_empty() {
         match loc {
             Locale::Ru => "ничего не пришло".to_owned(),
-            Locale::En => "nothing came".to_owned(),
+            Locale::En => "nothing downloaded".to_owned(),
         }
     } else {
         parts.join(" · ")
@@ -1373,7 +1373,7 @@ mod tests {
             fmt_wrong_audio_in(Locale::Ru, Some("Soulseek"), Some("Song"), true),
             "В файле от Soulseek другая песня — «Song» · ищу дальше"
         );
-        assert_eq!(fmt_wrong_audio_in(Locale::En, None, None, false), "The file holds another song");
+        assert_eq!(fmt_wrong_audio_in(Locale::En, None, None, false), "Wrong song in file");
         assert_eq!(fmt_downloaded_of_in(Locale::Ru, 3, 10, "why"), "Скачано 3 из 10 · why");
         assert_eq!(fmt_search_again_week_in(Locale::Ru), "поищу снова через неделю");
         assert_eq!(fmt_search_again_week_in(Locale::En), "searching again in a week");

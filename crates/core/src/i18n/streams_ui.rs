@@ -121,7 +121,7 @@ pub static EN: StreamsUiStrings = StreamsUiStrings {
     video: "video",
     unavailable: "unavailable",
     yours: "on disk",
-    ban_artist: "Don't recommend the artist",
+    ban_artist: "Don't recommend artist",
     download_album: "Download album",
     album_radio: "Album radio",
     to_playlist: "Add to playlist…",
@@ -132,38 +132,38 @@ pub static EN: StreamsUiStrings = StreamsUiStrings {
     artist_radio: "Artist radio",
     playlist_radio: "Playlist radio",
     to_library: "Add to library",
-    in_library: "In library",
+    in_library: "In your library",
     releases: PluralForms { one: "release", few: "releases", many: "releases" },
-    overline_album: "ALBUM",
-    overline_single: "SINGLE",
-    overline_compilation: "COMPILATION",
-    overline_playlist: "PLAYLIST",
-    overline_artist: "ARTIST",
+    overline_album: "Album",
+    overline_single: "Single",
+    overline_compilation: "Compilation",
+    overline_playlist: "Playlist",
+    overline_artist: "Artist",
     failed_open: "Couldn't open",
     downloaded: "Downloaded",
     downloading: "Downloading",
     not_found: "Not found",
     waits_torrents: "Waiting for torrents",
     queued: "Queued",
-    album_to_wishlist: "The whole album goes to Wishlist (no like)",
+    album_to_wishlist: "Add full album to Wishlist without liking",
     open_wishlist: "Open Wishlist",
-    followed_tip: "The playlist is in your library and follows the service — open it",
-    follow_tip: "Add the playlist to your library: it will follow the service",
+    followed_tip: "In your library and synced with the service. Select to open.",
+    follow_tip: "Add to your library and keep in sync with the service.",
     playlist_empty: "Playlist is empty",
     radio: "Radio",
     subscribe: "Follow",
     subscribed: "Following",
     newest_release: "Newest release",
-    artist_radio_tip: "Their tracks and songs like them — the queue grows on its own",
+    artist_radio_tip: "Their tracks and similar music — the queue keeps growing.",
     albums: "Albums",
     album: "Album",
-    singles: "Singles & EPs",
+    singles: "Singles and EPs",
     no_releases: "No releases",
     listening_now: "Listening now",
-    now_playing: "Playing now",
+    now_playing: "Now playing",
     open_world: "Open world",
-    hide_world: "Remove from the row",
-    hide_card: "Hide the card",
+    hide_world: "Remove from row",
+    hide_card: "Hide card",
     prev_worlds: "Previous worlds",
     next_worlds: "Next worlds",
     mixes: "Mixes",
@@ -204,7 +204,7 @@ pub fn have_tracks_in(loc: Locale, n: u64) -> String {
 pub fn in_library_in(loc: Locale, title: &str) -> String {
     match loc {
         Locale::Ru => format!("В библиотеке: {title}"),
-        Locale::En => format!("In library: {title}"),
+        Locale::En => format!("In your library: {title}"),
     }
 }
 
@@ -212,7 +212,7 @@ pub fn in_library_in(loc: Locale, title: &str) -> String {
 pub fn in_library_of_in(loc: Locale, title: &str, local: u32, total: u32) -> String {
     match loc {
         Locale::Ru => format!("В библиотеке: {title} · {local} из {total}"),
-        Locale::En => format!("In library: {title} · {local} of {total}"),
+        Locale::En => format!("In your library: {title} · {local} of {total}"),
     }
 }
 
@@ -220,10 +220,10 @@ pub fn in_library_of_in(loc: Locale, title: &str, local: u32, total: u32) -> Str
 pub fn heard_line_in(loc: Locale, heard: u32, total: u32) -> String {
     match (loc, heard) {
         (Locale::Ru, 0) => format!("Ты ещё не слышал ни одного из {total}"),
-        (Locale::En, 0) => format!("You haven't heard any of {total} yet"),
+        (Locale::En, 0) => format!("Not heard yet · {total} total"),
         _ if heard >= total => match loc {
             Locale::Ru => format!("Ты слышал все {total}"),
-            Locale::En => format!("You've heard all {total}"),
+            Locale::En => format!("All heard · {total}"),
         },
         _ => match loc {
             Locale::Ru => format!("Ты слышал {heard} из {total}"),
@@ -244,7 +244,7 @@ pub fn album_tail_in(loc: Locale, heard: u32, total: u32) -> String {
         (Locale::En, 0) => "not heard".to_owned(),
         _ if heard >= total => match loc {
             Locale::Ru => format!("слышал все {total}"),
-            Locale::En => format!("heard all {total}"),
+            Locale::En => format!("all heard · {total}"),
         },
         _ => match loc {
             Locale::Ru => format!("слышал {heard} из {total}"),
@@ -268,12 +268,12 @@ mod tests {
         assert_eq!(heard_line_in(Locale::Ru, 0, 160), "Ты ещё не слышал ни одного из 160");
         assert_eq!(heard_line_in(Locale::Ru, 40, 40), "Ты слышал все 40");
         assert_eq!(heard_line_in(Locale::En, 36, 134), "You've heard 36 of 134");
-        assert_eq!(heard_line_in(Locale::En, 0, 160), "You haven't heard any of 160 yet");
-        assert_eq!(heard_line_in(Locale::En, 1, 1), "You've heard all 1");
+        assert_eq!(heard_line_in(Locale::En, 0, 160), "Not heard yet · 160 total");
+        assert_eq!(heard_line_in(Locale::En, 1, 1), "All heard · 1");
         assert_eq!(album_tail_in(Locale::Ru, 5, 52), "слышал 5 из 52");
         assert_eq!(album_tail_in(Locale::Ru, 0, 30), "не слушал");
         assert_eq!(album_tail_in(Locale::Ru, 20, 20), "слышал все 20");
-        assert_eq!(album_tail_in(Locale::En, 20, 20), "heard all 20");
+        assert_eq!(album_tail_in(Locale::En, 20, 20), "all heard · 20");
     }
 
     #[test]
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(fmt_yours_in(Locale::Ru, "Blueprint"), "у тебя в «Blueprint»");
         assert_eq!(fmt_yours_in(Locale::En, "Blueprint"), "on disk in “Blueprint”");
         assert_eq!(in_library_of_in(Locale::Ru, "Ugly Is Beautiful", 13, 14), "В библиотеке: Ugly Is Beautiful · 13 из 14");
-        assert_eq!(in_library_in(Locale::En, "Ugly Is Beautiful"), "In library: Ugly Is Beautiful");
+        assert_eq!(in_library_in(Locale::En, "Ugly Is Beautiful"), "In your library: Ugly Is Beautiful");
         assert_eq!(releases_count_in(Locale::Ru, 5), "5 релизов");
         assert_eq!(releases_count_in(Locale::Ru, 21), "21 релиз");
         assert_eq!(releases_count_in(Locale::En, 2), "2 releases");

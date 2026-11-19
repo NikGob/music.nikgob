@@ -44,23 +44,23 @@ pub static RU: FirstRunStrings = FirstRunStrings {
 };
 
 pub static EN: FirstRunStrings = FirstRunStrings {
-    step_sources: "Where should music come from?",
+    step_sources: "Where's your music?",
     step_keep: "Keep music on this computer?",
     step_connect: "Connect",
-    step_lyrics: "How should lyrics be shown?",
+    step_lyrics: "How should lyrics look?",
     step_more: "A few more things",
     next: "Next",
     keep_yes: "Yes, download",
     keep_no: "No, just listen",
-    source_folder: "Folder on disk",
+    source_folder: "Local folder",
     source_local_only: "Local only",
     sc_step1: "Sign in to soundcloud.com in a browser.",
     sc_step2: "Open developer tools → Application → Cookies and copy the oauth_token value.",
     other_folder: "Choose another…",
-    pick_folder: "Choose folder…",
+    pick_folder: "Choose a folder…",
     music_folder_title: "Music folder",
     history_btn: "Import listening history",
-    archive_btn: "Archive .zip…",
+    archive_btn: "ZIP archive…",
 };
 
 locale_table! {
@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn step_titles_and_choices_cover_both_locales() {
         assert_eq!(first_run_in(Locale::Ru).step_sources, "Откуда брать музыку?");
-        assert_eq!(first_run_in(Locale::En).step_sources, "Where should music come from?");
+        assert_eq!(first_run_in(Locale::En).step_sources, "Where's your music?");
         assert_eq!(first_run_in(Locale::Ru).step_connect, "Подключи");
         assert_eq!(first_run_in(Locale::En).step_connect, "Connect");
         assert_eq!(first_run_in(Locale::Ru).keep_no, "Нет, только слушать");

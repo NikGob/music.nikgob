@@ -201,55 +201,55 @@ pub static EN: MeshStrings = MeshStrings {
     forget_device: "Forget device",
     name_label: "Name",
     favorites: "Favorites",
-    liked: "Liked",
+    liked: "Liked Songs",
     masters: PluralForms { one: "master", few: "masters", many: "masters" },
     close_esc: "Close (Esc)",
     links_off: "Device links are off",
     mesh_not_running: "Mesh is not running",
-    mesh_no_answer: "Mesh did not answer",
+    mesh_no_answer: "Mesh did not respond",
     mesh_off: "Mesh is off",
     api_off: "The API is off",
     turn_on: "Enable",
-    local_only: "Access is open on this computer only",
-    enable_home_network: "Enable the home network",
+    local_only: "Access is limited to this computer",
+    enable_home_network: "Enable home network",
     only_holder_adds: "Only the main device can add devices",
     only_holder_pairs: "Only the main device can pair",
     platform_linux: "Linux and Raspberry Pi",
     no_lan_addr: "This computer has no address on the home network",
     wrong_code: "Wrong code",
-    invite_gone: "The invite has expired or was already used",
-    invite_cancelled: "The invite is cancelled: too many wrong tries",
+    invite_gone: "The invitation has expired or was already used",
+    invite_cancelled: "Invitation cancelled: too many incorrect attempts",
     device_busy: "The device is busy with another pairing",
     device_paired: "The device is already paired",
     ring_full: "No room for another device in the ring",
-    bad_answer: "The device answered oddly",
-    no_link: "No link to the device",
+    bad_answer: "Unexpected response from the device",
+    no_link: "Cannot connect to the device",
     pair_save_failed: "Could not save the pairing",
-    not_a_ticket: "Not an invite",
-    newer_invite: "An invite from a newer version",
-    invite_expired: "The invite has expired",
-    invite_not_made: "Could not create the invite",
+    not_a_ticket: "Not an invitation",
+    newer_invite: "Invitation from a newer version",
+    invite_expired: "The invitation has expired",
+    invite_not_made: "Could not create the invitation",
     ring_not_made: "Could not create the ring",
     no_such_device: "No such device",
     code_six_digits: "The code is six digits",
     device_gone: "The device left the network",
     already_paired: "This device is already paired",
     forget_no_device: "no such device",
-    forget_only_holder: "only the main device forgets devices",
-    forget_not_linked: "this device is linked to none",
-    forget_ring_disk: "the ring could not be written to disk",
-    player_silent: "The player did not answer: is it running, with the mesh in it turned on?",
-    sync_blocked: "Sync is stopped: the database stamp was not written",
-    sync_refused: "The device does not accept sync",
-    sync_clock_ahead: "The device's clock runs ahead",
+    forget_only_holder: "only the main device can forget devices",
+    forget_not_linked: "this device is not linked to any others",
+    forget_ring_disk: "could not save the ring to disk",
+    player_silent: "The player did not respond. Is it running with Mesh enabled?",
+    sync_blocked: "Sync stopped: the database sync marker was not saved",
+    sync_refused: "The device is not accepting sync",
+    sync_clock_ahead: "The device's clock is ahead",
     sync_failed: "Sync failed",
     ask_not_in_ring: "the device is not in the ring",
     ask_unreachable: "the device cannot be reached",
-    ask_request_failed: "the request did not go through",
-    ask_no_answer: "the device did not answer",
+    ask_request_failed: "the request failed",
+    ask_no_answer: "the device did not respond",
     ask_api_down: "this device's API is not running",
-    ask_player_silent: "the player did not answer",
-    ask_busy_now: "too much going on at once",
+    ask_player_silent: "the player did not respond",
+    ask_busy_now: "the device is busy",
 };
 
 locale_table! {
@@ -310,7 +310,7 @@ pub fn fmt_forget_text_in(loc: Locale, originals: Option<u64>) -> String {
         }
         (Locale::En, Some(n)) => {
             let what = plural_forms(loc, n, &mesh_in(loc).masters);
-            format!("Only verified copies live on this device alone: {n} {what} FLAC.")
+            format!("This device holds the only verified copies: {n} FLAC {what}.")
         }
         (Locale::Ru, None) => "Не удалось проверить, есть ли на этом устройстве единственные копии оригиналов FLAC.".to_owned(),
         (Locale::En, None) => "Could not check whether this device holds the only copies of the master FLAC files.".to_owned(),
@@ -371,7 +371,7 @@ mod tests {
         );
         assert_eq!(
             fmt_forget_text_in(Locale::En, Some(2)),
-            "Only verified copies live on this device alone: 2 masters FLAC."
+            "This device holds the only verified copies: 2 FLAC masters."
         );
         assert!(fmt_forget_text_in(Locale::Ru, None).starts_with("Не удалось проверить"));
         assert!(fmt_forget_text_in(Locale::En, None).starts_with("Could not check"));

@@ -105,7 +105,7 @@ pub static EN: MobileStrings = MobileStrings {
     network_map: "Network map",
     nothing_found: "Nothing found",
     save_queue_title: "Save as playlist",
-    new_playlist: "New playlist",
+    new_playlist: "New playlist…",
     name_placeholder: "Name",
     enter_name: "Enter a name",
     create: "Create",
@@ -123,7 +123,7 @@ pub static EN: MobileStrings = MobileStrings {
     sort_by_duration: "By duration",
     section_top_result: "Top result",
     all_settings: "All settings",
-    group_look: "Look",
+    group_look: "Appearance",
     theme_system: "System",
     theme_dark: "Dark",
     theme_light: "Light",
@@ -136,10 +136,10 @@ pub static EN: MobileStrings = MobileStrings {
     connect: "Connect",
     tile_play_next: "Play next",
     tile_to_queue: "Add to queue",
-    tile_to_playlist: "Add to playlist",
+    tile_to_playlist: "Add to playlist…",
     artist_radio: "Artist radio",
     popular_tracks: "Popular tracks",
-    singles_eps: "Singles & EPs",
+    singles_eps: "Singles and EPs",
 };
 
 locale_table! {

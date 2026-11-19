@@ -184,32 +184,32 @@ pub static EN: DownloadsStrings = DownloadsStrings {
     history_empty: "History is empty",
     all_confirmed: "Everything is confirmed",
     accept_recommended: "Accept all recommended",
-    recommended: "RECOMMENDED",
+    recommended: "Recommended",
     select_all: "Select all",
     cancel_job: "Cancel",
     pause_job: "Pause",
 
     torrents: "Torrents",
     seeding_off: "Seeding is off",
-    enable: "turn on",
-    given_by_torrents: "Given by torrents",
-    no_cap: "no cap",
+    enable: "Turn on",
+    given_by_torrents: "Uploaded via torrents",
+    no_cap: "no limit",
     clean_now: "Clean up now",
-    seed_until_ratio: "Seed until ratio",
-    seed_for: "Seed for",
-    cap_all: "Cap for all seeding",
+    seed_until_ratio: "Seed to ratio",
+    seed_for: "Seeding duration",
+    cap_all: "Total seeding limit",
     upload_speed: "Upload speed",
     upload: "Upload",
     incoming: "Download",
-    given_today: "Given today",
-    given_total: "Given in all",
-    seeding_disk: "Seeding takes",
+    given_today: "Uploaded today",
+    given_total: "Total uploaded",
+    seeding_disk: "Seeding uses",
     uploading_now: "Uploading now",
     uploaded_recently: "Uploaded recently",
     share_library: "Share the library",
     uploads_at_once: "Uploads at once",
     not_connected: "Soulseek is not connected",
-    set_up: "set up",
+    set_up: "Set up",
     other_computer: "nikgob-slsk on another computer",
     upload_queued: "queued",
     ratio: "ratio",
@@ -231,8 +231,8 @@ pub static EN: DownloadsStrings = DownloadsStrings {
     by_artist: "By artist",
     download_all: "Download all",
     search_again: "Search again",
-    loose_tracks: "Loose tracks",
-    dismiss_group: "Download nothing from here",
+    loose_tracks: "Individual tracks",
+    dismiss_group: "Don't download this group",
     whole_album: "whole album",
     album: "album",
     not_found: "not found",
@@ -240,19 +240,19 @@ pub static EN: DownloadsStrings = DownloadsStrings {
     check: "Check",
     restore: "Restore",
     save_from_youtube: "Save from YouTube",
-    own_torrent: "Own .torrent…",
+    own_torrent: "Choose .torrent…",
     magnet_link: "Magnet link…",
-    own_file: "Own file…",
+    own_file: "Choose file…",
     album_folder: "Album folder…",
     dont_download: "Don't download",
     other_ways: "Other ways",
     download_album: "Download album",
-    torrent_dialog_title: "Own .torrent for this track",
+    torrent_dialog_title: "Choose a .torrent for this track",
     torrent_filter: "Torrent",
     track_file_dialog_title: "This track's file",
     music_filter: "Music",
     album_folder_dialog_title: "Album folder",
-    save_from_youtube_hint: "Audio as is (Opus ~160 kbps, lower quality); what is found later replaces it",
+    save_from_youtube_hint: "Original audio (Opus ~160 kbps, lower quality); replaced when a better copy is found.",
     play_context: "Wishlist",
 };
 
@@ -286,7 +286,7 @@ pub fn fmt_of_cap_in(loc: Locale, gb: u32) -> String {
     }
     match loc {
         Locale::Ru => format!("из лимита {gb} ГБ"),
-        Locale::En => format!("of the {gb} GB cap"),
+        Locale::En => format!("of the {gb} GB limit"),
     }
 }
 
@@ -347,7 +347,7 @@ pub fn fmt_seed_line_in(
     parts.push(format!("{peers} {word}"));
     let given_word = match loc {
         Locale::Ru => "отдано",
-        Locale::En => "given",
+        Locale::En => "uploaded",
     };
     let target = ratio_target.map(|t| match loc {
         Locale::Ru => format!(" из {t}"),
@@ -439,7 +439,7 @@ mod tests {
         assert_eq!(fmt_accept_recommended_in(Locale::En, 4), "Accept all recommended (4)");
         assert_eq!(fmt_of_cap_in(Locale::Ru, 20), "из лимита 20 ГБ");
         assert_eq!(fmt_of_cap_in(Locale::Ru, 0), "без лимита");
-        assert_eq!(fmt_cap_in(Locale::En, 0), "no cap");
+        assert_eq!(fmt_cap_in(Locale::En, 0), "no limit");
         assert_eq!(fmt_days_after_download_in(Locale::Ru, 3), "3 дн. после скачивания");
         assert_eq!(fmt_days_after_download_in(Locale::En, 3), "3 days after downloading");
         assert_eq!(fmt_days_after_download_in(Locale::En, 1), "1 day after downloading");
@@ -456,7 +456,7 @@ mod tests {
         let ru = fmt_seed_line_in(Locale::Ru, None, 0, "512 МБ", 0.0, None, "0 Б", None);
         assert_eq!(ru, "0 пиров · отдано 512 МБ · ratio 0.00 · 0 Б");
         let en = fmt_seed_line_in(Locale::En, Some("100 KB/s"), 5, "512 MB", 1.5, Some("2.0"), "1 GB", None);
-        assert_eq!(en, "uploading 100 KB/s · 5 peers · given 512 MB · ratio 1.50 of 2.0 · 1 GB");
+        assert_eq!(en, "uploading 100 KB/s · 5 peers · uploaded 512 MB · ratio 1.50 of 2.0 · 1 GB");
     }
 
     #[test]
