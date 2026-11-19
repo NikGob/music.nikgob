@@ -107,7 +107,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nikgob_core::i18n::{BackgroundVariant, Locale, day_part_title_in};
+use nikgob_core::i18n::home_recs::{
+    BlendWord, blend_adjectives_in, blend_songs_noun_in, blend_word_in, home_recs_in, join_adjectives_in,
+};
+use nikgob_core::i18n::{BackgroundVariant, Locale, MixTitle, day_part_title_in};
 use nikgob_core::model::{ArtistId, EventContext, TrackId};
 use serde::{Deserialize, Serialize};
 
@@ -2191,10 +2194,7 @@ impl<'a> Builder<'a> {
         };
         match key {
             MixKey::Profile(k) => name(k).unwrap_or_default(),
-            MixKey::Everything => match loc {
-                Locale::Ru => "Всё вперемешку".into(),
-                Locale::En => "All Mixed".into(),
-            },
+            MixKey::Everything => MixTitle::Everything.title_in(loc).into_owned(),
             MixKey::Calm | MixKey::Lively => {
                 side_title_in(key == MixKey::Calm, tracks.iter().map(|&i| LaneKey::of(self.model.song_type_at(i))), loc)
             }
@@ -2214,15 +2214,9 @@ impl<'a> Builder<'a> {
             MixKey::Kind(c) => lane_kind(lane_of_code(c)).title_in(loc),
             // «Любимые» is the playlist of every liked song; this is a mix
             // of them (the row does not show it).
-            MixKey::Liked => match loc {
-                Locale::Ru => "Микс любимых".into(),
-                Locale::En => "Liked Mix".into(),
-            },
+            MixKey::Liked => MixTitle::Liked.title_in(loc).into_owned(),
             MixKey::Part(p) => part_title_in(p, loc).into(),
-            MixKey::Daily(0) => match loc {
-                Locale::Ru => "Микс дня".into(),
-                Locale::En => "Daily Mix".into(),
-            },
+            MixKey::Daily(0) => home_recs_in(loc).daily_mix.into(),
             MixKey::Daily(_) => self.cluster_title_in(tracks, loc),
             MixKey::Genre(f) => crate::mix_names::family_title_in(f, loc).unwrap_or_default().into(),
         }
@@ -2494,22 +2488,7 @@ fn side_lang(lanes: &[LaneKey]) -> Option<Lang> {
 
 /// Joins language adjectives in `loc`.
 fn join_adjectives(adjectives: &[&str], loc: Locale) -> String {
-    match loc {
-        Locale::Ru => {
-            let mut out = adjectives[0].to_owned();
-            for (k, a) in adjectives.iter().enumerate().skip(1) {
-                out.push_str(if k + 1 == adjectives.len() { " и " } else { ", " });
-                out.push_str(&a.to_lowercase());
-            }
-            out
-        }
-        Locale::En => match adjectives {
-            [] => String::new(),
-            [a] => (*a).to_owned(),
-            [a, b] => format!("{a} & {b}"),
-            [init @ .., last] => format!("{} & {last}", init.join(", ")),
-        },
-    }
+    join_adjectives_in(loc, adjectives)
 }
 
 /// A blend's name in `loc`: its profiles' names joined by «+», the songs of
@@ -2535,18 +2514,8 @@ fn blend_title_in(names: Vec<String>, loc: Locale) -> String {
         match kind {
             Some((noun, adjectives)) if !said.contains(&noun.as_str()) => {
                 said.push(noun);
-                let combined = match loc {
-                    Locale::Ru => {
-                        let mut first = adjectives[0].clone();
-                        let rest: Vec<String> = adjectives[1..].iter().map(|a| a.to_lowercase()).collect();
-                        first.push_str(&format!(" и {}", rest.join(" и ")));
-                        first
-                    }
-                    Locale::En => {
-                        let refs: Vec<&str> = adjectives.iter().map(String::as_str).collect();
-                        join_adjectives(&refs, loc)
-                    }
-                };
+                let refs: Vec<&str> = adjectives.iter().map(String::as_str).collect();
+                let combined = blend_adjectives_in(loc, &refs);
                 parts.push(format!("{combined} {noun}"));
             }
             Some(_) => {}
@@ -2579,26 +2548,11 @@ fn blend_short_in(kinds: &[Kind], loc: Locale) -> Vec<String> {
         .iter()
         .filter_map(|k| match k {
             Kind::Sung(l) if lang_adjective_in(*l, loc).is_some() => None,
-            Kind::Instrumental | Kind::InstrumentalSoundtracks => Some(match loc {
-                Locale::Ru => "без слов",
-                Locale::En => "instrumental",
-            }),
-            Kind::Soundtracks => Some(match loc {
-                Locale::Ru => "саундтреки",
-                Locale::En => "soundtracks",
-            }),
-            Kind::Songs | Kind::Sung(_) => Some(match loc {
-                Locale::Ru => "песни",
-                Locale::En => "songs",
-            }),
-            Kind::Calm => Some(match loc {
-                Locale::Ru => "спокойное",
-                Locale::En => "calm",
-            }),
-            Kind::Lively => Some(match loc {
-                Locale::Ru => "бодрое",
-                Locale::En => "upbeat",
-            }),
+            Kind::Instrumental | Kind::InstrumentalSoundtracks => Some(blend_word_in(loc, BlendWord::Wordless)),
+            Kind::Soundtracks => Some(blend_word_in(loc, BlendWord::Soundtracks)),
+            Kind::Songs | Kind::Sung(_) => Some(blend_word_in(loc, BlendWord::Songs)),
+            Kind::Calm => Some(blend_word_in(loc, BlendWord::Calm)),
+            Kind::Lively => Some(blend_word_in(loc, BlendWord::Upbeat)),
         })
         .collect();
     let join = |head: String| -> String {
@@ -2615,10 +2569,7 @@ fn blend_short_in(kinds: &[Kind], loc: Locale) -> Vec<String> {
         out.push(std::iter::once(first).chain(rest.iter().skip(1).map(|r| (*r).to_owned())).collect::<Vec<_>>().join(" + "));
     } else {
         let adj = join_adjectives(&sung, loc);
-        let songs_noun = match loc {
-            Locale::Ru => "песни",
-            Locale::En => "Songs",
-        };
+        let songs_noun = blend_songs_noun_in(loc);
         out.push(join(format!("{adj} {songs_noun}")));
         if !rest.is_empty() {
             out.push(join(adj));

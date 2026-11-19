@@ -24,6 +24,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use nikgob_core::i18n::home_recs::{
+    ScriptKind, TileKicker, fmt_decade_in, fmt_season_in, fmt_similar_to_in, month_name_in,
+};
 use nikgob_core::i18n::{Locale, TileStatic};
 use nikgob_core::model::{ArtistId, EventType, ReleaseId, TrackId, UnixMs};
 use serde::{Deserialize, Serialize};
@@ -164,53 +167,33 @@ impl TileKind {
     /// The quiet label over the tile's title: why the tile is here, never
     /// the title again.
     pub const fn kicker_in(self, loc: Locale) -> &'static str {
-        match loc {
-            Locale::Ru => match self {
-                Self::OnRepeat => "Чаще всего",
-                Self::YearAgo => "Год назад",
-                Self::Season => "Капсула времени",
-                Self::Rediscover => "Давно не играло",
-                Self::FirstLikes => "С самого начала",
-                Self::FreshLikes => "Недавно",
-                Self::Unplayed => "Не играло",
-                Self::DeepCuts => "Твои исполнители",
-                Self::ArtistOfDay => "Исполнитель дня",
-                Self::Comeback => "Давно не слышал",
-                Self::BecauseYouLiked => "Тебе понравилось",
-                Self::Long => "Длинное",
-                Self::Short => "Короткое",
-                Self::SingAlong => "Подпевай",
-                Self::Language => "По языку",
-                Self::Decade => "По годам",
-                Self::Soundtrack => "Саундтрек",
-                Self::Playlist => "Из плейлиста",
-                Self::Unfinished => "Не дослушал",
-                Self::NotDownloaded => "Не скачано",
-                Self::Lottery => "Наугад",
-            },
-            Locale::En => match self {
-                Self::OnRepeat => "Most Played",
-                Self::YearAgo => "A Year Ago",
-                Self::Season => "Time Capsule",
-                Self::Rediscover => "Long Unplayed",
-                Self::FirstLikes => "From the Start",
-                Self::FreshLikes => "Recently",
-                Self::Unplayed => "Never Played",
-                Self::DeepCuts => "Your Artists",
-                Self::ArtistOfDay => "Daily Artist",
-                Self::Comeback => "Long Unheard",
-                Self::BecauseYouLiked => "You Liked",
-                Self::Long => "Extended",
-                Self::Short => "Brief",
-                Self::SingAlong => "Sing Along",
-                Self::Language => "By Language",
-                Self::Decade => "By Decade",
-                Self::Soundtrack => "Soundtrack",
-                Self::Playlist => "From Playlist",
-                Self::Unfinished => "In Progress",
-                Self::NotDownloaded => "Online Only",
-                Self::Lottery => "Random Pick",
-            },
+        self.kicker().title_in(loc)
+    }
+
+    /// The static kicker label of this kind.
+    pub const fn kicker(self) -> TileKicker {
+        match self {
+            Self::OnRepeat => TileKicker::OnRepeat,
+            Self::YearAgo => TileKicker::YearAgo,
+            Self::Season => TileKicker::Season,
+            Self::Rediscover => TileKicker::Rediscover,
+            Self::FirstLikes => TileKicker::FirstLikes,
+            Self::FreshLikes => TileKicker::FreshLikes,
+            Self::Unplayed => TileKicker::Unplayed,
+            Self::DeepCuts => TileKicker::DeepCuts,
+            Self::ArtistOfDay => TileKicker::ArtistOfDay,
+            Self::Comeback => TileKicker::Comeback,
+            Self::BecauseYouLiked => TileKicker::BecauseYouLiked,
+            Self::Long => TileKicker::Long,
+            Self::Short => TileKicker::Short,
+            Self::SingAlong => TileKicker::SingAlong,
+            Self::Language => TileKicker::Language,
+            Self::Decade => TileKicker::Decade,
+            Self::Soundtrack => TileKicker::Soundtrack,
+            Self::Playlist => TileKicker::Playlist,
+            Self::Unfinished => TileKicker::Unfinished,
+            Self::NotDownloaded => TileKicker::NotDownloaded,
+            Self::Lottery => TileKicker::Lottery,
         }
     }
 
@@ -290,11 +273,7 @@ pub fn like_subject(song: &str) -> String {
 /// «Похоже на Underground River» / «Similar to Underground River»: a song's
 /// title without what its brackets add («(Opening Theme)», «[Remastered]»).
 pub fn like_title_in(song: &str, loc: Locale) -> String {
-    let subject = like_subject(song);
-    match loc {
-        Locale::Ru => format!("Похоже на {subject}"),
-        Locale::En => format!("Similar to {subject}"),
-    }
+    fmt_similar_to_in(loc, &like_subject(song))
 }
 
 /// One tile of a day.
@@ -323,14 +302,11 @@ impl TileMix {
 pub fn tile_title_in(kind: TileKind, param: &str, subject: &str, loc: Locale) -> String {
     match kind {
         TileKind::OnRepeat => TileStatic::OnRepeat.title_in(loc).into(),
-        TileKind::YearAgo => match loc {
-            Locale::Ru => "Год назад".into(),
-            Locale::En => "A Year Ago".into(),
-        },
+        TileKind::YearAgo => TileKicker::YearAgo.title_in(loc).into(),
         TileKind::Season => param
             .split_once('-')
             .and_then(|(y, s)| Some((y.parse::<i32>().ok()?, s.parse::<u32>().ok()?)))
-            .map(|season| season_title_in(season, loc))
+            .map(|(year, s)| fmt_season_in(loc, year, s))
             .unwrap_or_else(|| subject.to_owned()),
         TileKind::Rediscover => TileStatic::Rediscover.title_in(loc).into(),
         TileKind::FirstLikes => TileStatic::FirstLikes.title_in(loc).into(),
@@ -364,37 +340,7 @@ pub fn tile_title_in(kind: TileKind, param: &str, subject: &str, loc: Locale) ->
 /// «Октябрь 2025» / «October 2025»: the localized month and year for a local day number.
 pub fn month_year_in(day: i64, loc: Locale) -> String {
     let (year, month, _) = civil(day);
-    let m = month.saturating_sub(1) as usize % 12;
-    let name = match loc {
-        Locale::Ru => [
-            "Январь",
-            "Февраль",
-            "Март",
-            "Апрель",
-            "Май",
-            "Июнь",
-            "Июль",
-            "Август",
-            "Сентябрь",
-            "Октябрь",
-            "Ноябрь",
-            "Декабрь",
-        ][m],
-        Locale::En => [
-            "January",
-            "February",
-            "March",
-            "April",
-            "May",
-            "June",
-            "July",
-            "August",
-            "September",
-            "October",
-            "November",
-            "December",
-        ][m],
-    };
+    let name = month_name_in(loc, month);
     format!("{name} {year}")
 }
 
@@ -467,19 +413,16 @@ impl Script {
     }
 
     const fn title_in(self, loc: Locale) -> &'static str {
-        match loc {
-            Locale::Ru => match self {
-                Self::Japanese => "Японское",
-                Self::Korean => "Корейское",
-                Self::Cyrillic => "По-русски",
-                Self::Latin => "Зарубежное",
-            },
-            Locale::En => match self {
-                Self::Japanese => "Japanese",
-                Self::Korean => "Korean",
-                Self::Cyrillic => "Russian",
-                Self::Latin => "International",
-            },
+        self.kind().title_in(loc)
+    }
+
+    /// The locale-neutral kind whose static title this script's tile uses.
+    const fn kind(self) -> ScriptKind {
+        match self {
+            Self::Japanese => ScriptKind::Japanese,
+            Self::Korean => ScriptKind::Korean,
+            Self::Cyrillic => ScriptKind::Cyrillic,
+            Self::Latin => ScriptKind::Latin,
         }
     }
 }
@@ -514,22 +457,7 @@ pub fn script_of(text: &str) -> Option<Script> {
 
 /// «Из 90-х», «Из 2000-х» / «From the 90s», «From the 2000s».
 fn decade_title_in(decade: i32, loc: Locale) -> String {
-    match loc {
-        Locale::Ru => {
-            if (1900..2000).contains(&decade) {
-                format!("Из {}-х", decade - 1900)
-            } else {
-                format!("Из {decade}-х")
-            }
-        }
-        Locale::En => {
-            if (1910..2000).contains(&decade) {
-                format!("From the {}s", decade - 1900)
-            } else {
-                format!("From the {decade}s")
-            }
-        }
-    }
+    fmt_decade_in(loc, decade)
 }
 
 /// Soundtrack markers in an album title (lower case), longest first.
@@ -623,15 +551,6 @@ pub fn season_of(year: i32, month: u32) -> (i32, u32) {
         6..=8 => (year, 2),
         _ => (year, 3),
     }
-}
-
-fn season_title_in((year, s): (i32, u32), loc: Locale) -> String {
-    let idx = s as usize % 4;
-    let name = match loc {
-        Locale::Ru => ["Зима", "Весна", "Лето", "Осень"][idx],
-        Locale::En => ["Winter", "Spring", "Summer", "Autumn"][idx],
-    };
-    format!("{name} {year}")
 }
 
 /// A recipe's candidates: catalog position and score (higher first).
@@ -1299,6 +1218,10 @@ mod tests {
             Item::Track(id) => id.0.as_u128(),
             Item::Stream(_) => u128::MAX,
         }
+    }
+
+    fn season_title_in(season: (i32, u32), loc: Locale) -> String {
+        fmt_season_in(loc, season.0, season.1)
     }
 
     fn ids(picks: &[Pick]) -> Vec<u128> {

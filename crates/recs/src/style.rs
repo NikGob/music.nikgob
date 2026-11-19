@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use nikgob_core::i18n::home_recs::{StyleTrait, fmt_style_words_in};
 use nikgob_core::i18n::Locale;
 use nikgob_core::model::{ArtistId, ReleaseId};
 
@@ -71,22 +72,21 @@ pub enum StyleWord {
 }
 
 impl StyleWord {
+    /// The locale-neutral trait whose word this style word's shows.
+    const fn trait_of(self) -> StyleTrait {
+        match self {
+            Self::Energetic => StyleTrait::Energetic,
+            Self::Calm => StyleTrait::Calm,
+            Self::Bright => StyleTrait::Bright,
+            Self::Dark => StyleTrait::Dark,
+            Self::Steady => StyleTrait::Steady,
+            Self::Shifting => StyleTrait::Shifting,
+        }
+    }
+
     /// Localized descriptor word for `self` in `loc`.
     pub const fn word_in(self, loc: Locale) -> &'static str {
-        match (loc, self) {
-            (Locale::Ru, Self::Energetic) => "энергичное",
-            (Locale::Ru, Self::Calm) => "спокойное",
-            (Locale::Ru, Self::Bright) => "светлое",
-            (Locale::Ru, Self::Dark) => "мрачное",
-            (Locale::Ru, Self::Steady) => "ровное",
-            (Locale::Ru, Self::Shifting) => "переменчивое",
-            (Locale::En, Self::Energetic) => "energetic",
-            (Locale::En, Self::Calm) => "calm",
-            (Locale::En, Self::Bright) => "bright",
-            (Locale::En, Self::Dark) => "dark",
-            (Locale::En, Self::Steady) => "steady",
-            (Locale::En, Self::Shifting) => "shifting",
-        }
+        self.trait_of().word_in(loc)
     }
 }
 
@@ -114,10 +114,7 @@ pub fn style_words_in(a: Axes, loc: Locale) -> Option<String> {
     match words.as_slice() {
         [] => None,
         [w] => Some(w.word_in(loc).to_owned()),
-        [a, b, ..] => Some(match loc {
-            Locale::Ru => format!("{} и {}", a.word_in(loc), b.word_in(loc)),
-            Locale::En => format!("{} and {}", a.word_in(loc), b.word_in(loc)),
-        }),
+        [a, b, ..] => Some(fmt_style_words_in(loc, a.trait_of(), b.trait_of())),
     }
 }
 
