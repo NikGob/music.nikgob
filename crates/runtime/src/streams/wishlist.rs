@@ -38,6 +38,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nikgob_core::indexer::{Candidate, TorrentPayload};
+use nikgob_core::i18n::status::WishNote;
+use nikgob_core::i18n::{Locale, status_in};
 use nikgob_core::model::{
     ReleaseId, SourceKind, SourceOrigin, TrackId, WishlistId, WishlistItem, WishlistOrigin,
     WishlistScope, WishlistStatus, score,
@@ -66,12 +68,6 @@ pub(crate) const WISH_ID: u64 = 1 << 47;
 const RETRY_AFTER: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Offers shown in "Подтверди".
 const CONFIRM_OPTIONS: usize = 3;
-/// The note of an item whose files wait in «Подтверди».
-pub(crate) const FILES_WAIT: &str = "Файлы ждут подтверждения";
-/// The note of an item nothing was found for.
-const NOT_FOUND: &str = "Не нашёл, где скачать — поищу снова через неделю";
-/// The note of an item that has a copy saved from YouTube.
-const HAS_COPY: &str = "Есть копия с YouTube — раз в неделю ищу качество лучше";
 /// A source's search at most (the indexer's variants take a minute each).
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(300);
 /// A download of a source other than torrents at most.
@@ -252,14 +248,19 @@ pub(crate) fn offer_key(offer: &Offer) -> String {
     format!("{}:{}", offer.source.as_str(), offer.id)
 }
 
-/// The line of an item a file of which held another song: from where, what
-/// it sounds like, and «ищу дальше» only when the item does look again.
-fn wrong_audio_words(from: Option<&str>, sounds_like: Option<&str>, looks: bool) -> String {
-    let song = sounds_like.map(|s| format!(" — «{s}»")).unwrap_or_default();
-    let tail = if looks { " · ищу дальше" } else { "" };
-    match from {
-        Some(f) => format!("В файле от {f} другая песня{song}{tail}"),
-        None => format!("В файле другая песня{song}{tail}"),
+/// The code of an item's note, as `wishlist.note` keeps it.
+pub(crate) fn note_code(note: nikgob_core::i18n::status::WishNote) -> String {
+    note.code().to_owned()
+}
+
+/// An item's stored note in `loc`'s words: a code becomes the text it
+/// stands for, an older version's words stay as they were read.
+fn note_words(loc: Locale, note: &str) -> String {
+    use nikgob_core::i18n::status;
+    match status::wish_note_of(note) {
+        Some(status::WishNote::Done) => status::NOTE_DONE.to_owned(),
+        Some(note) => status::fmt_wish_note_in(loc, note).to_owned(),
+        None => note.to_owned(),
     }
 }
 
@@ -344,8 +345,15 @@ impl Unstuck {
 /// no download, no import, no files waiting in «Подтверди») — after a
 /// restart, say: it is searched for again rather than «качается» for ever.
 fn stalled(status: WishlistStatus, note: Option<&str>, moving: bool) -> bool {
-    !moving
-        && (status == WishlistStatus::Downloading || (status == WishlistStatus::Confirm && note == Some(FILES_WAIT)))
+    let parked = note.is_some_and(|n| files_wait_note(Some(n)));
+    !moving && (status == WishlistStatus::Downloading || (status == WishlistStatus::Confirm && parked))
+}
+
+/// Whether an item's stored note says its files wait in «Подтверди» (the
+/// words of older versions still read as that).
+fn files_wait_note(note: Option<&str>) -> bool {
+    use nikgob_core::i18n::status::{WishNote, wish_note_of};
+    note.and_then(wish_note_of) == Some(WishNote::FilesWait)
 }
 
 /// What an offer that did not work out led to.
@@ -411,7 +419,9 @@ pub(crate) enum Wished {
 const STOP_GRACE: Duration = Duration::from_secs(2);
 
 /// A source that finds but gives no file.
-const FINDS_ONLY: &str = "Находит, но не скачивает";
+fn finds_only_in(loc: Locale) -> &'static str {
+    status_in(loc).finds_only
+}
 
 /// Now, in unix seconds.
 fn unix_now() -> u64 {
@@ -431,29 +441,30 @@ fn told_hm(left: Option<Duration>) -> Option<String> {
 
 /// A source that could not answer, in words for «Источники»; `left`: how
 /// long it still sits out, when it does (its time is told).
-fn down_text(e: &SourceError, left: Option<Duration>) -> String {
-    down_text_at(e, left, unix_now())
+fn down_text_in(loc: Locale, e: &SourceError, left: Option<Duration>) -> String {
+    down_text_at_in(loc, e, left, unix_now())
 }
 
-fn down_text_at(e: &SourceError, left: Option<Duration>, now: u64) -> String {
+fn down_text_at_in(loc: Locale, e: &SourceError, left: Option<Duration>, now: u64) -> String {
+    use nikgob_core::i18n::status as st;
     let hm = told_hm(left);
     match (e, hm) {
         // Cloudflare's «Just a moment…»: only a browser passes it, waiting
         // does not help, and the site never asked us to wait.
-        (e, _) if nikgob_sources::http::is_check(e) => "Сайт закрыт проверкой — не могу зайти".into(),
-        (SourceError::Blocked(_), Some(hm)) => format!("Не пускает — попробую в {hm}"),
-        (SourceError::Blocked(_), None) => "Не пускает — попробую позже".into(),
+        (e, _) if nikgob_sources::http::is_check(e) => status_in(loc).site_check.to_owned(),
+        (SourceError::Blocked(_), Some(hm)) => st::fmt_blocked_in(loc, Some(&hm)),
+        (SourceError::Blocked(_), None) => st::fmt_blocked_in(loc, None),
         (SourceError::RateLimited { .. }, Some(hm)) if left.is_some_and(|d| day_limit(d, now)) => {
-            format!("Лимит на сегодня — попробую в {hm}")
+            st::fmt_day_limit_in(loc, &hm)
         }
-        (SourceError::RateLimited { .. }, Some(hm)) => format!("Просит подождать — попробую в {hm}"),
-        (SourceError::RateLimited { .. }, None) => "Просит подождать — попробую позже".into(),
-        (SourceError::Http { status }, Some(hm)) => format!("Отвечает ошибкой {status} — попробую в {hm}"),
-        (SourceError::Http { status }, None) => format!("Отвечает ошибкой {status}"),
+        (SourceError::RateLimited { .. }, Some(hm)) => st::fmt_asks_to_wait_in(loc, Some(&hm)),
+        (SourceError::RateLimited { .. }, None) => st::fmt_asks_to_wait_in(loc, None),
+        (SourceError::Http { status }, Some(hm)) => st::fmt_answers_with_in(loc, *status, Some(&hm)),
+        (SourceError::Http { status }, None) => st::fmt_answers_with_in(loc, *status, None),
         // Its search works, but no file it finds can be had (Tidal while no
         // instance gives files).
-        (SourceError::NothingToFetch, _) => FINDS_ONLY.into(),
-        _ => "Не отвечает".into(),
+        (SourceError::NothingToFetch, _) => finds_only_in(loc).to_owned(),
+        _ => status_in(loc).no_answer.to_owned(),
     }
 }
 
@@ -472,12 +483,17 @@ fn same_state(a: &SourceError, b: &SourceError) -> bool {
 /// the failure says nothing of the source (the disk, an empty offer).
 /// `aside`: how long it is still set aside for refusing, when it is.
 fn fetch_down_text(e: &SourceError, aside: Option<Duration>) -> Option<String> {
+    fetch_down_text_in(Locale::Ru, e, aside)
+}
+
+/// [`fetch_down_text`] in `loc`.
+fn fetch_down_text_in(loc: Locale, e: &SourceError, aside: Option<Duration>) -> Option<String> {
     match e {
         SourceError::Io(_) | SourceError::NothingToFetch | SourceError::NotConfigured => None,
-        SourceError::Blocked(_) | SourceError::RateLimited { .. } => Some(down_text(e, aside)),
+        SourceError::Blocked(_) | SourceError::RateLimited { .. } => Some(down_text_in(loc, e, aside)),
         _ => Some(match aside.and_then(super::accounts::hm_after) {
-            Some(hm) => format!("{FINDS_ONLY} — пропускаю до {hm}"),
-            None => FINDS_ONLY.into(),
+            Some(hm) => nikgob_core::i18n::status::fmt_finds_only_until_in(loc, &hm),
+            None => finds_only_in(loc).to_owned(),
         }),
     }
 }
@@ -494,52 +510,53 @@ fn source_name(key: SourceKey) -> &'static str {
 /// Why `key` turned an item away, in plain words that name it: «Tidal
 /// сейчас не отдаёт этот трек», «сервер Qobuz недоступен», «Qobuz просит
 /// подождать до 03:00». `what`: «этот трек», «этот альбом», «остальное».
-fn why_words(key: SourceKey, e: &SourceError, what: &str) -> String {
-    why_words_at(key, e, what, unix_now())
+fn why_words_in(loc: Locale, key: SourceKey, e: &SourceError, what: &str) -> String {
+    why_words_at_in(loc, key, e, what, unix_now())
 }
 
-fn why_words_at(key: SourceKey, e: &SourceError, what: &str, now: u64) -> String {
+fn why_words_at_in(loc: Locale, key: SourceKey, e: &SourceError, what: &str, now: u64) -> String {
+    use nikgob_core::i18n::status as st;
     let name = source_name(key);
     match e {
         SourceError::RateLimited { retry_after: Some(d) } if *d >= WAIT_TOLD && day_limit(*d, now) => {
-            format!("у {name} лимит на сегодня")
+            st::fmt_source_limit_today_in(loc, name)
         }
-        SourceError::RateLimited { retry_after: Some(d) } if *d >= WAIT_TOLD => match super::accounts::hm_after(*d) {
-            Some(hm) => format!("{name} просит подождать до {hm}"),
-            None => format!("{name} просит подождать"),
-        },
-        SourceError::RateLimited { .. } => format!("{name} просит подождать"),
-        e if nikgob_sources::http::is_check(e) => format!("{name} закрыт проверкой"),
-        SourceError::Blocked(_) => format!("{name} не пускает"),
-        SourceError::NothingToFetch => format!("{name} находит, но не скачивает"),
+        SourceError::RateLimited { retry_after: Some(d) } if *d >= WAIT_TOLD => {
+            st::fmt_source_asks_to_wait_in(loc, name, super::accounts::hm_after(*d).as_deref())
+        }
+        SourceError::RateLimited { .. } => st::fmt_source_asks_to_wait_in(loc, name, None),
+        e if nikgob_sources::http::is_check(e) => st::fmt_source_check_in(loc, name),
+        SourceError::Blocked(_) => st::fmt_source_blocked_in(loc, name),
+        SourceError::NothingToFetch => st::fmt_source_finds_only_in(loc, name),
         // A ban of the instance's account, a file it cannot give (DRM).
-        SourceError::Http { status: 401 | 403 } | SourceError::Parse(_) => format!("{name} сейчас не отдаёт {what}"),
-        SourceError::Http { status } if *status >= 500 => format!("сервер {name} недоступен"),
-        SourceError::Unreachable(_) => format!("сервер {name} недоступен"),
-        _ => format!("{name} не дал скачать"),
+        SourceError::Http { status: 401 | 403 } | SourceError::Parse(_) => st::fmt_source_gives_no_in(loc, name, what),
+        SourceError::Http { status } if *status >= 500 => st::fmt_source_server_down_in(loc, name),
+        SourceError::Unreachable(_) => st::fmt_source_server_down_in(loc, name),
+        _ => st::fmt_source_no_download_in(loc, name),
     }
 }
 
 /// «в 21:40» (or «через N мин» when the clock is unknown).
-fn at_words(wait: Duration) -> String {
-    match super::accounts::hm_after(wait) {
-        Some(hm) => format!("в {hm}"),
-        None => format!("через {} мин", wait.as_secs().div_ceil(60)),
-    }
+fn at_words_in(loc: Locale, wait: Duration) -> String {
+    nikgob_core::i18n::status::fmt_at_time_in(
+        loc,
+        super::accounts::hm_after(wait).as_deref(),
+        wait.as_secs().div_ceil(60),
+    )
 }
 
 /// The first letter capitalised (a line that stands alone).
-fn capitalised(s: &str) -> String {
+pub(super) fn capitalised(s: &str) -> String {
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// Where an offer comes from, for the lines: the source (a Soulseek
 /// offer's provider is a user's name), a torrent as such.
-fn offer_from(offer: &Offer) -> String {
+fn offer_from_in(loc: Locale, offer: &Offer) -> String {
     match offer.source {
-        SourceKey::Torrents => "торрент".into(),
-        k => k.display_name().into(),
+        SourceKey::Torrents => status_in(loc).torrent_offer.to_owned(),
+        k => k.display_name().to_owned(),
     }
 }
 
@@ -578,19 +595,10 @@ fn plan_retry(n: u32, turned: &[(SourceKey, Option<Duration>)], others: &[(Sourc
 /// The line of an item every offer of which was turned away: what is
 /// here of an album, why each source said no, and when which sources are
 /// asked again.
-fn later_line(have: Option<(usize, usize)>, why: &[String], wait: Duration, next: &[SourceKey]) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some((have, all)) = have {
-        parts.push(format!("Есть {have} из {all}"));
-    }
-    parts.push(if why.is_empty() { "Источники не дали скачать".to_owned() } else { why.join(", ") });
+fn later_line_in(loc: Locale, have: Option<(usize, usize)>, why: &[String], wait: Duration, next: &[SourceKey]) -> String {
     let names: Vec<&str> = next.iter().map(|k| source_name(*k)).collect();
-    parts.push(if names.is_empty() {
-        format!("попробую снова {}", at_words(wait))
-    } else {
-        format!("{} спрошу {}", at_words(wait), names.join(", "))
-    });
-    capitalised(&parts.join(" · "))
+    let at = at_words_in(loc, wait);
+    capitalised(&nikgob_core::i18n::status::fmt_later_line_in(loc, have, why, &at, &names))
 }
 
 /// The offers saved in an item, each on its own: one this build cannot
@@ -942,34 +950,35 @@ impl Worker {
     /// to look (or what is missing to download at all).
     fn download_toast(&mut self, started: usize, already: usize, what: Option<String>) {
         let wishlist = v::Link::Route(v::Route::Downloads(v::DownloadsTab::Wishlist));
+        let loc = self.locale();
+        let strings = nikgob_core::i18n::errors_in(loc);
+        let open = nikgob_core::i18n::common_in(loc).open;
         if started == 0 {
             if already > 0 {
-                self.toast_open(v::ToastKind::Info, "Уже в «Хочу скачать»", "Открыть", wishlist);
+                self.toast_open(v::ToastKind::Info, strings.already_in_wishlist, open, wishlist);
             } else {
-                self.toast_info("Всё уже скачано", None);
+                self.toast_info(strings.everything_downloaded, None);
             }
             return;
         }
         let text = match (started, what) {
-            (1, Some(w)) => format!("В «Хочу скачать»: {w}"),
-            (n, _) => format!(
-                "В «Хочу скачать»: {n} {}",
-                if n % 10 == 1 && n % 100 != 11 {
-                    "трек"
-                } else if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) {
-                    "трека"
-                } else {
-                    "треков"
-                }
-            ),
+            (1, Some(w)) => nikgob_core::i18n::ErrorStrings::fmt_wishlist_added_one_in(loc, &w),
+            (n, _) => {
+                let tracks = nikgob_core::i18n::plural_forms(
+                    loc,
+                    n as u64,
+                    &nikgob_core::i18n::common_in(loc).tracks,
+                );
+                nikgob_core::i18n::ErrorStrings::fmt_wishlist_added_in(loc, n as u64, tracks)
+            }
         };
         if self.can_download() {
-            self.toast_open(v::ToastKind::Success, text, "Открыть", wishlist);
+            self.toast_open(v::ToastKind::Success, text, open, wishlist);
         } else {
             self.toast_open(
                 v::ToastKind::Success,
-                format!("{text} · скачается, когда включишь источник скачивания"),
-                "Настроить",
+                nikgob_core::i18n::ErrorStrings::fmt_downloads_with_source_in(loc, &text),
+                nikgob_core::i18n::downloads_in(loc).set_up,
                 v::Link::Setting(v::SettingLink::Torrents),
             );
         }
@@ -1042,7 +1051,13 @@ impl Worker {
             self.load_library();
             self.album_changed(release);
         }
-        let title = self.lib.get_release(release).ok().flatten().map(|r| format!("альбом «{}»", r.title));
+        let title = self.lib.get_release(release).ok().flatten().map(|r| {
+            let strings = nikgob_core::i18n::downloads_in(self.locale());
+            match self.locale() {
+                Locale::Ru => format!("{} «{}»", strings.album, r.title),
+                Locale::En => format!("{} “{}”", strings.album, r.title),
+            }
+        });
         match self.wish_release_now(release) {
             Wished::Started => self.download_toast(1, 0, title),
             Wished::Already => self.download_toast(0, 1, None),
@@ -1132,7 +1147,7 @@ impl Worker {
                     (have, all) if have == all => WishlistStatus::Done,
                     _ => continue,
                 };
-                if status == i.status && (status != WishlistStatus::Done || i.note.as_deref() == Some("Скачано")) {
+                if status == i.status && (status != WishlistStatus::Done || i.note.as_deref() == Some(nikgob_core::i18n::status::NOTE_DONE)) {
                     continue;
                 }
                 self.streaming.wish.cands.remove(&i.id);
@@ -1142,7 +1157,7 @@ impl Worker {
                     i.status = status;
                     i.next_try_at = None;
                     if status == WishlistStatus::Done {
-                        i.note = Some("Скачано".into());
+                        i.note = Some(note_code(WishNote::Done));
                     }
                 });
                 changed = true;
@@ -1382,15 +1397,16 @@ impl Worker {
     /// at all), then its last download failing.
     fn source_status(&self, key: SourceKey, now: Instant) -> (Option<String>, Option<Instant>) {
         let w = &self.streaming.wish;
+        let loc = self.locale();
         if let (Some(until), Some(e)) = (w.pauses.until(key, now), w.pauses.error(key, now)) {
-            return (Some(down_text(&e, Some(until - now))), Some(until));
+            return (Some(down_text_in(loc, &e, Some(until - now))), Some(until));
         }
         if let Some(e) = w.down.get(&key) {
-            return (Some(down_text(e, None)), None);
+            return (Some(down_text_in(loc, e, None)), None);
         }
         let Some(e) = w.fetch_down.get(&key) else { return (None, None) };
         let aside = w.refusals.aside(key, now);
-        (fetch_down_text(e, aside.map(|u| u - now)), aside)
+        (fetch_down_text_in(loc, e, aside.map(|u| u - now)), aside)
     }
 
     /// A time told in «Источники» passed: they are told again (without it).
@@ -1544,10 +1560,11 @@ impl Worker {
             if let Err(at) = day {
                 let wait = Duration::from_millis((at - Self::now()).max(0) as u64);
                 log::info!("wishlist: {id} searched {} times today, again in {} min", backoff::DAY_TRIES, wait.as_secs() / 60);
+                let loc = self.locale();
                 self.set_item(id, |i| {
                     i.status = WishlistStatus::New;
                     i.next_try_at = Some(at);
-                    i.note = Some(capitalised(&format!("поищу снова {}", at_words(wait))));
+                    i.note = Some(capitalised(&nikgob_core::i18n::status::fmt_search_again_in(loc, &at_words_in(loc, wait))));
                 });
                 self.publish_wishlist();
                 return;
@@ -1556,7 +1573,7 @@ impl Worker {
         self.set_item(id, |i| {
             i.status = WishlistStatus::Searching;
             i.attempts += 1;
-            i.note = Some("Ищу…".into());
+            i.note = Some(note_code(WishNote::Searching));
         });
         let names: Vec<&str> = sources.iter().map(|s| s.name()).collect();
         log::info!(
@@ -1676,7 +1693,7 @@ impl Worker {
                 Ok(Fetched::Partial { files, missing, error }) => self.wish_partial(item, *offer, files, missing.len(), error),
                 Err(e) => {
                     log::warn!("wishlist: fetching {} from {:?}: {e}", offer.title, offer.source);
-                    if offer.source != SourceKey::Torrents && fetch_down_text(&e, None).is_some() {
+                    if offer.source != SourceKey::Torrents && fetch_down_text_in(self.locale(), &e, None).is_some() {
                         self.streaming.wish.fetch_down.insert(offer.source, e.clone());
                         self.publish_sources();
                     }
@@ -1723,7 +1740,7 @@ impl Worker {
                 self.set_item(id, |i| {
                     i.status = WishlistStatus::New;
                     i.next_try_at = Some(Self::now() + 3_600_000);
-                    i.note = Some("Источники не ответили — попробую через час".into());
+                    i.note = Some(note_code(WishNote::SourcesSilent));
                 });
                 self.publish_wishlist();
                 return;
@@ -1922,7 +1939,8 @@ impl Worker {
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
         let want = self.want_of(&item);
         let dest = self.direct_dir(id);
-        self.set_item(id, |i| i.note = Some(format!("Смотрю, есть ли трек в раздаче: {}", offer.title)));
+        let note = nikgob_core::i18n::status::fmt_checking_torrent_in(self.locale(), &offer.title);
+        self.set_item(id, |i| i.note = Some(note));
         self.streaming.spawn(async move {
             let quiet: nikgob_core::source::Progress = Arc::new(|_, _| {});
             let result = match tokio::time::timeout(Duration::from_secs(60), source.fetch(&offer, &want, &dest, quiet)).await {
@@ -1957,7 +1975,7 @@ impl Worker {
         self.set_item(id, |i| {
             i.status = WishlistStatus::Confirm;
             i.candidates_json = json;
-            i.note = Some(if upgrade { "Нашёл качество лучше — подтверди замену" } else { "Не уверен, что это оно — выбери" }.into());
+            i.note = Some(note_code(if upgrade { WishNote::FoundBetter } else { WishNote::NotSure }));
         });
         if upgrade {
             self.upgrade_offered(id, shown);
@@ -2015,17 +2033,18 @@ impl Worker {
         self.streaming.wish.from.insert(id, from);
         self.streaming.wish.offer_keys.insert(id, offer_key(&offer));
         if torrent {
-            self.set_item(id, |i| i.note = Some(format!("Раздача: {}", offer.title)));
+            let note = nikgob_core::i18n::status::fmt_torrent_note_in(self.locale(), &offer.title);
+            self.set_item(id, |i| i.note = Some(note));
         } else {
             let _ = std::fs::remove_dir_all(&dest);
             if let Err(e) = std::fs::create_dir_all(&dest) {
                 log::warn!("{}: {e}", dest.display());
-                self.toast_err("Не получилось создать папку для загрузки", None);
+                self.toast_err(nikgob_core::i18n::errors_in(self.locale()).could_not_create_folder, None);
                 return;
             }
             self.streaming.wish.direct.insert(id, dest.clone());
             self.streaming.wish.live.lock().insert(id, (0, offer.size_bytes));
-            let note = format!("{} · {}", offer.detail(), offer.title);
+            let note = format!("{} · {}", nikgob_core::i18n::status::fmt_offer_in(self.locale(), &offer), offer.title);
             self.set_item(id, |i| {
                 i.status = WishlistStatus::Downloading;
                 i.note = Some(note);
@@ -2175,10 +2194,13 @@ impl Worker {
         let size: u64 = files.iter().filter(|(i, ..)| picked.contains(i)).map(|(.., s)| s).sum();
         let format = offer.format.as_ref().map_or_else(|| "?".to_owned(), |f| f.label());
         let seeders = candidate_of(&offer).and_then(|c| c.seeders).unwrap_or(0);
-        let note = format!(
-            "{format} · {} · {seeders} сид. · {}",
-            crate::torrents::human_bytes(size),
-            offer.title
+        let loc = self.locale();
+        let note = nikgob_core::i18n::status::fmt_torrent_found_in(
+            loc,
+            &format,
+            &nikgob_core::i18n::status::fmt_size_in(loc, size),
+            seeders,
+            &offer.title,
         );
         self.set_item(id, |i| {
             i.status = WishlistStatus::Downloading;
@@ -2274,7 +2296,7 @@ impl Worker {
         };
         match next {
             Some(c) => {
-                let from = offer_from(&c);
+                let from = offer_from_in(self.locale(), &c);
                 self.wish_fetch(id, c);
                 Next::Offer(from)
             }
@@ -2302,19 +2324,21 @@ impl Worker {
     fn wish_partial(&mut self, id: WishlistId, offer: Offer, files: Vec<PathBuf>, missing: usize, error: SourceError) {
         let all = files.len() + missing;
         log::warn!("wishlist: {} from {:?}: {} of {all} tracks, the rest: {error}", offer.title, offer.source, files.len());
+        let loc = self.locale();
+        let what_rest = status_in(loc).what_rest;
         let why = if error.is_refusal() {
             self.wish_turned_away(id, &offer, &error);
-            why_words(offer.source, &error, "остальное")
+            why_words_in(loc, offer.source, &error, what_rest)
         } else {
             if self.streaming.wish.refusals.worked(offer.source) {
                 self.save_backoff();
             }
-            format!("остальных {missing} у {} нет", source_name(offer.source))
+            nikgob_core::i18n::status::fmt_others_absent_in(loc, missing, source_name(offer.source))
         };
         // A better copy says only what it found and what came of it.
         if !self.is_upgrade(id) {
             let what = self.item_title(id);
-            self.wish_line(id, what, format!("Скачано {} из {all} · {why}", files.len()), None);
+            self.wish_line(id, what, nikgob_core::i18n::status::fmt_downloaded_of_in(loc, files.len(), all, &why), None);
         }
         self.streaming.wish.partial.insert(id);
         self.wish_files(id, offer, files);
@@ -2361,15 +2385,18 @@ impl Worker {
     /// what came of it (`next`): the next source, or the choice in
     /// «Подтверди». A wait has its line from [`Self::wish_later`].
     fn refusal_line(&mut self, id: WishlistId, offer: &Offer, e: &SourceError, next: &Next) {
+        let loc = self.locale();
         let then = match next {
-            Next::Offer(from) => format!("дальше — {from}"),
-            Next::Doubtful => "есть варианты под вопросом — выбери в «Хочу скачать»".to_owned(),
+            Next::Offer(from) => nikgob_core::i18n::status::fmt_next_offer_in(loc, from),
+            Next::Doubtful => {
+                nikgob_core::i18n::status::fmt_doubtful_pick_in(loc, nikgob_core::i18n::downloads_in(loc).tab_wishlist)
+            }
             Next::Later(_) | Next::NotFound => return,
         };
         if self.is_upgrade(id) {
             return;
         }
-        let why = why_words(offer.source, e, self.item_what(id));
+        let why = why_words_in(loc, offer.source, e, self.item_what(id));
         let title = self.item_title(id);
         self.wish_line(id, title, capitalised(&format!("{why} · {then}")), None);
     }
@@ -2409,12 +2436,14 @@ impl Worker {
             },
             WishlistScope::Track => None,
         };
+        let loc = self.locale();
+        let strings = status_in(loc);
         let what = match (item.scope, partly) {
-            (_, Some(_)) => "остальное",
-            (WishlistScope::Album, None) => "этот альбом",
-            (WishlistScope::Track, None) => "этот трек",
+            (_, Some(_)) => strings.what_rest,
+            (WishlistScope::Album, None) => strings.what_album,
+            (WishlistScope::Track, None) => strings.what_track,
         };
-        let why: Vec<String> = seen.iter().map(|(k, e, _)| why_words(*k, e, what)).collect();
+        let why: Vec<String> = seen.iter().map(|(k, e, _)| why_words_in(loc, *k, e, what)).collect();
         let n = {
             let n = self.streaming.wish.later.entry(id).or_default();
             *n += 1;
@@ -2431,8 +2460,8 @@ impl Worker {
             if item.origin == WishlistOrigin::Upgrade {
                 return Next::NotFound;
             }
-            let reasons = if why.is_empty() { "Источники не дали скачать".to_owned() } else { why.join(", ") };
-            let line = capitalised(&format!("{reasons} · поищу снова через неделю"));
+            let reasons = if why.is_empty() { strings.sources_gave_nothing.to_owned() } else { why.join(", ") };
+            let line = capitalised(&format!("{reasons} · {}", nikgob_core::i18n::status::fmt_search_again_days_in(loc, 7)));
             if !copy {
                 self.set_item(id, |i| i.note = Some(line.clone()));
                 self.publish_wishlist();
@@ -2455,7 +2484,7 @@ impl Worker {
         let at = Self::now() + retry.wait.as_millis() as i64;
         self.streaming.wish.retry_only.insert(id, keys);
         self.save_backoff();
-        let note = later_line(partly, &why, retry.wait, &retry.ask);
+        let note = later_line_in(loc, partly, &why, retry.wait, &retry.ask);
         log::info!("wishlist: {id} was turned away ({}), again in {} min", why.join(", "), retry.wait.as_secs() / 60);
         self.set_item(id, |i| {
             i.status = WishlistStatus::New;
@@ -2470,11 +2499,12 @@ impl Worker {
         Next::Later(at)
     }
 
-    /// «этот трек» or «этот альбом», as the item is.
+    /// «этот трек» or «этот альбом», as the item is (in the active locale).
     fn item_what(&self, id: WishlistId) -> &'static str {
+        let strings = status_in(self.locale());
         match self.lib.get_wishlist_item(id).ok().flatten().map(|i| i.scope) {
-            Some(WishlistScope::Album) => "этот альбом",
-            _ => "этот трек",
+            Some(WishlistScope::Album) => strings.what_album,
+            _ => strings.what_track,
         }
     }
 
@@ -2484,9 +2514,9 @@ impl Worker {
             Some(i) => match (&i.artist, &i.title) {
                 (Some(a), Some(t)) => format!("{a} — {t}"),
                 (_, Some(t)) => t.clone(),
-                _ => "трек".into(),
+                _ => status_in(self.locale()).track.to_owned(),
             },
-            None => "трек".into(),
+            None => status_in(self.locale()).track.to_owned(),
         }
     }
 
@@ -2496,22 +2526,29 @@ impl Worker {
             return;
         }
         let copy = self.lib.get_wishlist_item(id).ok().flatten().is_some_and(|i| self.copy_quality(&i).is_some());
+        let note = if copy { WishNote::HasCopy } else { WishNote::NotFound };
         let Some(item) = self.set_item(id, |i| {
             i.status = WishlistStatus::NoTorrent;
             i.next_try_at = Some(Self::now() + RETRY_AFTER.as_millis() as i64);
-            i.note = Some(if copy { HAS_COPY } else { NOT_FOUND }.into());
+            i.note = Some(note_code(note));
         }) else {
             return;
         };
         if tell && !copy && self.state.read().prefs.download_toasts {
+            let loc = self.locale();
             let what = match (&item.artist, &item.title) {
                 (Some(a), Some(t)) => format!("{a} — {t}"),
                 (_, Some(t)) => t.clone(),
-                _ => "трек".into(),
+                _ => nikgob_core::i18n::status_in(loc).track.to_owned(),
             };
-            let action = (item.track_id.is_some() && self.service(Service::Youtube).is_some())
-                .then(|| ("Сохранить с YouTube".to_owned(), Command::WishlistSaveFromYoutube(id)));
-            self.toast_err(format!("Не нашёл, где скачать: {what}"), action);
+            let action = (item.track_id.is_some() && self.service(Service::Youtube).is_some()).then(|| {
+                (
+                    nikgob_core::i18n::downloads_in(loc).save_from_youtube.to_owned(),
+                    Command::WishlistSaveFromYoutube(id),
+                )
+            });
+            let text = format!("{}: {what}", nikgob_core::i18n::errors_in(loc).nothing_found_to_download);
+            self.toast_err(text, action);
         }
         self.publish_wishlist();
     }
@@ -2560,7 +2597,7 @@ impl Worker {
             }
         }
         if n > 0 {
-            self.toast_info(format!("В очереди на скачивание: {n}"), None);
+            self.toast_info(nikgob_core::i18n::ErrorStrings::fmt_queued_for_download_in(self.locale(), n), None);
         }
         self.wish_tick();
         self.publish_wishlist();
@@ -2630,9 +2667,10 @@ impl Worker {
             dismissed.push(id);
         }
         if n > 0 {
+            let loc = self.locale();
             let text = match (n, title) {
-                (1, Some(t)) => format!("Не буду качать «{t}»"),
-                (n, _) => format!("Не буду качать: {n}"),
+                (1, Some(t)) => nikgob_core::i18n::ErrorStrings::fmt_wont_download_one_in(loc, &t),
+                (n, _) => nikgob_core::i18n::ErrorStrings::fmt_wont_download_in(loc, n),
             };
             // «Отменить» brings back what was turned down, or asks again
             // for what left.
@@ -2741,7 +2779,7 @@ impl Worker {
         }
         if n > 0 {
             self.save_backoff();
-            self.toast_work(format!("Ищу заново: {n}"), None);
+            self.toast_work(nikgob_core::i18n::ErrorStrings::fmt_searching_again_in(self.locale(), n), None);
         }
         self.wish_tick();
         self.publish_wishlist();
@@ -2806,7 +2844,7 @@ impl Worker {
             if self.can_resolve(track) {
                 self.streaming.save_after_resolve.insert(track, id);
                 self.begin_resolve(track);
-                self.toast_work("Ищу трек на YouTube Music…", None);
+                self.toast_work(err.finding_on_youtube, None);
             } else {
                 self.toast_err(err.not_found_on_youtube, None);
             }
@@ -2814,7 +2852,7 @@ impl Worker {
         };
         self.set_item(id, |i| {
             i.status = WishlistStatus::Downloading;
-            i.note = Some("Сохраняю с YouTube…".into());
+            i.note = Some(note_code(WishNote::SavingYoutube));
         });
         let dir = self.save_dir();
         let run = self.streaming.wish.runs.reserve();
@@ -2848,7 +2886,12 @@ impl Worker {
                     force: true,
                     ..ImportTargets::default()
                 };
-                if !self.import_for(vec![path], "Сохранение с YouTube".into(), SourceOrigin::Stream, targets) {
+                if !self.import_for(
+                    vec![path],
+                    nikgob_core::i18n::status::fmt_saving_from_youtube_in(self.locale()),
+                    SourceOrigin::Stream,
+                    targets,
+                ) {
                     self.set_item(id, |i| i.status = WishlistStatus::NoTorrent);
                 }
             }
@@ -2859,7 +2902,7 @@ impl Worker {
                 self.toast_err(msg, None);
                 self.set_item(id, |i| {
                     i.status = WishlistStatus::NoTorrent;
-                    i.note = Some("Не получилось сохранить с YouTube".into());
+                    i.note = Some(note_code(WishNote::SaveFailed));
                 });
                 self.publish_wishlist();
             }
@@ -2869,19 +2912,30 @@ impl Worker {
     pub(crate) fn wish_attach(&mut self, id: WishlistId, what: v::WishlistAttach) {
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
         let tracks = self.targets_of(&item).len();
+        let loc = self.locale();
         let note = match &what {
-            v::WishlistAttach::TorrentFile(_) | v::WishlistAttach::Magnet(_) => "Своя раздача",
-            v::WishlistAttach::Files(_) | v::WishlistAttach::Folder(_) => "Свой файл",
+            v::WishlistAttach::TorrentFile(_) | v::WishlistAttach::Magnet(_) => note_code(WishNote::OwnTorrent),
+            v::WishlistAttach::Files(_) | v::WishlistAttach::Folder(_) => note_code(WishNote::OwnFile),
         };
         let started = match what {
             v::WishlistAttach::Files(paths) => {
                 let force = paths.len() == 1 && item.scope == WishlistScope::Track && tracks == 1;
                 let targets = self.item_targets(&item, force);
-                self.import_for(paths, "Импорт для «Хочу скачать»".into(), SourceOrigin::Inbox, targets)
+                self.import_for(
+                    paths,
+                    nikgob_core::i18n::status::fmt_import_for_wishlist_in(loc),
+                    SourceOrigin::Inbox,
+                    targets,
+                )
             }
             v::WishlistAttach::Folder(dir) => {
                 let targets = self.item_targets(&item, false);
-                self.import_for(vec![dir], "Импорт для «Хочу скачать»".into(), SourceOrigin::Inbox, targets)
+                self.import_for(
+                    vec![dir],
+                    nikgob_core::i18n::status::fmt_import_for_wishlist_in(loc),
+                    SourceOrigin::Inbox,
+                    targets,
+                )
             }
             v::WishlistAttach::TorrentFile(path) => match std::fs::read(&path) {
                 Ok(bytes) => {
@@ -2890,7 +2944,7 @@ impl Worker {
                 }
                 Err(e) => {
                     log::warn!("{}: {e}", path.display());
-                    self.toast_err("Не получилось прочитать .torrent", None);
+                    self.toast_err(nikgob_core::i18n::errors_in(loc).could_not_read_torrent, None);
                     false
                 }
             },
@@ -2900,7 +2954,7 @@ impl Worker {
                     self.add_payload_for(TorrentPayload::Magnet(m.clone()), None, Some(m), Some(id));
                     true
                 } else {
-                    self.toast_err("Это не magnet-ссылка", None);
+                    self.toast_err(nikgob_core::i18n::errors_in(loc).not_a_magnet, None);
                     false
                 }
             }
@@ -2908,7 +2962,7 @@ impl Worker {
         if started {
             self.set_item(id, |i| {
                 i.status = WishlistStatus::Downloading;
-                i.note = Some(note.into());
+                i.note = Some(note);
             });
             self.publish_wishlist();
         }
@@ -2943,7 +2997,7 @@ impl Worker {
             self.set_item(item, |i| {
                 i.status = WishlistStatus::NoTorrent;
                 i.next_try_at = Some(Self::now() + RETRY_AFTER.as_millis() as i64);
-                i.note = Some(HAS_COPY.into());
+                i.note = Some(note_code(WishNote::HasCopy));
             });
             self.publish_wishlist();
             return;
@@ -2987,7 +3041,7 @@ impl Worker {
             self.set_item(i.id, |i| {
                 i.status = WishlistStatus::Done;
                 i.next_try_at = None;
-                i.note = Some("Скачано".into());
+                i.note = Some(nikgob_core::i18n::status::NOTE_DONE.to_owned());
             });
             self.streaming.wish.asked.remove(&i.id);
             self.wish_line_drop(i.id);
@@ -3028,7 +3082,7 @@ impl Worker {
         let changed = self.set_item(item, |i| {
             if !matches!(i.status, WishlistStatus::Dismissed) {
                 i.status = WishlistStatus::Confirm;
-                i.note = Some(FILES_WAIT.into());
+                i.note = Some(note_code(WishNote::FilesWait));
             }
         });
         if changed.is_some() {
@@ -3060,14 +3114,18 @@ impl Worker {
             return;
         }
         let partial = self.streaming.wish.partial.remove(&id);
+        let loc = self.locale();
+        let done_note = |have: (usize, usize)| {
+            nikgob_core::i18n::status::fmt_done_note_in(loc, Some(have), None)
+        };
         let (status, note) = match item.scope {
             WishlistScope::Album => match self.album_files(&item) {
-                (have, all) if all > 0 && have == all => (WishlistStatus::Done, "Скачано".to_owned()),
+                (have, all) if all > 0 && have == all => (WishlistStatus::Done, done_note((all, all))),
                 // A source gave part of the album: the rest from the next
                 // offer (it leaves out what came), or later when a source
                 // turned it away.
                 _ if partial && self.album_goes_on(id) => return,
-                (have, all) if have > 0 => (WishlistStatus::Done, format!("Скачано {have} из {all}")),
+                (have, all) if have > 0 => (WishlistStatus::Done, done_note((have, all))),
                 // Nothing of the album landed: still on its way, or left
                 // with nothing bringing it (searched again).
                 _ if stalled(item.status, item.note.as_deref(), self.moving(id)) => {
@@ -3084,7 +3142,7 @@ impl Worker {
                     .is_some_and(|s| s.kind.is_local() && s.quality_score > score::SAVED_STREAM);
                 if !local {
                     let mut status = item.status;
-                    if status == WishlistStatus::Confirm && item.note.as_deref() == Some(FILES_WAIT) {
+                    if status == WishlistStatus::Confirm && files_wait_note(item.note.as_deref()) {
                         self.set_item(id, |i| i.status = WishlistStatus::Downloading);
                         self.publish_wishlist();
                         status = WishlistStatus::Downloading;
@@ -3118,7 +3176,7 @@ impl Worker {
                     .track_id
                     .and_then(|t| self.lib.get_track_row(t).ok().flatten())
                     .and_then(|r| r.codec.as_ref().map(|c| nikgob_core::quality::row_label_in(c, r.check.as_ref(), loc)));
-                (WishlistStatus::Done, got.map_or_else(|| "Скачано".to_owned(), |q| format!("Скачано · {q}")))
+                (WishlistStatus::Done, nikgob_core::i18n::status::fmt_done_note_in(loc, None, got.as_deref()))
             }
         };
         if status == WishlistStatus::Done {
@@ -3217,7 +3275,7 @@ impl Worker {
         }
         let what = self.item_title(id);
         let from = self.streaming.wish.from.get(&id).cloned();
-        let text = wrong_audio_words(from.as_deref(), sounds_like.as_deref(), looks);
+        let text = nikgob_core::i18n::status::fmt_wrong_audio_in(self.locale(), from.as_deref(), sounds_like.as_deref(), looks);
         self.wish_line(id, what, text, None);
     }
 
@@ -3278,7 +3336,7 @@ impl Worker {
             let _ = std::fs::remove_file(path);
             self.set_item(item, |i| {
                 i.status = WishlistStatus::NoTorrent;
-                i.note = Some("Не получилось сохранить с YouTube".into());
+                i.note = Some(note_code(WishNote::SaveFailed));
             });
             self.publish_wishlist();
         }
@@ -3357,7 +3415,7 @@ impl Worker {
             if albums.contains(&i.id) {
                 continue;
             }
-            if i.note.as_deref() == Some(FILES_WAIT) {
+            if files_wait_note(i.note.as_deref()) {
                 if !self.files_wait(i.id) {
                     self.wish_settle(i.id);
                 }
@@ -3403,6 +3461,7 @@ impl Worker {
                 .then(b.created_at.cmp(&a.created_at))
         });
         let now = Self::now();
+        let loc = self.locale();
         let youtube = self.service(Service::Youtube).is_some();
         let can_search = self.can_download();
         // Albums and artists repeat over the items (an album of 12 = 12
@@ -3487,7 +3546,7 @@ impl Worker {
                 .flatten();
             // An item whose files waited there and do no more asks nothing
             // of its own (its import settles it).
-            if item.status == WishlistStatus::Confirm && !files_wait && item.note.as_deref() != Some(FILES_WAIT) {
+            if item.status == WishlistStatus::Confirm && !files_wait && !files_wait_note(item.note.as_deref()) {
                 let card = self.wish_confirm_view(item);
                 if card.answerable() {
                     if recovering {
@@ -3513,7 +3572,7 @@ impl Worker {
                 .filter(|_| item.status == WishlistStatus::NoTorrent)
                 .map(|at| {
                     let days = ((at - now).max(0) as u64).div_ceil(86_400_000);
-                    format!("поищу снова через {days} дн.")
+                    nikgob_core::i18n::status::fmt_search_again_days_in(self.locale(), days)
                 });
             let upgrade = self.upgrade_row_words(item, files_wait, next_try.as_deref(), can_search);
             rows.push(v::WishlistRow {
@@ -3529,7 +3588,7 @@ impl Worker {
                 status: item.status,
                 scope: item.scope,
                 origin: item.origin,
-                note: item.note.clone(),
+                note: item.note.as_deref().map(|n| note_words(loc, n)),
                 next_try,
                 attempts: item.attempts,
                 can_save_from_youtube: youtube
@@ -3655,10 +3714,12 @@ impl Worker {
             return self.upgrade_confirm_view(item, id);
         }
         let offers = item.candidates_json.as_deref().map(offers_of_json).unwrap_or_default();
+        let loc = self.locale();
+        let strings = status_in(loc);
         let what = match (&item.artist, &item.title) {
             (Some(a), Some(t)) => format!("{t} — {a}"),
             (_, Some(t)) => t.clone(),
-            _ => "Хочу скачать".into(),
+            _ => nikgob_core::i18n::downloads_in(loc).tab_wishlist.to_owned(),
         };
         v::Confirm {
             yes_no: false,
@@ -3671,17 +3732,18 @@ impl Worker {
                 .enumerate()
                 .map(|(i, o)| v::ConfirmOption {
                     label: o.title.clone(),
-                    detail: o.detail(),
+                    detail: nikgob_core::i18n::status::fmt_offer_in(loc, o),
                     // Without seeders it may never come.
                     recommended: Some(i) == offers.iter().position(|o| o.seeders != Some(0)),
                 })
                 .collect(),
-            skip_label: "Не то — поищу позже".into(),
+            skip_label: nikgob_core::i18n::errors_in(loc).search_later.into(),
             question: match item.scope {
-                WishlistScope::Track => "Что из этого — этот трек?".into(),
-                WishlistScope::Album => "Что из этого — этот альбом?".into(),
-            },
-            accept_label: "Скачать".into(),
+                WishlistScope::Track => strings.card_question_track,
+                WishlistScope::Album => strings.card_question_album,
+            }
+            .into(),
+            accept_label: strings.card_accept.into(),
             pick: None,
         }
     }
@@ -3724,10 +3786,17 @@ mod tests {
     fn an_item_nothing_moves_searches_again() {
         use WishlistStatus as St;
         assert!(stalled(St::Downloading, None, false), "after a restart, its download gone");
-        assert!(stalled(St::Confirm, Some(FILES_WAIT), false), "its files no longer wait");
+        assert!(stalled(St::Confirm, Some(WishNote::FilesWait.code()), false), "its files no longer wait");
+        assert!(
+            stalled(St::Confirm, Some(nikgob_core::i18n::status::LEGACY_NOTE_FILES_WAIT), false),
+            "the words older versions wrote read as the same"
+        );
         assert!(!stalled(St::Downloading, None, true), "a torrent, a download or an import still runs");
-        assert!(!stalled(St::Confirm, Some(FILES_WAIT), true));
-        assert!(!stalled(St::Confirm, Some("Не уверен, что это оно — выбери"), false), "its own card asks");
+        assert!(!stalled(St::Confirm, Some(WishNote::FilesWait.code()), true));
+        assert!(
+            !stalled(St::Confirm, Some(WishNote::NotSure.code()), false),
+            "its own card asks"
+        );
         for st in [St::New, St::Searching, St::Waiting, St::NoTorrent, St::Done, St::Dismissed] {
             assert!(!stalled(st, None, false), "{st:?}");
         }
@@ -3736,12 +3805,16 @@ mod tests {
     /// «ищу дальше» only for an item that looks again.
     #[test]
     fn wrong_audio_line_promises_a_search_only_when_it_looks() {
+        let w = |from, sounds_like, looks| {
+            nikgob_core::i18n::status::fmt_wrong_audio_in(Locale::Ru, from, sounds_like, looks)
+        };
+        assert_eq!(w(Some("Soulseek"), Some("Song"), true), "В файле от Soulseek другая песня — «Song» · ищу дальше");
+        assert_eq!(w(None, None, false), "В файле другая песня");
+        assert!(!w(Some("RuTracker"), None, false).contains("ищу"));
         assert_eq!(
-            wrong_audio_words(Some("Soulseek"), Some("Song"), true),
-            "В файле от Soulseek другая песня — «Song» · ищу дальше"
+            nikgob_core::i18n::status::fmt_wrong_audio_in(Locale::En, Some("Soulseek"), Some("Song"), false),
+            "The file from Soulseek holds another song — “Song”"
         );
-        assert_eq!(wrong_audio_words(None, None, false), "В файле другая песня");
-        assert!(!wrong_audio_words(Some("RuTracker"), None, false).contains("ищу"));
     }
 
     /// One refusal is not yet a pattern; the second sets the source aside,
@@ -3798,23 +3871,30 @@ mod tests {
     /// The reasons in words a listener understands, the source named.
     #[test]
     fn why_a_source_said_no_in_plain_words() {
-        let t = "этот трек";
-        assert_eq!(why_words(SourceKey::Tidal, &SourceError::Http { status: 403 }, t), "Tidal сейчас не отдаёт этот трек");
-        assert_eq!(why_words(SourceKey::Tidal, &SourceError::Parse("a DASH manifest".into()), t), "Tidal сейчас не отдаёт этот трек");
-        assert_eq!(why_words(SourceKey::Qobuz, &SourceError::Unreachable("dns error".into()), t), "сервер Qobuz недоступен");
-        assert_eq!(why_words(SourceKey::Qobuz, &SourceError::Http { status: 522 }, t), "сервер Qobuz недоступен");
-        assert_eq!(why_words(SourceKey::Khinsider, &SourceError::Blocked("a bot check".into()), t), "khinsider закрыт проверкой");
-        assert_eq!(why_words(SourceKey::Soulseek, &SourceError::Blocked("login refused".into()), t), "Soulseek не пускает");
-        assert_eq!(why_words(SourceKey::Torrents, &SourceError::Unreachable("x".into()), t), "сервер Prowlarr недоступен");
+        fn w(key: SourceKey, e: &SourceError, what: &str) -> String {
+            why_words_in(Locale::Ru, key, e, what)
+        }
+        let t = status_in(Locale::Ru).what_track;
+        assert_eq!(w(SourceKey::Tidal, &SourceError::Http { status: 403 }, t), "Tidal сейчас не отдаёт этот трек");
+        assert_eq!(w(SourceKey::Tidal, &SourceError::Parse("a DASH manifest".into()), t), "Tidal сейчас не отдаёт этот трек");
+        assert_eq!(w(SourceKey::Qobuz, &SourceError::Unreachable("dns error".into()), t), "сервер Qobuz недоступен");
+        assert_eq!(w(SourceKey::Qobuz, &SourceError::Http { status: 522 }, t), "сервер Qobuz недоступен");
+        assert_eq!(w(SourceKey::Khinsider, &SourceError::Blocked("a bot check".into()), t), "khinsider закрыт проверкой");
+        assert_eq!(w(SourceKey::Soulseek, &SourceError::Blocked("login refused".into()), t), "Soulseek не пускает");
+        assert_eq!(w(SourceKey::Torrents, &SourceError::Unreachable("x".into()), t), "сервер Prowlarr недоступен");
         let short = SourceError::RateLimited { retry_after: Some(MIN) };
-        assert_eq!(why_words(SourceKey::Qobuz, &short, t), "Qobuz просит подождать");
+        assert_eq!(w(SourceKey::Qobuz, &short, t), "Qobuz просит подождать");
         // 01:00 UTC: five hours is a wait it named, 23 hours its day's limit.
         let one_am = 86_400 * 20_000 + 3_600;
         let long = SourceError::RateLimited { retry_after: Some(300 * MIN) };
-        assert!(why_words_at(SourceKey::Qobuz, &long, t, one_am).starts_with("Qobuz просит подождать до "));
+        assert!(why_words_at_in(Locale::Ru, SourceKey::Qobuz, &long, t, one_am).starts_with("Qobuz просит подождать до "));
         let day = SourceError::RateLimited { retry_after: Some(23 * 60 * MIN) };
-        assert_eq!(why_words_at(SourceKey::Qobuz, &day, t, one_am), "у Qobuz лимит на сегодня");
-        assert_eq!(why_words(SourceKey::Tidal, &SourceError::NothingToFetch, t), "Tidal находит, но не скачивает");
+        assert_eq!(why_words_at_in(Locale::Ru, SourceKey::Qobuz, &day, t, one_am), "у Qobuz лимит на сегодня");
+        assert_eq!(w(SourceKey::Tidal, &SourceError::NothingToFetch, t), "Tidal находит, но не скачивает");
+        assert_eq!(
+            why_words_in(Locale::En, SourceKey::Qobuz, &SourceError::Unreachable("dns".into()), status_in(Locale::En).what_track),
+            "the Qobuz server is down"
+        );
     }
 
     /// «Источники» tell each state as it is: a bot check is not a wait;
@@ -3825,22 +3905,22 @@ mod tests {
     fn a_source_state_in_words() {
         let one_am = 86_400 * 20_000 + 3_600;
         let cf = SourceError::Blocked(nikgob_sources::http::BOT_CHECK.into());
-        assert_eq!(down_text_at(&cf, None, one_am), "Сайт закрыт проверкой — не могу зайти");
-        assert_eq!(down_text_at(&cf, Some(180 * MIN), one_am), "Сайт закрыт проверкой — не могу зайти");
+        assert_eq!(down_text_at_in(Locale::Ru, &cf, None, one_am), "Сайт закрыт проверкой — не могу зайти");
+        assert_eq!(down_text_at_in(Locale::Ru, &cf, Some(180 * MIN), one_am), "Сайт закрыт проверкой — не могу зайти");
         let login = SourceError::Blocked("the server refused the login: 40".into());
-        assert_eq!(down_text_at(&login, None, one_am), "Не пускает — попробую позже");
-        assert!(down_text_at(&login, Some(180 * MIN), one_am).starts_with("Не пускает — попробую в "));
+        assert_eq!(down_text_at_in(Locale::Ru, &login, None, one_am), "Не пускает — попробую позже");
+        assert!(down_text_at_in(Locale::Ru, &login, Some(180 * MIN), one_am).starts_with("Не пускает — попробую в "));
         let wait = SourceError::RateLimited { retry_after: None };
-        let day = down_text_at(&wait, Some(23 * 60 * MIN), one_am);
+        let day = down_text_at_in(Locale::Ru, &wait, Some(23 * 60 * MIN), one_am);
         assert!(day.starts_with("Лимит на сегодня — попробую в "), "{day}");
-        assert!(down_text_at(&wait, Some(120 * MIN), one_am).starts_with("Просит подождать — попробую в "));
-        assert_eq!(down_text_at(&wait, Some(MIN), one_am), "Просит подождать — попробую позже", "a short wait is not timed");
-        assert_eq!(down_text_at(&wait, None, one_am), "Просит подождать — попробую позже");
+        assert!(down_text_at_in(Locale::Ru, &wait, Some(120 * MIN), one_am).starts_with("Просит подождать — попробую в "));
+        assert_eq!(down_text_at_in(Locale::Ru, &wait, Some(MIN), one_am), "Просит подождать — попробую позже", "a short wait is not timed");
+        assert_eq!(down_text_at_in(Locale::Ru, &wait, None, one_am), "Просит подождать — попробую позже");
         let bad = SourceError::Http { status: 400 };
-        assert_eq!(down_text_at(&bad, None, one_am), "Отвечает ошибкой 400");
-        assert!(down_text_at(&bad, Some(60 * MIN), one_am).starts_with("Отвечает ошибкой 400 — попробую в "));
-        assert_eq!(down_text_at(&SourceError::NothingToFetch, None, one_am), FINDS_ONLY);
-        assert_eq!(down_text_at(&SourceError::Unreachable("dns".into()), None, one_am), "Не отвечает");
+        assert_eq!(down_text_at_in(Locale::Ru, &bad, None, one_am), "Отвечает ошибкой 400");
+        assert!(down_text_at_in(Locale::Ru, &bad, Some(60 * MIN), one_am).starts_with("Отвечает ошибкой 400 — попробую в "));
+        assert_eq!(down_text_at_in(Locale::Ru, &SourceError::NothingToFetch, None, one_am), status_in(Locale::Ru).finds_only);
+        assert_eq!(down_text_at_in(Locale::Ru, &SourceError::Unreachable("dns".into()), None, one_am), "Не отвечает");
     }
 
     /// «пропускаю до 02:07» while the source is set aside; once that time
@@ -3850,7 +3930,7 @@ mod tests {
         let e = SourceError::Http { status: 403 };
         let now = fetch_down_text(&e, Some(30 * MIN)).unwrap();
         assert!(now.starts_with("Находит, но не скачивает — пропускаю до "), "{now}");
-        assert_eq!(fetch_down_text(&e, None).as_deref(), Some(FINDS_ONLY));
+        assert_eq!(fetch_down_text(&e, None).as_deref(), Some(status_in(Locale::Ru).finds_only));
         assert_eq!(fetch_down_text(&SourceError::Io("disk".into()), None), None);
         // Set aside in «Источники» only while it is.
         let mut r = Refusals::default();
@@ -3876,11 +3956,14 @@ mod tests {
     #[test]
     fn the_line_of_a_wait() {
         let why = ["Tidal сейчас не отдаёт остальное".to_owned(), "сервер Qobuz недоступен".to_owned()];
-        let line = later_line(Some((1, 10)), &why, 30 * MIN, &[SourceKey::Tidal, SourceKey::Soulseek]);
+        let line = later_line_in(Locale::Ru, Some((1, 10)), &why, 30 * MIN, &[SourceKey::Tidal, SourceKey::Soulseek]);
         assert!(line.starts_with("Есть 1 из 10 · Tidal сейчас не отдаёт остальное, сервер Qobuz недоступен · "), "{line}");
         assert!(line.ends_with(" спрошу Tidal, Soulseek"), "{line}");
-        let line = later_line(None, &["сервер Qobuz недоступен".to_owned()], 5 * MIN, &[]);
+        let line = later_line_in(Locale::Ru, None, &["сервер Qobuz недоступен".to_owned()], 5 * MIN, &[]);
         assert!(line.starts_with("Сервер Qobuz недоступен · попробую снова "), "{line}");
+        let line = later_line_in(Locale::En, Some((1, 10)), &["the Qobuz server is down".to_owned()], 5 * MIN, &[SourceKey::Tidal]);
+        assert!(line.starts_with("1 of 10 here · the Qobuz server is down · "), "{line}");
+        assert!(line.ends_with(" asking Tidal"), "{line}");
     }
 
     #[test]

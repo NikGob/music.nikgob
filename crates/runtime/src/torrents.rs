@@ -132,14 +132,25 @@ fn config(p: &v::Prefs, downloads: &Path, state: &Path) -> TorrentConfig {
     }
 }
 
+/// A payload's size in decimal units: `"1.2 ГБ"`, `"820 МБ"`.
 pub(crate) fn human_bytes(b: u64) -> String {
+    human_bytes_in(nikgob_core::i18n::Locale::Ru, b)
+}
+
+/// [`human_bytes`] in `loc`'s units.
+pub(crate) fn human_bytes_in(loc: nikgob_core::i18n::Locale, b: u64) -> String {
+    use nikgob_core::i18n::Locale;
+    let (gb, mb, kb) = match loc {
+        Locale::Ru => ("ГБ", "МБ", "КБ"),
+        Locale::En => ("GB", "MB", "KB"),
+    };
     let b = b as f64;
     if b >= 1e9 {
-        format!("{:.1} ГБ", b / 1e9)
+        format!("{:.1} {gb}", b / 1e9)
     } else if b >= 1e6 {
-        format!("{:.1} МБ", b / 1e6)
+        format!("{:.1} {mb}", b / 1e6)
     } else {
-        format!("{:.0} КБ", b / 1e3)
+        format!("{:.0} {kb}", b / 1e3)
     }
 }
 
@@ -206,7 +217,7 @@ impl Worker {
             return;
         }
         let (Some(cfg), Some(svc)) = (self.torrent_config(), self.import.as_ref()) else {
-            self.toast_err("Торренты недоступны", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).torrents_unavailable, None);
             self.torrents.pending.clear();
             self.inbox_torrents_not_started(false);
             return;
@@ -244,7 +255,7 @@ impl Worker {
             Err(e) => {
                 log::error!("torrent client: {e}");
                 self.torrents.pending.clear();
-                self.toast_err("Не запустился торрент-клиент", None);
+                self.toast_err(nikgob_core::i18n::errors_in(self.locale()).torrent_client_failed, None);
                 self.inbox_torrents_not_started(true);
             }
         }
@@ -268,7 +279,7 @@ impl Worker {
                 Ok(bytes) => self.add_payload(TorrentPayload::TorrentFile(bytes), None, None),
                 Err(e) => {
                     log::warn!("{}: {e}", path.display());
-                    self.toast_err("Не получилось прочитать .torrent", None);
+                    self.toast_err(nikgob_core::i18n::errors_in(self.locale()).could_not_read_torrent, None);
                 }
             },
             Command::AddMagnet(m) => {
@@ -276,7 +287,7 @@ impl Worker {
                 if m.starts_with("magnet:") {
                     self.add_payload(TorrentPayload::Magnet(m.clone()), None, Some(m));
                 } else {
-                    self.toast_err("Это не magnet-ссылка", None);
+                    self.toast_err(nikgob_core::i18n::errors_in(self.locale()).not_a_magnet, None);
                 }
             }
             // Import jobs (folders, files) are never paused; a cancel stops
@@ -287,7 +298,7 @@ impl Worker {
             Command::PauseJob(id, _) if crate::running::job_kind(id) == crate::running::JobKind::Direct => {}
             Command::CancelJob(id) if crate::running::job_kind(id) == crate::running::JobKind::Direct => self.cancel_run(id),
             Command::PauseJob(id, _) if id & crate::IMPORT_ID != 0 => {
-                self.toast_info("Импорт нельзя поставить на паузу — его можно только отменить", None);
+                self.toast_info(nikgob_core::i18n::errors_in(self.locale()).import_no_pause, None);
             }
             Command::CancelJob(id) if id & crate::IMPORT_ID != 0 => self.cancel_import(id & !crate::IMPORT_ID),
             Command::PauseJob(id, pause) => self.with_client(Box::new(move |w, c| {
@@ -366,10 +377,11 @@ impl Worker {
         let (Some(c), Some(indexer), Some(svc)) =
             (self.candidates.get(result).cloned(), self.indexer.clone(), self.import.as_ref())
         else {
-            self.toast_err("Результат поиска устарел — найди заново", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).search_stale, None);
             return;
         };
         let cid = c.id.clone();
+        let no_torrent = nikgob_core::i18n::errors_in(self.locale()).prowlarr_no_torrent.to_owned();
         let then = move |w: &mut Worker, p: TorrentPayload| {
             w.torrents.payloads.insert(cid, p.clone());
             then(w, p);
@@ -378,7 +390,7 @@ impl Worker {
         svc.spawn(async move {
             let r = tokio::time::timeout(Duration::from_secs(60), indexer.fetch_torrent(&c))
                 .await
-                .map_err(|_| "Prowlarr не отдал торрент".to_owned())
+                .map_err(|_| no_torrent)
                 .and_then(|r| r.map_err(|e| e.to_string()));
             let _ = tx.send(Internal::PayloadFetched(result, r, Box::new(then)));
         });
@@ -394,7 +406,8 @@ impl Worker {
             Ok(p) => then(self, p),
             Err(e) => {
                 log::warn!("fetching torrent: {e}");
-                self.toast_err(format!("Не скачать .torrent: {e}"), None);
+                let loc = self.locale();
+                self.toast_err(nikgob_core::i18n::ErrorStrings::fmt_could_not_fetch_torrent_in(loc, &e), None);
                 self.publish(|s| {
                     if let Some(f) = s.downloads.files.as_mut().filter(|f| f.result == Some(result)) {
                         f.loading = false;
@@ -407,7 +420,7 @@ impl Worker {
 
     fn download_result(&mut self, result: usize, files: Option<Vec<usize>>) {
         self.publish(|s| s.downloads.files = None);
-        self.toast_work("Добавляю раздачу…", None);
+        self.toast_work(nikgob_core::i18n::errors_in(self.locale()).adding_torrent, None);
         self.fetch_payload(result, move |w, p| {
             let magnet = match &p {
                 TorrentPayload::Magnet(m) => Some(m.clone()),
@@ -488,6 +501,7 @@ impl Worker {
         self.with_client(Box::new(move |w, c| {
             let Some(svc) = &w.import else { return };
             let tx = svc.internal();
+            let gone = nikgob_core::i18n::errors_in(w.locale()).torrent_gone.to_owned();
             svc.spawn(async move {
                 let r = match c.add(p, files.clone()).await {
                     Ok(id) => {
@@ -501,7 +515,7 @@ impl Worker {
                             wish,
                             consume,
                         })
-                        .ok_or_else(|| ("торрент пропал из сессии".to_owned(), back))
+                        .ok_or_else(|| (gone, back))
                     }
                     Err(e) => Err((e.to_string(), consume)),
                 };
@@ -558,7 +572,8 @@ impl Worker {
                     log::warn!("saving download: {e}");
                 }
                 if self.state.read().prefs.download_toasts {
-                    self.toast_work(format!("Качается: {name}"), None);
+                    let msg = nikgob_core::i18n::ErrorStrings::fmt_downloading_named_in(self.locale(), &name);
+                    self.toast_work(msg, None);
                 }
                 self.poll_torrents();
             }
@@ -567,7 +582,8 @@ impl Worker {
                 if let Some(staging) = consume {
                     self.inbox_torrent_answered(&staging, false);
                 }
-                self.toast_err(format!("Не получилось добавить раздачу: {e}"), None);
+                let msg = nikgob_core::i18n::ErrorStrings::fmt_could_not_add_torrent_in(self.locale(), &e);
+                self.toast_err(msg, None);
             }
         }
     }
@@ -616,7 +632,8 @@ impl Worker {
                 .get(&t.info_hash)
                 .is_some_and(|d| matches!(d.status, DownloadStatus::Seeding | DownloadStatus::Done));
             if done && !t.name.is_empty() && !self.torrents.history.iter().any(|j| j.title == t.name) {
-                let subtitle = format!("Скачано {}", human_bytes(t.total));
+                let loc = self.locale();
+                let subtitle = nikgob_core::i18n::status::fmt_downloaded_size_in(loc, &human_bytes_in(loc, t.total), false);
                 if let Err(e) = self.lib.log_job("torrent", &t.name, &subtitle, None) {
                     log::warn!("job log: {e}");
                 }
@@ -647,6 +664,7 @@ impl Worker {
             .collect();
 
         let seed_days = self.state.read().prefs.seed_days;
+        let seed_loc = self.locale();
         let active: Vec<v::Job> = list.iter().filter(|t| !complete(t)).map(job).collect();
         let seeding: Vec<v::SeedRow> = list
             .iter()
@@ -665,7 +683,7 @@ impl Worker {
                             .duration_since(std::time::SystemTime::now())
                             .unwrap_or_default()
                             .as_secs();
-                        format!("чистка через {} дн.", left.div_ceil(86_400))
+                        nikgob_core::i18n::status::fmt_seeding_cleanup_in(seed_loc, left.div_ceil(86_400))
                     }),
                 up_bps: t.up_bps,
                 down_bps: t.down_bps,
@@ -731,7 +749,8 @@ impl Worker {
 
     fn import_torrent(&mut self, t: &TorrentStatus) {
         let files: Vec<PathBuf> = t.selected_files.iter().filter(|p| p.is_file()).cloned().collect();
-        let subtitle = format!("Скачано {} · импорт в библиотеку", human_bytes(t.total));
+        let loc = self.locale();
+        let subtitle = nikgob_core::i18n::status::fmt_downloaded_size_in(loc, &human_bytes_in(loc, t.total), true);
         if let Err(e) = self.lib.log_job("torrent", &t.name, &subtitle, None) {
             log::warn!("job log: {e}");
         }
@@ -752,7 +771,7 @@ impl Worker {
         self.torrents.history.truncate(100);
         self.torrents.last_view = None;
         if self.state.read().prefs.download_toasts {
-            self.toast_ok(format!("Скачано: {}", t.name), None);
+            self.toast_ok(nikgob_core::i18n::ErrorStrings::fmt_downloaded_named_in(loc, &t.name), None);
         }
         // Downloaded for a wishlist item: its files become the item's tracks.
         let item = self.lib.get_download(&t.info_hash).ok().flatten().and_then(|d| d.wishlist_id);
@@ -773,7 +792,7 @@ impl Worker {
         let targets = item.map(|item| self.wish_targets(item)).unwrap_or_default();
         self.import_for(
             files,
-            format!("Импорт «{}»", t.name),
+            nikgob_core::i18n::status::fmt_import_of_in(loc, &t.name, 1),
             SourceOrigin::Torrent {
                 info_hash: t.info_hash.clone(),
                 path_in_torrent: String::new(),

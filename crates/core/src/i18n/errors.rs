@@ -62,6 +62,36 @@ pub struct ErrorStrings {
     pub nothing_to_download: &'static str,
     pub recs_still_building: &'static str,
     pub blend_impossible: &'static str,
+    pub import_unavailable: &'static str,
+    pub deleting_unavailable: &'static str,
+    pub could_not_delete: &'static str,
+    pub restored: &'static str,
+    pub restore_partly: &'static str,
+    pub purge_partly: &'static str,
+    pub import_failed_file: &'static str,
+    pub import_started: &'static str,
+    pub import_cancelling: &'static str,
+    pub torrent: &'static str,
+    pub import: &'static str,
+    pub masters_folder_in_use: &'static str,
+    pub torrents_unavailable: &'static str,
+    pub torrent_client_failed: &'static str,
+    pub import_no_pause: &'static str,
+    pub search_stale: &'static str,
+    pub prowlarr_no_torrent: &'static str,
+    pub adding_torrent: &'static str,
+    pub torrent_gone: &'static str,
+    pub already_in_wishlist: &'static str,
+    pub everything_downloaded: &'static str,
+    pub downloads_with_source: &'static str,
+    pub finding_on_youtube: &'static str,
+    pub could_not_read_torrent: &'static str,
+    pub not_a_magnet: &'static str,
+    pub could_not_create_folder: &'static str,
+    pub files_gone: &'static str,
+    pub need_download_source: &'static str,
+    pub search_later: &'static str,
+    pub nothing_found_to_download: &'static str,
 }
 
 impl ErrorStrings {
@@ -278,6 +308,177 @@ impl ErrorStrings {
             Locale::En => format!("{title}: not found on {service_name}"),
         }
     }
+
+    /// Formats `"в файле «X» другая песня — «Y»"` / `"another song is in
+    /// the file “X” — “Y”"`.
+    pub fn fmt_wrong_audio_in(loc: Locale, title: &str, sounds_like: Option<&str>) -> String {
+        match (loc, sounds_like) {
+            (Locale::Ru, Some(s)) => format!("в файле «{title}» другая песня — «{s}»"),
+            (Locale::Ru, None) => format!("в файле «{title}» другая песня"),
+            (Locale::En, Some(s)) => format!("another song is in the file “{title}” — “{s}”"),
+            (Locale::En, None) => format!("another song is in the file “{title}”"),
+        }
+    }
+
+    /// Formats `"7 tracks in the Trash (30 days)"` / `"7 треков в корзине (30 дней)"`.
+    pub fn fmt_in_trash_in(loc: Locale, what: &str) -> String {
+        match loc {
+            Locale::Ru => format!("{what} в корзине (30 дней)"),
+            Locale::En => format!("{what} in the Trash (30 days)"),
+        }
+    }
+
+    /// Formats `"Deleted for good: 7"` / `"Удалено навсегда: 7"`.
+    pub fn fmt_purged_in(loc: Locale, n: usize) -> String {
+        match loc {
+            Locale::Ru => format!("Удалено навсегда: {n}"),
+            Locale::En => format!("Deleted for good: {n}"),
+        }
+    }
+
+    /// Formats `"FLAC masters moved: 3 (hash checked, old ones deleted)"`.
+    pub fn fmt_masters_moved_in(loc: Locale, n: usize) -> String {
+        match loc {
+            Locale::Ru => format!("Перенесено FLAC-оригиналов: {n} (проверено по хешу, старые удалены)"),
+            Locale::En => format!("FLAC masters moved: {n} (hash checked, old ones deleted)"),
+        }
+    }
+
+    /// Formats `"FLAC folder: C:\flac"` / `"Папка FLAC: C:\flac"`.
+    pub fn fmt_flac_folder_in(loc: Locale, dir: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Папка FLAC: {dir}"),
+            Locale::En => format!("FLAC folder: {dir}"),
+        }
+    }
+
+    /// Formats `"Could not fetch the .torrent: {detail}"`.
+    pub fn fmt_could_not_fetch_torrent_in(loc: Locale, detail: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Не скачать .torrent: {detail}"),
+            Locale::En => format!("Could not fetch the .torrent: {detail}"),
+        }
+    }
+
+    /// Formats `"Downloading: {name}"` / `"Качается: {name}"`.
+    pub fn fmt_downloading_named_in(loc: Locale, name: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Качается: {name}"),
+            Locale::En => format!("Downloading: {name}"),
+        }
+    }
+
+    /// Formats `"Downloaded: {name}"` / `"Скачано: {name}"`.
+    pub fn fmt_downloaded_named_in(loc: Locale, name: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Скачано: {name}"),
+            Locale::En => format!("Downloaded: {name}"),
+        }
+    }
+
+    /// Formats `"Could not add the torrent: {detail}"`.
+    pub fn fmt_could_not_add_torrent_in(loc: Locale, detail: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Не получилось добавить раздачу: {detail}"),
+            Locale::En => format!("Could not add the torrent: {detail}"),
+        }
+    }
+
+    /// Formats `"Nothing better found: {title}"` / `"Лучше не нашёл: {title}"`.
+    pub fn fmt_better_not_found_in(loc: Locale, title: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Лучше не нашёл: {title}"),
+            Locale::En => format!("Nothing better found: {title}"),
+        }
+    }
+
+    /// Formats `"Looking for better quality: “{title}”"`.
+    pub fn fmt_searching_better_in(loc: Locale, title: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Ищу качество лучше: «{title}»"),
+            Locale::En => format!("Looking for better quality: “{title}”"),
+        }
+    }
+
+    /// Formats `"“{album}”: replaced 3 files · old ones in the Trash"`.
+    pub fn fmt_album_replaced_in(loc: Locale, album: &str, n: usize, files: &str) -> String {
+        match loc {
+            Locale::Ru => format!("«{album}»: заменил {n} {files} · прежние в Корзине"),
+            Locale::En => format!("“{album}”: replaced {n} {files} · old ones in the Trash"),
+        }
+    }
+
+    /// Formats `"Previous files restored: 3"`.
+    pub fn fmt_files_back_in(loc: Locale, done: usize) -> String {
+        match loc {
+            Locale::Ru => format!("Вернул прежние файлы: {done}"),
+            Locale::En => format!("Previous files restored: {done}"),
+        }
+    }
+
+    /// Formats `"Previous files restored: 3, failed: 1"`.
+    pub fn fmt_files_back_partly_in(loc: Locale, done: usize, failed: usize) -> String {
+        match loc {
+            Locale::Ru => format!("Вернул прежние файлы: {done}, не получилось: {failed}"),
+            Locale::En => format!("Previous files restored: {done}, failed: {failed}"),
+        }
+    }
+
+    /// Formats `"In Wishlist: 3 tracks"` / `"В «Хочу скачать»: 3 трека"`.
+    pub fn fmt_wishlist_added_in(loc: Locale, n: u64, tracks: &str) -> String {
+        match loc {
+            Locale::Ru => format!("В «Хочу скачать»: {n} {tracks}"),
+            Locale::En => format!("In Wishlist: {n} {tracks}"),
+        }
+    }
+
+    /// Formats `"In Wishlist: “Song”"` / `"В «Хочу скачать»: «Song»"`.
+    pub fn fmt_wishlist_added_one_in(loc: Locale, what: &str) -> String {
+        match loc {
+            Locale::Ru => format!("В «Хочу скачать»: {what}"),
+            Locale::En => format!("In Wishlist: {what}"),
+        }
+    }
+
+    /// Formats `"Won't download “{title}”"` / `"Не буду качать «{title}»"`.
+    pub fn fmt_wont_download_one_in(loc: Locale, title: &str) -> String {
+        match loc {
+            Locale::Ru => format!("Не буду качать «{title}»"),
+            Locale::En => format!("Won't download “{title}”"),
+        }
+    }
+
+    /// Formats `"Won't download: 3"` / `"Не буду качать: 3"`.
+    pub fn fmt_wont_download_in(loc: Locale, n: usize) -> String {
+        match loc {
+            Locale::Ru => format!("Не буду качать: {n}"),
+            Locale::En => format!("Won't download: {n}"),
+        }
+    }
+
+    /// Formats `"Queued for download: 3"` / `"В очереди на скачивание: 3"`.
+    pub fn fmt_queued_for_download_in(loc: Locale, n: usize) -> String {
+        match loc {
+            Locale::Ru => format!("В очереди на скачивание: {n}"),
+            Locale::En => format!("Queued for download: {n}"),
+        }
+    }
+
+    /// Formats `"Searching again: 3"` / `"Ищу заново: 3"`.
+    pub fn fmt_searching_again_in(loc: Locale, n: usize) -> String {
+        match loc {
+            Locale::Ru => format!("Ищу заново: {n}"),
+            Locale::En => format!("Searching again: {n}"),
+        }
+    }
+
+    /// Formats `"{what} · downloads once a download source is on"`.
+    pub fn fmt_downloads_with_source_in(loc: Locale, what: &str) -> String {
+        match loc {
+            Locale::Ru => format!("{what} · скачается, когда включишь источник скачивания"),
+            Locale::En => format!("{what} · downloads once a download source is on"),
+        }
+    }
 }
 
 pub static RU: ErrorStrings = ErrorStrings {
@@ -339,6 +540,36 @@ pub static RU: ErrorStrings = ErrorStrings {
     nothing_to_download: "Нечего скачивать",
     recs_still_building: "Рекомендации ещё собираются — попробуй чуть позже",
     blend_impossible: "Из этих профилей микса не собрать",
+    import_unavailable: "Импорт недоступен",
+    deleting_unavailable: "Удаление недоступно",
+    could_not_delete: "Не получилось удалить",
+    restored: "Восстановлено",
+    restore_partly: "Восстановить удалось не всё",
+    purge_partly: "Удалено, но не все файлы получилось стереть",
+    import_failed_file: "Не получилось импортировать файл",
+    import_started: "Импорт начался · смотри «Загрузки»",
+    import_cancelling: "Отменяю импорт — добавленное уберу",
+    torrent: "Торрент",
+    import: "Импорт",
+    masters_folder_in_use: "Эта папка FLAC уже используется",
+    torrents_unavailable: "Торренты недоступны",
+    torrent_client_failed: "Не запустился торрент-клиент",
+    import_no_pause: "Импорт нельзя поставить на паузу — его можно только отменить",
+    search_stale: "Результат поиска устарел — найди заново",
+    prowlarr_no_torrent: "Prowlarr не отдал торрент",
+    adding_torrent: "Добавляю раздачу…",
+    torrent_gone: "торрент пропал из сессии",
+    already_in_wishlist: "Уже в «Хочу скачать»",
+    everything_downloaded: "Всё уже скачано",
+    downloads_with_source: "скачается, когда включишь источник скачивания",
+    finding_on_youtube: "Ищу трек на YouTube Music…",
+    could_not_read_torrent: "Не получилось прочитать .torrent",
+    not_a_magnet: "Это не magnet-ссылка",
+    could_not_create_folder: "Не получилось создать папку для загрузки",
+    files_gone: "Скачанные файлы пропали — поищу снова",
+    need_download_source: "Нужен источник скачивания",
+    search_later: "Не то — поищу позже",
+    nothing_found_to_download: "Не нашёл, где скачать",
 };
 
 pub static EN: ErrorStrings = ErrorStrings {
@@ -400,6 +631,36 @@ pub static EN: ErrorStrings = ErrorStrings {
     nothing_to_download: "Nothing to download",
     recs_still_building: "Recommendations are still building — try again shortly",
     blend_impossible: "Could not build a mix from these profiles",
+    import_unavailable: "Import unavailable",
+    deleting_unavailable: "Deleting unavailable",
+    could_not_delete: "Could not delete",
+    restored: "Restored",
+    restore_partly: "Not everything was restored",
+    purge_partly: "Deleted, but some files could not be erased",
+    import_failed_file: "Could not import the file",
+    import_started: "Import started · see Downloads",
+    import_cancelling: "Cancelling the import — added files go back",
+    torrent: "Torrent",
+    import: "Import",
+    masters_folder_in_use: "This FLAC folder is already in use",
+    torrents_unavailable: "Torrents are unavailable",
+    torrent_client_failed: "The torrent client did not start",
+    import_no_pause: "An import cannot be paused — only cancelled",
+    search_stale: "The search result is out of date — search again",
+    prowlarr_no_torrent: "Prowlarr did not give the torrent",
+    adding_torrent: "Adding the torrent…",
+    torrent_gone: "the torrent left the session",
+    already_in_wishlist: "Already in Wishlist",
+    everything_downloaded: "Everything is already downloaded",
+    downloads_with_source: "downloads once a download source is on",
+    finding_on_youtube: "Finding the track on YouTube Music…",
+    could_not_read_torrent: "Could not read the .torrent",
+    not_a_magnet: "That is not a magnet link",
+    could_not_create_folder: "Could not create the download folder",
+    files_gone: "The downloaded files are gone — searching again",
+    need_download_source: "A download source is needed",
+    search_later: "Not it — search later",
+    nothing_found_to_download: "Couldn't find where to download it",
 };
 
 locale_table! {

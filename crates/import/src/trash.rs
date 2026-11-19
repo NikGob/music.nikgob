@@ -361,7 +361,7 @@ pub fn trash_master_files(library: &Library, trash_dir: &Path, masters_dir: &Pat
         match trash_one(library, trash_dir, path, file_hash, gate) {
             Ok(Some(id)) => out.ids.push(id),
             Ok(None) => {
-                out.error = Some("копий на устройствах уже меньше нужного или выбор изменился".to_owned());
+                out.error = Some("the copies on the devices are no longer enough, or the choice changed".to_owned());
                 break;
             }
             Err(e) => {
@@ -407,7 +407,7 @@ fn fill(src: &Path, dest: &Path, hash: &str) -> std::io::Result<()> {
     }
     let same = std::fs::metadata(long_path(dest)).map(|m| m.len()).ok() == Some(size)
         && crate::fsutil::hash_file(dest).ok().is_some_and(|h| h.eq_ignore_ascii_case(hash));
-    if same { Ok(()) } else { Err(std::io::Error::other("проверка хеша не прошла")) }
+    if same { Ok(()) } else { Err(std::io::Error::other("hash verification failed")) }
 }
 
 /// One master file to the Trash: a name there claimed, the note written
@@ -439,7 +439,7 @@ fn trash_one(library: &Library, trash_dir: &Path, path: &Path, hash: &str, gate:
     let mut step = || -> std::io::Result<()> {
         let now = std::fs::symlink_metadata(long_path(path))?;
         if !now.file_type().is_file() || now.len() != size || now.modified().ok() != mtime {
-            return Err(std::io::Error::other("файл изменился"));
+            return Err(std::io::Error::other("the file changed"));
         }
         std::fs::remove_file(long_path(path))?;
         library.finish_master_trash(id).map_err(|e| std::io::Error::other(e.to_string()))

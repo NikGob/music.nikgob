@@ -325,7 +325,7 @@ fn stage_temp(src: &Path, dir: &Path, size: u64, hash: Option<&str>) -> Result<P
         let ok = got == size && hash.is_none_or(|h| fsutil::hash_file(&tmp).ok().is_some_and(|g| g.eq_ignore_ascii_case(h)));
         if !ok {
             return Err(ImportError::Other(format!(
-                "проверка хеша не прошла для {}: копия {} не совпала с оригиналом",
+                "hash verification failed for {}: the copy {} did not match the original",
                 tmp.display(),
                 src.display()
             )));

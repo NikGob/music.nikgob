@@ -196,7 +196,7 @@ pub fn move_new_verified(from: &Path, to: &Path, expected_hash: &str) -> std::io
         && hash_file(to).ok().is_some_and(|h| h.eq_ignore_ascii_case(expected_hash));
     if !same {
         let _ = fs::remove_file(&t);
-        return Err(std::io::Error::other(format!("проверка хеша не прошла для {}", to.display())));
+        return Err(std::io::Error::other(format!("hash verification failed for {}", to.display())));
     }
     if let Err(e) = fs::remove_file(&f) {
         let _ = fs::remove_file(&t);
