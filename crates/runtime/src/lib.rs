@@ -124,6 +124,26 @@ pub struct PlayRequest {
     pub keep_timbre: bool,
 }
 
+/// What a playing item really is, as data: the words are made when the
+/// player is published, in the UI's language of that moment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QualityLabel {
+    /// The service's own words (a codec and a bitrate).
+    Text(String),
+    /// SoundCloud's own player.
+    SoundcloudPlayer,
+}
+
+impl QualityLabel {
+    /// The label in `loc`.
+    pub fn text_in(&self, loc: nikgob_core::i18n::Locale) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::SoundcloudPlayer => nikgob_core::i18n::backend_in(loc).soundcloud_player.to_owned(),
+        }
+    }
+}
+
 /// Events the backend reports back (from any thread) through
 /// [`Runtime::playback_sender`].
 #[derive(Clone, Debug, PartialEq)]
@@ -144,7 +164,7 @@ pub enum PlaybackEvent {
     Ended { id: u64 },
     Error { id: u64, message: String },
     /// What a stream item actually plays ("Opus ~160 кбит/с"), once opened.
-    Quality { id: u64, label: String },
+    Quality { id: u64, label: QualityLabel },
     /// How long the item is, as the engine found it (the container's
     /// length, else the stream's): the length of a track that has none.
     Duration { id: u64, duration: Duration },
@@ -879,7 +899,7 @@ struct Worker {
     playing_source: Option<(SourceId, SourceKind)>,
     /// What recent stream items really are, by item id (see
     /// [`PlaybackEvent::Quality`]; the preloaded next one opens early).
-    qualities: Vec<(u64, String)>,
+    qualities: Vec<(u64, QualityLabel)>,
     indexer: Option<Arc<dyn nikgob_core::indexer::Indexer>>,
     /// Download sources other than the indexer's torrents (khinsider, the
     /// free services, Soulseek), whether on or not.
@@ -3324,7 +3344,7 @@ impl Worker {
                 }
             }
             PlaybackEvent::Quality { id, label } => {
-                log::debug!(target: "nikgob_runtime::streams", "item {id} plays as {label}");
+                log::debug!(target: "nikgob_runtime::streams", "item {id} plays as {}", label.text_in(self.locale()));
                 self.qualities.retain(|(i, _)| *i != id);
                 if self.qualities.len() >= 4 {
                     self.qualities.remove(0);
@@ -3504,7 +3524,7 @@ impl Worker {
     fn audio_quality(&self) -> Option<String> {
         let service = self.playing_source.and_then(|(_, k)| k.service())?;
         let id = self.playing?.id;
-        let known = self.qualities.iter().find(|(i, _)| *i == id).map(|(_, q)| q.clone());
+        let known = self.qualities.iter().find(|(i, _)| *i == id).map(|(_, q)| q.text_in(self.locale()));
         Some(known.unwrap_or_else(|| service.nominal_quality()))
     }
 
@@ -4038,6 +4058,15 @@ impl Worker {
                 self.load_artist(a);
             }
             self.publish_downloads();
+            // Everything that holds words made in the old language: the
+            // cards of «Подтверди», the wishlist's rows and cards, the
+            // running downloads' lines.
+            self.publish_fake_offers();
+            self.replica_publish();
+            self.publish_api_confirms();
+            self.publish_wishlist();
+            self.relocalize_running();
+            self.relocalize_torrents();
         }
     }
 

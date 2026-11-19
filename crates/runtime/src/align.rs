@@ -167,6 +167,9 @@ pub(crate) struct Settings {
     pub(crate) deep: bool,
     /// The setting to keep processed texts, even failed ones.
     pub(crate) keep_misfits: bool,
+    /// The worker's UI language: the thread has no prefs of its own, and
+    /// the global locale is not its to read.
+    pub(crate) locale: Locale,
 }
 
 impl Settings {
@@ -179,6 +182,7 @@ impl Settings {
             models_auto: p.lyrics_models_auto,
             deep: p.lyrics_deep,
             keep_misfits: p.lyrics_keep_misfits,
+            locale: p.resolved_locale(),
         }
     }
 
@@ -494,9 +498,9 @@ struct Thread {
 }
 
 impl Thread {
-    /// The UI language: the align thread has no prefs of its own.
+    /// The worker's UI language: the align thread has no prefs of its own.
     fn locale(&self) -> Locale {
-        nikgob_core::i18n::locale()
+        self.settings.locale
     }
 }
 
@@ -563,7 +567,13 @@ impl Thread {
                     self.offline = false;
                 }
                 self.aligner.set_deep(s.deep());
+                let relocalize = s.locale != self.settings.locale;
                 self.settings = s;
+                // The parts' names are words: they go out again in the new
+                // language.
+                if relocalize {
+                    self.models();
+                }
             }
             Req::Playing(p) => self.playing = p,
             Req::Remove(id) => {
@@ -1470,7 +1480,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let (_req_tx, req_rx) = crossbeam_channel::unbounded();
-        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: false, models_auto: false, deep: false, keep_misfits: false };
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: false, models_auto: false, deep: false, keep_misfits: false, locale: Locale::Ru };
         let mut t = Thread::new(Library::open_in_memory().unwrap(), dir.path().into(), Catalog::new(dir.path()), settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let track = TrackId::new();
         let check = || Req::Check { track, path: dir.path().join("a.opus"), texts: Vec::new(), recognise: false };
@@ -1553,7 +1563,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (_req_tx, req_rx) = crossbeam_channel::unbounded();
         let lib = Library::open_in_memory().unwrap();
-        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false, keep_misfits: false };
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false, keep_misfits: false, locale: Locale::Ru };
         let mut t = Thread::new(lib, dir.path().into(), Catalog::new(dir.path()), settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let mut service = AlignService::default();
         t.cancel = service.cancel.clone();
@@ -1600,7 +1610,7 @@ mod tests {
         for f in ModelId::AlignerRuDeep.spec().files {
             std::fs::write(deep_part.join(f.name), b"").unwrap();
         }
-        let off = Settings { gpu: false, words_all: false, recognise: false, separate: false, models_auto: false, deep: false, keep_misfits: false };
+        let off = Settings { gpu: false, words_all: false, recognise: false, separate: false, models_auto: false, deep: false, keep_misfits: false, locale: Locale::Ru };
         let on = Settings { deep: true, ..off };
         let mut t = Thread::new(lib, dir.path().into(), catalog, on, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let track = TrackId::new();
@@ -1646,7 +1656,7 @@ mod tests {
             std::fs::create_dir_all(catalog.path(id)).unwrap();
             std::fs::write(catalog.path(id).join(".ready"), b"").unwrap();
         }
-        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: true, keep_misfits: false };
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: true, keep_misfits: false, locale: Locale::Ru };
         let mut t = Thread::new(lib, dir.path().into(), catalog, settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let text = AlignText { source: LyricsSource::Genius, lines: vec![LyricLine::new(Duration::ZERO, "Я иду домой")], timed: false, hash: "h".into() };
         let ids = t.needs(std::slice::from_ref(&text));
@@ -1670,7 +1680,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (_req_tx, req_rx) = crossbeam_channel::unbounded();
         let lib = Library::open_in_memory().unwrap();
-        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false, keep_misfits: false };
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false, keep_misfits: false, locale: Locale::Ru };
         let mut t = Thread::new(lib, dir.path().into(), Catalog::new(dir.path()), settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let service = AlignService::default();
         t.checks = service.checks.clone();
@@ -1767,7 +1777,7 @@ mod tests {
         let catalog = Catalog::new(dir.path());
         std::fs::create_dir_all(catalog.path(ModelId::AlignerRu)).unwrap();
         std::fs::write(catalog.path(ModelId::AlignerRu).join(".ready"), b"").unwrap();
-        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false, keep_misfits: false };
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false, keep_misfits: false, locale: Locale::Ru };
         let mut t = Thread::new(lib, dir.path().into(), catalog, settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let mut service = AlignService::default();
         assert!(!service.download(ModelId::SeparatorDeep), "no thread: nothing asked");

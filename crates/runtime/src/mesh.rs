@@ -10,10 +10,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use nikgob_core::i18n::activity::fmt_device_forgotten_in;
-use nikgob_core::i18n::activity_in;
 use nikgob_core::settings::{MeshPinsRecord, MeshSettings, Settings};
 use nikgob_library::{NodeRow, OnlyCopy};
-use nikgob_view::{Command, MeshForgetAsk, MeshKind, MeshNodeView, MeshPairing, MeshPins, MeshProfile, MeshScope, MeshSnapshot, MeshSyncView, MeshView};
+use nikgob_view::{
+    Command, MeshForgetAsk, MeshKind, MeshNodeView, MeshPairing, MeshPairingError, MeshPins, MeshProfile, MeshScope,
+    MeshSnapshot, MeshSyncView, MeshView,
+};
 
 use crate::{Later, Worker};
 
@@ -38,8 +40,8 @@ pub(crate) struct MeshKeep {
     /// Forgets passed to the mesh service: hidden until a report no longer
     /// lists the device (its row goes then) or the service says it failed.
     sent: Vec<String>,
-    /// A pairing that could not even start here (no mesh service).
-    failed: Option<String>,
+    /// A pairing that could not even start here (no mesh service), as data.
+    failed: Option<MeshPairingError>,
     /// Devices whose forget is being checked (the originals only they hold)
     /// on a thread.
     checking: Vec<String>,
@@ -446,7 +448,7 @@ impl Worker {
             }
             None => {
                 if matches!(c, Command::MeshPairNearby { .. } | Command::MeshCreateInvite { .. } | Command::MeshJoin { .. }) {
-                    self.mesh.failed = Some(activity_in(self.locale()).mesh_not_running.to_owned());
+                    self.mesh.failed = Some(MeshPairingError::NotRunning);
                     self.mesh_publish();
                 } else if c == Command::MeshClearPairing && self.mesh.failed.take().is_some() {
                     self.mesh_publish();
@@ -830,8 +832,8 @@ mod tests {
 
     #[test]
     fn a_pairing_that_could_not_start_says_why() {
-        let keep = MeshKeep { failed: Some("Межсеть не запущена".into()), ..MeshKeep::default() };
-        assert_eq!(merge(&keep).pairing, MeshPairing::Failed("Межсеть не запущена".into()));
+        let keep = MeshKeep { failed: Some(MeshPairingError::NotRunning), ..MeshKeep::default() };
+        assert_eq!(merge(&keep).pairing, MeshPairing::Failed(MeshPairingError::NotRunning));
     }
 
     #[test]

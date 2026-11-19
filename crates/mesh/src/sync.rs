@@ -37,9 +37,7 @@ use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use nikgob_library::{Library, SYNC_TABLES, SyncHeads, SyncPage};
-use nikgob_view::{Command, MeshScope, MeshSyncView};
-use nikgob_core::i18n::mesh::fmt_sync_conflicts_in;
-use nikgob_core::i18n::{Locale, mesh_in};
+use nikgob_view::{Command, MeshScope, MeshSyncError, MeshSyncView};
 use tokio::time::Instant;
 use super::Shared;
 
@@ -73,8 +71,8 @@ const FETCH_AGAIN: Duration = Duration::from_secs(600);
 /// Pictures remembered as not given, at most.
 const MISSES_MAX: usize = 2_000;
 /// What a device's row says when syncing is off on this database.
-fn blocked_in(loc: Locale) -> &'static str {
-    mesh_in(loc).sync_blocked
+fn blocked() -> MeshSyncError {
+    MeshSyncError::Blocked
 }
 
 /// What the loop keeps of a device.
@@ -103,13 +101,12 @@ enum Failure {
 }
 
 impl Failure {
-    /// What the device's row shows, in `loc`.
-    fn shown(&self, loc: Locale) -> &'static str {
-        let s = mesh_in(loc);
+    /// What the device's row shows, as data.
+    fn shown(&self) -> MeshSyncError {
         match self {
-            Self::Refused => s.sync_refused,
-            Self::Ahead => s.sync_clock_ahead,
-            Self::Other(_) => s.sync_failed,
+            Self::Refused => MeshSyncError::Refused,
+            Self::Ahead => MeshSyncError::ClockAhead,
+            Self::Other(_) => MeshSyncError::Failed,
         }
     }
 }
@@ -283,7 +280,7 @@ async fn pull(sh: &Arc<Shared>, pace: &mut Pacer, lib: &Library, id: &str, p: &m
 
 /// The kept rows of `id` on its row; artists, albums and streams under
 /// another id are the blocker shown.
-async fn note_conflicts(lib: &Library, id: &str, loc: Locale, p: &mut Peer) {
+async fn note_conflicts(lib: &Library, id: &str, p: &mut Peer) {
     let (l, peer) = (lib.clone(), id.to_owned());
     match blocking(move || l.sync_conflicts(&peer)).await {
         Ok(c) => {
@@ -291,7 +288,7 @@ async fn note_conflicts(lib: &Library, id: &str, loc: Locale, p: &mut Peer) {
             p.view.waiting = c.waiting;
             p.view.held = c.held;
             if c.identity > 0 && p.view.error.is_none() {
-                p.view.error = Some(fmt_sync_conflicts_in(loc, c.identity));
+                p.view.error = Some(MeshSyncError::Conflicts(c.identity));
             }
         }
         Err(e) => log::warn!("sync: the kept rows of {id} not read: {e}"),
@@ -541,11 +538,10 @@ pub(crate) async fn run(sh: Arc<Shared>) {
         }
         peers.retain(|id, _| members.contains(id));
         if lib.sync_blocked().is_some() {
-            let loc = sh.rt.state().prefs.resolved_locale();
             for id in members {
                 let p = peers.entry(id.clone()).or_insert_with(Peer::new);
                 p.view.running = false;
-                p.view.error = Some(blocked_in(loc).to_owned());
+                p.view.error = Some(blocked());
                 report(&sh, &id, p);
             }
             continue;
@@ -594,11 +590,11 @@ pub(crate) async fn run(sh: Arc<Shared>) {
                     p.fails += 1;
                     p.next = Instant::now() + backoff(p.fails);
                     log::info!("sync: with {id} failed ({} in a row): {e:?}", p.fails);
-                    p.view.error = Some(e.shown(loc).to_owned());
+                    p.view.error = Some(e.shown());
                     p.view.running = false;
                 }
             }
-            note_conflicts(&lib, &id, loc, p).await;
+            note_conflicts(&lib, &id, p).await;
             report(&sh, &id, p);
         }
         // The pictures' share of every turn.
@@ -637,7 +633,10 @@ mod tests {
     #[test]
     fn failures_show_what_went_wrong() {
         assert_eq!(Failure::from("403: off".to_owned()), Failure::Refused);
-        assert_eq!(Failure::from("409: clock".to_owned()).shown(nikgob_core::i18n::locale()), "Часы устройства спешат");
+        let ahead = Failure::from("409: clock".to_owned()).shown();
+        assert_eq!(ahead, MeshSyncError::ClockAhead);
+        assert_eq!(ahead.text_in(nikgob_core::i18n::Locale::Ru), "Часы устройства спешат");
+        assert_eq!(ahead.text_in(nikgob_core::i18n::Locale::En), "The device's clock is ahead");
         assert!(matches!(Failure::from("timed out".to_owned()), Failure::Other(_)));
     }
 

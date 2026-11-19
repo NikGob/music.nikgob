@@ -77,6 +77,29 @@ pub fn session_expired() -> &'static str {
     backend_in(nikgob_core::i18n::locale()).soundcloud_session_expired
 }
 
+/// The account as the service keeps it: a failure is its cause, its words
+/// made when the account is shown ([`Soundcloud::account`]).
+#[derive(Clone, Debug, PartialEq)]
+enum AccountState {
+    LoggedOut,
+    LoggedIn { name: String, premium: Option<bool>, audio: bool },
+    /// The saved sign-in was refused.
+    SessionExpired,
+}
+
+impl AccountState {
+    /// The account as the view shows it, in `loc`.
+    fn to_account(&self, loc: nikgob_core::i18n::Locale) -> Account {
+        match self {
+            Self::LoggedOut => Account::LoggedOut,
+            Self::LoggedIn { name, premium, audio } => {
+                Account::LoggedIn { name: name.clone(), premium: *premium, audio: *audio }
+            }
+            Self::SessionExpired => Account::Failed(backend_in(loc).soundcloud_session_expired.into()),
+        }
+    }
+}
+
 /// Hits per search category.
 const SEARCH_LIMIT: u32 = 20;
 /// Page size of listings.
@@ -134,7 +157,7 @@ struct Inner {
     scrape: tokio::sync::Mutex<()>,
     token: Mutex<Option<String>>,
     me: Mutex<Option<api::Me>>,
-    account: Mutex<Account>,
+    account: Mutex<AccountState>,
     /// Bumped by every logout: a login or restore that started before is
     /// dropped.
     generation: AtomicU64,
@@ -259,7 +282,7 @@ impl Soundcloud {
                 scrape: tokio::sync::Mutex::new(()),
                 token: Mutex::new(None),
                 me: Mutex::new(None),
-                account: Mutex::new(Account::LoggedOut),
+                account: Mutex::new(AccountState::LoggedOut),
                 generation: AtomicU64::new(0),
                 store,
                 trying: AtomicBool::new(false),
@@ -647,7 +670,7 @@ impl Inner {
 
     // -- the account --------------------------------------------------------
 
-    fn account(&self) -> MutexGuard<'_, Account> {
+    fn account(&self) -> MutexGuard<'_, AccountState> {
         lock(&self.account)
     }
 
@@ -674,7 +697,7 @@ impl Inner {
         }
         log::warn!("soundcloud: the sign-in was refused");
         *lock(&self.me) = None;
-        *self.account() = Account::Failed(session_expired().into());
+        *self.account() = AccountState::SessionExpired;
         self.store.clear();
     }
 
@@ -686,7 +709,7 @@ impl Inner {
             return;
         }
         *lock(&self.token) = Some(token);
-        *self.account() = Account::LoggedIn {
+        *self.account() = AccountState::LoggedIn {
             name: "SoundCloud".into(),
             premium: None,
             audio: true,
@@ -707,7 +730,7 @@ impl Inner {
         }
         if self.generation.load(Ordering::SeqCst) == generation && self.token().is_some() {
             let name = me.full_name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| me.username.clone());
-            *self.account() = Account::LoggedIn {
+            *self.account() = AccountState::LoggedIn {
                 name,
                 premium: None,
                 audio: true,
@@ -770,7 +793,7 @@ impl Inner {
         self.generation.fetch_add(1, Ordering::SeqCst);
         *lock(&self.token) = None;
         *lock(&self.me) = None;
-        *self.account() = Account::LoggedOut;
+        *self.account() = AccountState::LoggedOut;
         self.store.clear();
     }
 
@@ -1411,7 +1434,7 @@ impl StreamService for Soundcloud {
     }
 
     fn account(&self) -> Account {
-        self.inner.account().clone()
+        self.inner.account().to_account(nikgob_core::i18n::locale())
     }
 
     /// Pasted cookies or token, or the sign-in window's cookies

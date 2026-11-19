@@ -183,7 +183,7 @@ impl Settings {
             }
         }
         if let Some(e) = &m.error {
-            parts::error(ui, e);
+            parts::error(ui, &e.text_in(nikgob_core::i18n::locale()));
         }
         if !m.enabled {
             return;
@@ -231,7 +231,7 @@ impl Settings {
                 crate::parts::put(ui, Rect::from_center_size(r.center(), vec2(32.0, 32.0)), LoadingIndicator::new().size(32.0));
                 return;
             }
-            MeshPairing::Failed(why) => parts::error(ui, why),
+            MeshPairing::Failed(why) => parts::error(ui, &why.text_in(nikgob_core::i18n::locale())),
             _ => {}
         }
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());

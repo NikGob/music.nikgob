@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use egui::{Align, Color32, Event, Key, Layout, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use nikgob_core::releases::{self, LinuxBuild};
-use nikgob_view::{ApiAccess, ApiView, Command, MeshKind, MeshPairing, MeshScope, MeshView, ViewState};
+use nikgob_view::{ApiAccess, ApiView, Command, MeshKind, MeshPairing, MeshPairingError, MeshScope, MeshView, ViewState};
 
 use super::mesh_ui::{self, Look, MeshUi};
 use crate::{
@@ -83,8 +83,9 @@ pub(crate) struct AddState {
     tab: AddTab,
     /// The control it grew out of.
     from: Option<Rect>,
-    /// Why the invite could not be made, in words.
-    error: Option<String>,
+    /// Why the invite could not be made, as data: its words are made when
+    /// the window draws it.
+    error: Option<MeshPairingError>,
     guest: bool,
     /// «Установить»: the platform shown (0 Linux, 1 Windows).
     platform: usize,
@@ -469,7 +470,11 @@ fn invite_column(ui: &mut Ui, state: &ViewState, a: &mut AddState, invite_late: 
     if !m.nearby.is_empty() {
         ui.add_space(12.0);
     }
-    let error = a.error.clone().or_else(|| invite_late.then(|| nikgob_core::i18n::mesh().mesh_no_answer.to_owned()));
+    let error = a
+        .error
+        .as_ref()
+        .map(|e| e.text_in(nikgob_core::i18n::locale()))
+        .or_else(|| invite_late.then(|| nikgob_core::i18n::mesh().mesh_no_answer.to_owned()));
     if let Some(e) = error {
         error_line(ui, &e);
         ui.add_space(12.0);
@@ -673,8 +678,9 @@ pub(crate) struct PairState {
     wrong: bool,
     /// When the cells began to shake.
     shake_at: Option<f64>,
-    /// Another failure (no link, busy), in words.
-    error: Option<String>,
+    /// Another failure (no link, busy), as data: its words are made when
+    /// the window draws it.
+    error: Option<MeshPairingError>,
     focus: bool,
     /// The pairing's end as it was when the window opened.
     stale: Option<MeshPairing>,
@@ -814,7 +820,7 @@ pub(crate) fn pair_window(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out:
         if let Some(e) = &p.error {
             let r = Rect::from_min_size(pos2(inner.left(), cells.bottom() + 12.0), vec2(inner.width(), 24.0));
             let mut e_ui = ui.new_child(UiBuilder::new().max_rect(r).layout(Layout::top_down(Align::Center)).id_salt("mesh-pair-error"));
-            error_line(&mut e_ui, e);
+            error_line(&mut e_ui, &e.text_in(nikgob_core::i18n::locale()));
         }
     });
     if open && dismissed {
@@ -954,10 +960,11 @@ mod tests {
         m.pairing = MeshPairing::FailedWrongCode;
         follow_pair(&mut p, &m, 2.0, &mut out);
         assert!(p.code.is_empty() && !p.sent && p.wrong && p.focus);
-        assert_eq!((p.shake_at, p.error.as_deref()), (Some(2.0), None), "a shake, no caption");
-        m.pairing = MeshPairing::Failed("Нет связи с устройством".into());
+        assert_eq!((p.shake_at, p.error.as_ref()), (Some(2.0), None), "a shake, no caption");
+        m.pairing = MeshPairing::Failed(MeshPairingError::NoLink);
         follow_pair(&mut p, &m, 3.0, &mut out);
-        assert_eq!(p.error.as_deref(), Some("Нет связи с устройством"));
+        assert_eq!(p.error, Some(MeshPairingError::NoLink));
+        assert_eq!(p.error.as_ref().map(|e| e.text_in(nikgob_core::i18n::Locale::Ru)).as_deref(), Some("Нет связи с устройством"));
         out.clear();
         p.code = "654321".into();
         m.pairing = MeshPairing::Idle;

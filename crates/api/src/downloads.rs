@@ -20,7 +20,7 @@ use utoipa::ToSchema;
 
 use nikgob_core::model::{ReleaseId, TrackId, WishlistStatus};
 use nikgob_core::streaming::RemoteId;
-use nikgob_view::{Command, ViewState};
+use nikgob_view::{ApiConfirmLine, Command, ViewState};
 
 use crate::Shared;
 use crate::auth::Caller;
@@ -248,8 +248,9 @@ pub struct EnqueueAnswer {
 pub struct Want {
     /// Its line in the JSON answer (English).
     pub line: String,
-    /// Its line on the app's Confirm card (the app's UI locale).
-    pub card_line: String,
+    /// Its line on the app's Confirm card, as data: the card is drawn in
+    /// the app's UI language when it is published.
+    pub card: ApiConfirmLine,
     /// Songs it brings, and their length (ms) where known.
     pub tracks: usize,
     pub known_ms: u64,
@@ -280,8 +281,8 @@ pub fn estimate(wants: &[Want]) -> (usize, usize, u64, bool) {
 /// not answer). Its songs: the larger of those listed and the count it
 /// gave; unsure when it did not answer or listed fewer songs than it
 /// counts.
-pub fn album_want(r: &RemoteId, album: Option<&nikgob_core::streaming::StreamAlbum>, loc: nikgob_core::i18n::Locale) -> Want {
-    let (line, card_line, n, known, unknown, sure) = match album {
+pub fn album_want(r: &RemoteId, album: Option<&nikgob_core::streaming::StreamAlbum>) -> Want {
+    let (line, card, n, known, unknown, sure) = match album {
         Some(a) => {
             let listed = a.tracks.len();
             let n = listed.max(a.total_tracks.unwrap_or(0) as usize);
@@ -289,19 +290,19 @@ pub fn album_want(r: &RemoteId, album: Option<&nikgob_core::streaming::StreamAlb
             let unknown = a.tracks.iter().filter(|t| t.duration_ms.is_none()).count() + (n - listed);
             let head = format!("{} — {}", album_artists(a), a.title);
             let line = format!("{head} ({})", crate::mutate::tracks_word(n));
-            let card_line = format!("{head} ({})", nikgob_core::i18n::tracks_count_in(loc, n as u64));
-            (line, card_line, n, known, unknown, listed > 0 && listed >= n)
+            let card = ApiConfirmLine::NamedCount { head, tracks: n };
+            (line, card, n, known, unknown, listed > 0 && listed >= n)
         }
         None => (
             format!("Album {r}"),
-            nikgob_core::i18n::activity::fmt_api_album_in(loc, &r.to_string()),
+            ApiConfirmLine::Album(r.to_string()),
             12,
             0,
             12,
             false,
         ),
     };
-    Want { line, card_line, tracks: n, known_ms: known, unknown, release: Some(r.to_string()), command: Some(Command::DownloadStreamAlbum(r.clone())), sure }
+    Want { line, card, tracks: n, known_ms: known, unknown, release: Some(r.to_string()), command: Some(Command::DownloadStreamAlbum(r.clone())), sure }
 }
 
 /// Asks the player to download songs and albums: at once when the request
@@ -328,9 +329,6 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
         return Err(ApiError::of(StatusCode::BAD_REQUEST, "too_many", format!("No more than {REMOTE_ALBUMS_MAX} service albums at a time")));
     }
     let lib = sh.lib.clone();
-    // The app's UI locale: the Confirm card's lines are drawn in it (the
-    // JSON answer's items stay English).
-    let loc = nikgob_core::i18n::locale();
     let (mut wants, already) = blocking(move || {
         let mut wants = Vec::new();
         let mut already = Vec::new();
@@ -345,7 +343,7 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
             missing.push(*t);
             let line = format!("{} — {}", r.artist, r.title);
             wants.push(Want {
-                card_line: line.clone(),
+                card: ApiConfirmLine::Named(line.clone()),
                 line,
                 tracks: 1,
                 known_ms: r.duration_ms.map_or(0, u64::from),
@@ -370,7 +368,7 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
             let head = format!("{} — {}", row.release.artist_credit.display(), row.release.title);
             wants.push(Want {
                 line: format!("{head} ({})", crate::mutate::tracks_word(lacking.len())),
-                card_line: format!("{head} ({})", nikgob_core::i18n::tracks_count_in(loc, lacking.len() as u64)),
+                card: ApiConfirmLine::NamedCount { head, tracks: lacking.len() },
                 tracks: lacking.len(),
                 known_ms: lacking.iter().filter_map(|t| t.duration_ms).map(u64::from).sum(),
                 unknown: lacking.iter().filter(|t| t.duration_ms.is_none()).count(),
@@ -389,7 +387,7 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
         let n = remote_tracks.len();
         wants.push(Want {
             line: format!("{} from the services", crate::mutate::tracks_word(n)),
-            card_line: nikgob_core::i18n::activity::fmt_tracks_from_services_in(loc, n),
+            card: ApiConfirmLine::FromServices(n),
             tracks: 0,
             known_ms: 0,
             unknown: 0,
@@ -401,7 +399,7 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
         for t in &found {
             wants.push(Want {
                 line: String::new(),
-                card_line: String::new(),
+                card: ApiConfirmLine::Named(String::new()),
                 tracks: 1,
                 known_ms: t.duration_ms.unwrap_or(0),
                 unknown: usize::from(t.duration_ms.is_none()),
@@ -420,11 +418,11 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
             Some(svc) => tokio::time::timeout(ALBUM_WAIT, svc.album(&r.id)).await.ok().and_then(Result::ok),
             None => None,
         };
-        wants.push(album_want(&r, album.as_ref(), loc));
+        wants.push(album_want(&r, album.as_ref()));
     }
     let (releases, track_count, estimated, small) = estimate(&wants);
     let items: Vec<String> = wants.iter().filter(|w| !w.line.is_empty()).map(|w| w.line.clone()).collect();
-    let card_lines: Vec<String> = wants.iter().filter(|w| !w.line.is_empty()).map(|w| w.card_line.clone()).collect();
+    let card_lines: Vec<ApiConfirmLine> = wants.iter().filter(|w| !w.line.is_empty()).map(|w| w.card.clone()).collect();
     let commands: Vec<Command> = wants.into_iter().filter_map(|w| w.command).collect();
     // Service tracks are known to the loop before anything acts on them
     // (now or when the card is confirmed).
@@ -445,13 +443,7 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
         sh.run_by(Some(caller.actor), commands).await?;
         return Ok(Json(answer("queued", None)));
     }
-    let title = match card_lines.as_slice() {
-        [one] => one.clone(),
-        [first, rest @ ..] => nikgob_core::i18n::activity::fmt_and_more_in(loc, first, rest.len()),
-        [] => nikgob_core::i18n::downloads_in(loc).incoming.to_owned(),
-    };
-    let origin = nikgob_core::i18n::activity::fmt_api_request_from_in(loc, &caller.name);
-    sh.run_by(Some(caller.actor), vec![Command::ApiConfirmDownload { title, origin, lines: card_lines, commands }]).await?;
+    sh.run_by(Some(caller.actor), vec![Command::ApiConfirmDownload { lines: card_lines, caller: caller.name.clone(), commands }]).await?;
     // The card just made: the newest of the API's.
     let confirm_id = sh.rt.state().downloads.confirm.iter().map(|c| c.id).filter(|id| id & (1 << 50) != 0).max();
     Ok(Json(answer("queued_in_confirm", confirm_id)))
@@ -470,7 +462,7 @@ mod tests {
     use super::*;
 
     fn want(tracks: usize, ms: u64, release: Option<&str>) -> Want {
-        Want { line: "x".into(), card_line: "x".into(), tracks, known_ms: ms, unknown: 0, release: release.map(str::to_owned), command: None, sure: true }
+        Want { line: "x".into(), card: ApiConfirmLine::Named("x".into()), tracks, known_ms: ms, unknown: 0, release: release.map(str::to_owned), command: None, sure: true }
     }
 
     #[test]
@@ -502,10 +494,11 @@ mod tests {
         use nikgob_core::streaming::{Service, StreamAlbum, StreamTrack};
         let r = RemoteId::new(Service::Deezer, "7");
         // No answer: a guess, never sure.
-        let w = album_want(&r, None, nikgob_core::i18n::Locale::Ru);
+        let w = album_want(&r, None);
         assert!(!w.sure);
         assert_eq!(w.line, format!("Album {r}"));
-        assert_eq!(w.card_line, format!("Альбом {r}"));
+        assert_eq!(w.card.text_in(nikgob_core::i18n::Locale::Ru), format!("Альбом {r}"));
+        assert_eq!(w.card.text_in(nikgob_core::i18n::Locale::En), format!("Album {r}"));
         assert!(!estimate(&[w]).3);
         let mut a = StreamAlbum {
             id: r.clone(),
@@ -522,16 +515,17 @@ mod tests {
         t.duration_ms = Some(200_000);
         a.tracks = vec![t.clone(), t];
         // Listed in full.
-        let w = album_want(&r, Some(&a), nikgob_core::i18n::Locale::Ru);
+        let w = album_want(&r, Some(&a));
         assert_eq!((w.tracks, w.known_ms, w.unknown, w.sure), (2, 400_000, 0, true));
         assert_eq!(w.line, "? — Box (2 tracks)");
-        assert_eq!(w.card_line, "? — Box (2 трека)");
+        assert_eq!(w.card.text_in(nikgob_core::i18n::Locale::Ru), "? — Box (2 трека)");
+        assert_eq!(w.card.text_in(nikgob_core::i18n::Locale::En), "? — Box (2 tracks)");
         // Counted as 100 songs, two listed: the rest count, and it is unsure.
         a.total_tracks = Some(100);
-        let w = album_want(&r, Some(&a), nikgob_core::i18n::Locale::Ru);
+        let w = album_want(&r, Some(&a));
         assert_eq!((w.tracks, w.unknown, w.sure), (100, 98, false));
         // Listed without songs: unsure.
         a.tracks.clear();
-        assert!(!album_want(&r, Some(&a), nikgob_core::i18n::Locale::Ru).sure);
+        assert!(!album_want(&r, Some(&a)).sure);
     }
 }

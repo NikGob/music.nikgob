@@ -200,9 +200,32 @@ struct AccountState {
     restoring: bool,
     /// `Some` while a login waits for the browser.
     prompt: Option<Option<LoginPrompt>>,
-    failure: Option<String>,
+    failure: Option<Failure>,
     /// Audio keys refused in a row since the last track that opened.
     key_refusals: u32,
+}
+
+/// Why the account is not connected, as data: its words are made when the
+/// account is shown ([`Spotify::account`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Failure {
+    /// The account has no Premium: Spotify is not connected without it.
+    PremiumRequired,
+    /// The sign-in expired.
+    SessionExpired,
+    /// A login failed, with the service's own words.
+    Login(String),
+}
+
+impl Failure {
+    /// The words of `self` in `loc`.
+    fn text_in(&self, loc: nikgob_core::i18n::Locale) -> String {
+        match self {
+            Self::PremiumRequired => premium_required_in(loc).to_owned(),
+            Self::SessionExpired => nikgob_core::i18n::backend_in(loc).spotify_session_expired.to_owned(),
+            Self::Login(why) => why.clone(),
+        }
+    }
 }
 
 impl AccountState {
@@ -607,14 +630,14 @@ impl Spotify {
     /// the user's app), and the account says why.
     fn premium_required(&self) {
         log::info!("spotify: the account has no Premium; signed out");
-        self.sign_out(Some(premium_required_in(nikgob_core::i18n::locale()).into()));
+        self.sign_out(Some(Failure::PremiumRequired));
     }
 
     /// Signs out of everything (the Client ID stays); `failure` is what the
     /// account says after. The grants go under the state lock together
     /// with the reset, so [`Account`] never shows a half-done sign-out (a
     /// plain `LoggedOut` before the reason, or a profile still kept).
-    fn sign_out(&self, failure: Option<String>) {
+    fn sign_out(&self, failure: Option<Failure>) {
         {
             let mut st = lock(&self.state);
             self.epoch.fetch_add(1, Ordering::SeqCst);
@@ -682,7 +705,7 @@ impl Spotify {
                 self.store.clear(slot);
                 let mut st = lock(&self.state);
                 st.saved.slots.retain(|s| *s != slot);
-                st.failure = Some("Вход в Spotify истёк, войди снова".into());
+                st.failure = Some(Failure::SessionExpired);
                 self.persist(&st);
             }
             TokenEvent::PremiumRequired => {
@@ -704,7 +727,7 @@ impl Spotify {
         // A cancelled login (logout, or another login) is not a failure
         // to show.
         if !matches!(e, AuthError::Cancelled) {
-            lock(&self.state).failure = Some(message.clone());
+            lock(&self.state).failure = Some(Failure::Login(message.clone()));
         }
         match e {
             AuthError::Cancelled => StreamError::NotLoggedIn,
@@ -715,7 +738,7 @@ impl Spotify {
 
     fn fail_text(&self, message: &str) -> StreamError {
         log::warn!("spotify: login failed: {message}");
-        lock(&self.state).failure = Some(message.into());
+        lock(&self.state).failure = Some(Failure::Login(message.into()));
         StreamError::Network(message.into())
     }
 
@@ -1672,7 +1695,7 @@ impl StreamService for Spotify {
             return Account::LoggingIn(None);
         }
         match &st.failure {
-            Some(f) => Account::Failed(f.clone()),
+            Some(f) => Account::Failed(f.text_in(nikgob_core::i18n::locale())),
             None => Account::LoggedOut,
         }
     }

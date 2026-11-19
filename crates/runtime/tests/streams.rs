@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use nikgob_core::model::{Codec, Source, SourceKind, TrackId};
 use nikgob_core::streaming::{FakeService, Service, StreamService, StreamTrack};
 use nikgob_library::Library;
-use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent, Runtime, RuntimeConfig, StreamSchedule};
+use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent, QualityLabel, Runtime, RuntimeConfig, StreamSchedule};
 use nikgob_view::{Command, Prefs, Status};
 
 /// Remembers what the engine was asked to play, the seeks, what it was
@@ -357,7 +357,7 @@ fn a_copy_set_aside_is_tried_again_and_counts_once_it_plays() {
     drop(st);
     let tx = rig.rt.playback_sender();
     tx.send(PlaybackEvent::Started { id: first.id }).unwrap();
-    tx.send(PlaybackEvent::Quality { id: first.id, label: "Opus".into() }).unwrap();
+    tx.send(PlaybackEvent::Quality { id: first.id, label: QualityLabel::Text("Opus".into()) }).unwrap();
     wait_for("the copy to count again", || lib.get_source(source).unwrap().unwrap().available);
 }
 
