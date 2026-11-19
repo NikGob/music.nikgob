@@ -128,15 +128,15 @@ pub static EN: MenusStrings = MenusStrings {
     to_library: "Add to library",
     out_of_library: "Remove from library",
     like: "Like",
-    unlike: "Unlike",
-    wrong_file: "File has a different song",
+    unlike: "Remove like",
+    wrong_file: "Wrong song in file",
     to_mp3: "Convert to MP3",
     find_better: "Find better quality",
     pick_release: "Choose torrent…",
     apart: "Different songs",
     file: "File",
-    dislike: "Dislike",
-    undislike: "Remove “Dislike”",
+    dislike: "Don't recommend",
+    undislike: "Undo “Don't recommend”",
     ban_artist: "Don't recommend artist",
     unban_artist: "Recommend artist again",
     to_playlist: "Add to playlist…",
@@ -150,9 +150,9 @@ pub static EN: MenusStrings = MenusStrings {
     edit_tags: "Edit tags…",
     delete_from_library: "Delete from library",
     purge_forever: "Delete forever",
-    play_whole_album: "Play whole album",
+    play_whole_album: "Play full album",
     radio_by_album: "Album radio",
-    download_whole_album: "Download whole album",
+    download_whole_album: "Download full album",
     delete_album: "Delete album",
     delete_album_forever: "Delete album forever",
     add_album: "Add to library",
@@ -161,7 +161,7 @@ pub static EN: MenusStrings = MenusStrings {
     radio_by_playlist: "Playlist radio",
     edit_item: "Edit…",
     rename_item: "Rename…",
-    sync_two_way: "Changes both ways",
+    sync_two_way: "Sync both ways",
     sync_follow: "Receive changes only",
     sync_off: "Turn sync off",
     link_service: "Link to a service…",
@@ -174,9 +174,9 @@ pub static EN: MenusStrings = MenusStrings {
     list_tracks: "Track list",
     save_as_playlist: "Save as playlist",
     download_missing: "Download missing",
-    redraw_mix: "Another mix",
+    redraw_mix: "Refresh mix",
     blend: "Blend with…",
-    hide_mix: "Don't suggest this mix",
+    hide_mix: "Don't recommend this mix",
     remove_from_playlist: "Remove from playlist",
 };
 
@@ -232,7 +232,7 @@ pub fn fmt_album_quoted(title: &str) -> String {
 pub fn fmt_apart_body(title: &str, album: &str) -> String {
     match locale() {
         Locale::Ru => format!("«{title}» и песня с альбома «{album}» больше не будут считаться одной. Отменить нельзя."),
-        Locale::En => format!("“{title}” and the song from the album “{album}” will no longer count as one. This cannot be undone."),
+        Locale::En => format!("“{title}” and the song on “{album}” will be treated as separate songs. This cannot be undone."),
     }
 }
 

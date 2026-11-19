@@ -470,18 +470,18 @@ mod tests {
     #[test]
     fn mix_titles_translate_and_parse_legacy() {
         assert_eq!(MixTitle::Daily.title_in(Locale::Ru), "Микс дня");
-        assert_eq!(MixTitle::Daily.title_in(Locale::En), "Daily Mix");
+        assert_eq!(MixTitle::Daily.title_in(Locale::En), "Daily mix");
         assert_eq!(MixTitle::Genre(7).title_in(Locale::Ru), "Хип-хоп микс");
-        assert_eq!(MixTitle::Genre(7).title_in(Locale::En), "Hip-Hop Mix");
-        assert_eq!(MixTitle::Artist("Кино".into()).title_in(Locale::En), "Кино Mix");
+        assert_eq!(MixTitle::Genre(7).title_in(Locale::En), "Hip-hop mix");
+        assert_eq!(MixTitle::Artist("Кино".into()).title_in(Locale::En), "Кино mix");
         assert_eq!(MixTitle::from_legacy("Микс дня"), MixTitle::Daily);
         assert_eq!(MixTitle::from_legacy("Хип-хоп микс"), MixTitle::Genre(7));
         assert_eq!(MixTitle::from_legacy("Микс: ZUTOMAYO"), MixTitle::Artist("ZUTOMAYO".into()));
 
         assert_eq!(MixTitle::from_legacy("Микс 90-х"), MixTitle::Era(1990));
-        assert_eq!(MixTitle::Era(1990).title_in(Locale::En), "90s Mix");
+        assert_eq!(MixTitle::Era(1990).title_in(Locale::En), "90s mix");
         assert_eq!(MixTitle::from_legacy("Микс 2010-х"), MixTitle::Era(2010));
-        assert_eq!(MixTitle::Era(2010).title_in(Locale::En), "2010s Mix");
+        assert_eq!(MixTitle::Era(2010).title_in(Locale::En), "2010s mix");
 
         assert_eq!(MixTitle::from_legacy("Похоже на Underground River"), MixTitle::BecauseYouLiked("Underground River".into()));
         assert_eq!(MixTitle::from_legacy("Похоже на «Underground River»"), MixTitle::BecauseYouLiked("Underground River".into()));
@@ -497,7 +497,7 @@ mod tests {
 
         let ru_calm = MixTitle::Side { calm: true, flavor: SideMixFlavor::Russian };
         assert_eq!(ru_calm.title_in(Locale::Ru), "Русские песни потише");
-        assert_eq!(ru_calm.title_in(Locale::En), "Calm Russian Songs");
+        assert_eq!(ru_calm.title_in(Locale::En), "Calm Russian songs");
         assert_eq!(MixTitle::from_legacy("Русские песни потише"), ru_calm);
         assert_eq!(MixTitle::from_legacy("Бодрое без слов"), MixTitle::Side { calm: false, flavor: SideMixFlavor::Instrumental });
         assert_eq!(MixTitle::from_legacy("Погромче"), MixTitle::Side { calm: false, flavor: SideMixFlavor::Plain });
@@ -676,9 +676,9 @@ mod tests {
 
         let mix = RadioTitle::Mix(MixTitle::Genre(7));
         assert_eq!(mix.title_in(Locale::Ru), "Хип-хоп микс");
-        assert_eq!(mix.title_in(Locale::En), "Hip-Hop Mix");
+        assert_eq!(mix.title_in(Locale::En), "Hip-hop mix");
         assert_eq!(mix.queue_header_in(Locale::Ru), "Микс · Хип-хоп микс");
-        assert_eq!(mix.queue_header_in(Locale::En), "Mix · Hip-Hop Mix");
+        assert_eq!(mix.queue_header_in(Locale::En), "Mix · Hip-hop mix");
         assert_eq!(mix.seed_name(), None);
         assert_eq!(mix.to_queue_origin(), QueueOrigin::Mix(MixTitle::Genre(7)));
 
@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn player_and_error_strings_cover_stream_and_spotify() {
         assert_eq!(player_in(Locale::Ru).fact_stream, "Поток");
-        assert_eq!(player_in(Locale::En).fact_stream, "Stream");
+        assert_eq!(player_in(Locale::En).fact_stream, "Streaming");
         assert_eq!(errors_in(Locale::Ru).spotify_need_premium, "для звука из Spotify нужен Premium");
         assert_eq!(
             errors_in(Locale::Ru).spotify_enable_playback,
@@ -718,15 +718,15 @@ mod tests {
         assert!(!errors_in(Locale::En).spotify_unavailable.is_empty());
         assert_eq!(lyrics_in(Locale::En).gpu, "GPU");
         assert_eq!(nav_in(Locale::En).liked, "Liked Songs");
-        assert_eq!(errors_in(Locale::En).find_song, "Find song…");
+        assert_eq!(errors_in(Locale::En).find_song, "Find a song…");
         assert_eq!(errors_in(Locale::En).sign_in, "Sign in");
-        assert_eq!(errors_in(Locale::En).playback_failed, "Failed to play track");
+        assert_eq!(errors_in(Locale::En).playback_failed, "Could not play the track");
         assert_eq!(errors_in(Locale::En).no_file_for_track, "No file for this track");
         assert_eq!(errors_in(Locale::En).audio_output_failed, "Could not open audio output device");
         assert_eq!(errors_in(Locale::En).not_on_youtube, "Not on YouTube Music");
         assert_eq!(
             ErrorStrings::resolve_rate_limited_in(Locale::En, "Song", "YouTube Music", Some("14:05")),
-            "Song: YouTube Music asks to wait until 14:05 — try playing this track later"
+            "Song: YouTube Music is asking you to wait until 14:05 — try playing this track later"
         );
         assert_eq!(
             ErrorStrings::resolve_rate_limited_in(Locale::Ru, "Song", "YouTube Music", None),
@@ -734,7 +734,7 @@ mod tests {
         );
         assert_eq!(
             ErrorStrings::pause_will_resume_in(Locale::En, "YouTube Music", None),
-            "YouTube Music asks to wait — will resume automatically"
+            "YouTube Music needs more time — playback will resume automatically"
         );
         assert_eq!(
             ErrorStrings::pause_will_resume_in(Locale::Ru, "YouTube Music", Some("14:05")),
@@ -746,11 +746,11 @@ mod tests {
         );
         assert_eq!(
             ErrorStrings::sync_update_failed_in(Locale::En, "Sign in required"),
-            "Could not update playlist on service: Sign in required"
+            "Could not update the playlist on the service: Sign in required"
         );
         assert_eq!(
             ErrorStrings::sync_create_failed_in(Locale::En, "Spotify", "Unavailable"),
-            "Could not create playlist on Spotify: Unavailable"
+            "Could not create a playlist on Spotify: Unavailable"
         );
         assert_eq!(
             ErrorStrings::mesh_forget_failed_in(Locale::En, None, "offline"),
@@ -774,7 +774,7 @@ mod tests {
         );
         assert_eq!(
             ErrorStrings::sidecar_verification_failed_in(Locale::En, "C:\\dst.json"),
-            "sidecar verification failed for C:\\dst.json"
+            "metadata verification failed for C:\\dst.json"
         );
         assert_eq!(ErrorStrings::service_not_connected_in(Locale::En, "Spotify"), "Spotify not connected");
         assert_eq!(ErrorStrings::service_disabled_in(Locale::Ru, "Deezer"), "Deezer выключен");

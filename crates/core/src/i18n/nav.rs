@@ -39,7 +39,7 @@ pub static EN: NavStrings = NavStrings {
     settings: "Settings",
     liked: "Liked Songs",
     liked_albums: "Liked Albums",
-    tray_show_hide: "Show / Hide",
+    tray_show_hide: "Show / hide",
     tray_play: "Play",
     tray_pause: "Pause",
     tray_next: "Next",

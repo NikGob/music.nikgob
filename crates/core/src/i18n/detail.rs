@@ -102,31 +102,31 @@ pub static RU: DetailStrings = DetailStrings {
 };
 
 pub static EN: DetailStrings = DetailStrings {
-    type_album: "ALBUM",
-    type_single: "SINGLE",
-    type_compilation: "COMPILATION",
-    type_release: "RELEASE",
+    type_album: "Album",
+    type_single: "Single",
+    type_compilation: "Compilation",
+    type_release: "Release",
     dl_downloading: "Downloading",
     dl_wait_torrents: "Waiting for torrents",
     dl_in_queue: "In queue",
     dl_not_found: "Not found",
     replace_flac: "Replace with FLAC…",
-    character: "CHARACTER",
-    artist: "ARTIST",
+    character: "Character",
+    artist: "Artist",
     artist_mix: "Artist mix",
     radio: "Radio",
-    radio_tip: "Their tracks and similar — the queue fills itself",
+    radio_tip: "Their tracks and similar music — the queue keeps growing.",
     popular: "Popular with you",
-    singles_eps: "Singles & EPs",
-    compilations_other: "Compilations & other",
-    not_in_library: "Not in library",
-    playlist_kicker: "PLAYLIST",
+    singles_eps: "Singles and EPs",
+    compilations_other: "Compilations and more",
+    not_in_library: "Not in your library",
+    playlist_kicker: "Playlist",
     edit_dialog: "Edit playlist",
     name_label: "Name",
     cover_auto: "Auto",
-    cover_auto_tip: "Collage with 4+ albums in the playlist, else the most common cover",
+    cover_auto_tip: "A collage for 4+ albums; otherwise, the most common cover.",
     cover_collage: "Collage",
-    cover_collage_tip: "Covers of the first four albums, 2×2",
+    cover_collage_tip: "Covers from the first four albums in a 2×2 grid.",
     own_image: "Custom image…",
     cover_dialog_title: "Playlist cover",
     images_filter: "Images",
@@ -137,15 +137,15 @@ pub static EN: DetailStrings = DetailStrings {
     already_in: "Already in playlist",
     playlist_empty: "Playlist is empty",
     plus_tip: "With new songs",
-    mix_kicker: "MIX",
+    mix_kicker: "Mix",
     mix_empty: "No tracks in this mix",
     mix_empty_downloaded: "“Downloaded only” is on, and none of its tracks are downloaded.",
-    mix_empty_none: "Its songs haven't been found yet.",
-    gone_title: "This mix is gone",
-    gone_world: "The world's page has different mixes now.",
-    gone_world_action: "To the world",
-    gone_hidden: "You asked not to be offered it. Bring it back in Settings → “View” → “Home”.",
-    gone_home_action: "To home",
+    mix_empty_none: "No songs found for this mix yet.",
+    gone_title: "This mix is no longer available",
+    gone_world: "This world has different mixes now.",
+    gone_world_action: "Go to world",
+    gone_hidden: "You hid this mix. Restore it in Settings → “Appearance” → “Home”.",
+    gone_home_action: "Go to Home",
     gone_updated: "The mixes on Home have changed.",
     releases: PluralForms { one: "release", few: "releases", many: "releases" },
 };
@@ -176,7 +176,7 @@ pub fn fmt_releases_in_library_in(loc: Locale, n: u64) -> String {
     let unit = plural_forms(loc, n, &detail_in(loc).releases);
     match loc {
         Locale::Ru => format!("{n} {unit} в библиотеке"),
-        Locale::En => format!("{n} {unit} in library"),
+        Locale::En => format!("{n} {unit} in your library"),
     }
 }
 
@@ -202,7 +202,7 @@ pub fn fmt_my_tracks(n: usize) -> String {
 pub fn fmt_whole_album_in(loc: Locale, n: usize) -> String {
     match loc {
         Locale::Ru => format!("Весь альбом · {n}"),
-        Locale::En => format!("Whole album · {n}"),
+        Locale::En => format!("Full album · {n}"),
     }
 }
 
@@ -237,15 +237,15 @@ mod tests {
         assert_eq!(fmt_releases_in_library_in(ru, 1), "1 релиз в библиотеке");
         assert_eq!(fmt_releases_in_library_in(ru, 3), "3 релиза в библиотеке");
         assert_eq!(fmt_releases_in_library_in(ru, 5), "5 релизов в библиотеке");
-        assert_eq!(fmt_releases_in_library_in(en, 1), "1 release in library");
-        assert_eq!(fmt_releases_in_library_in(en, 3), "3 releases in library");
+        assert_eq!(fmt_releases_in_library_in(en, 1), "1 release in your library");
+        assert_eq!(fmt_releases_in_library_in(en, 3), "3 releases in your library");
         assert_eq!(fmt_my_tracks_in(ru, 2), "Мои треки · 2");
         assert_eq!(fmt_my_tracks_in(en, 2), "My tracks · 2");
         assert_eq!(fmt_whole_album_in(ru, 9), "Весь альбом · 9");
-        assert_eq!(fmt_whole_album_in(en, 9), "Whole album · 9");
+        assert_eq!(fmt_whole_album_in(en, 9), "Full album · 9");
         assert_eq!(fmt_not_downloaded_in(ru, 1), "Не скачано · 1");
         assert_eq!(fmt_not_downloaded_in(en, 1), "Not downloaded · 1");
         assert_eq!(detail_in(ru).type_album, "АЛЬБОМ");
-        assert_eq!(detail_in(en).type_album, "ALBUM");
+        assert_eq!(detail_in(en).type_album, "Album");
     }
 }

@@ -707,7 +707,7 @@ pub static RU: ActivityStrings = ActivityStrings {
 pub static EN: ActivityStrings = ActivityStrings {
     import: "Import",
     import_nothing_found: "Import: nothing found",
-    import_nothing_new: "Import: nothing new — it was all here",
+    import_nothing_new: "Import: everything is already here",
     import_nothing: "nothing",
     import_likes_here: "likes already here",
     import_not_music: "not music",
@@ -718,7 +718,7 @@ pub static EN: ActivityStrings = ActivityStrings {
     import_running: "This import is already running · see Downloads",
     import_started: "Import started · see Downloads",
     import_from: "Import from",
-    import_export: "Import of",
+    import_export: "Import exported data",
     preparing: "Preparing…",
     likes_progress: "Likes…",
     playlists_progress: "Playlists…",
@@ -748,14 +748,14 @@ pub static EN: ActivityStrings = ActivityStrings {
     heard_ago: "ago",
     heard_week_ago: "Listened a week ago",
     heard_two_weeks_ago: "Listened two weeks ago",
-    heard_long_ago: "Not listened in a while",
+    heard_long_ago: "Not played in a while",
     days: PluralForms { one: "day", few: "days", many: "days" },
     albums: PluralForms { one: "album", few: "albums", many: "albums" },
     releases: PluralForms { one: "release", few: "releases", many: "releases" },
     world_finish: "what you haven't heard, in album order",
     world_begin: "from the first track of the first album",
     world_again: "everything from the first track",
-    card_playing: "Playing now",
+    card_playing: "Now playing",
     card_continue: "Continue",
     card_from_start: "From the start",
     card_in_order: "In order",
@@ -765,10 +765,10 @@ pub static EN: ActivityStrings = ActivityStrings {
     listening_now: "Listening now",
     track_one: "track",
 
-    and_more: "& more",
-    and_last: "&",
-    hero_favorites: "favorites and similar",
-    hero_listen: "Listen — your mix will form from what you enjoy",
+    and_more: "and more",
+    and_last: "and",
+    hero_favorites: "favorites and similar music",
+    hero_listen: "Keep listening — your mix builds on what you like.",
     by_sound: "sound",
     similar_sound: "with a similar sound",
     mood_calm: "quiet and unhurried",
@@ -777,26 +777,26 @@ pub static EN: ActivityStrings = ActivityStrings {
     mood_bright: "major, bright in tone",
     mood_focus: "steady and gentle",
     mood_drive: "loud and steady, for the road",
-    daylist_morning: "MORNING",
-    daylist_day: "DAYTIME",
-    daylist_evening: "EVENING",
-    daylist_night: "NIGHT",
+    daylist_morning: "For the morning",
+    daylist_day: "For the day",
+    daylist_evening: "For the evening",
+    daylist_night: "For the night",
     when_morning: "in the mornings",
     when_day: "during the day",
     when_evening: "in the evenings",
     when_night: "at night",
-    moment_morning: "Morning Mix",
-    moment_day: "Daytime Mix",
-    moment_evening: "Evening Mix",
-    moment_night: "Night Mix",
-    new_album: "New Album",
+    moment_morning: "Morning mix",
+    moment_day: "Daytime mix",
+    moment_evening: "Evening mix",
+    moment_night: "Night mix",
+    new_album: "New album",
     mix: "Mix",
     worlds: PluralForms { one: "world", few: "worlds", many: "worlds" },
     unheard: "unheard",
-    usual: "Usual",
+    usual: "As usual",
     after: "After",
     from_what_you_play: "From what you play",
-    similar_sound_kicker: "Similar Sound",
+    similar_sound_kicker: "Similar sound",
     sounds_like_your: "Sounds like your",
     from_other_worlds: "from other worlds",
     not_recommend_mix: "Won't recommend",
@@ -809,8 +809,8 @@ pub static EN: ActivityStrings = ActivityStrings {
     like_err: "like",
     in_liked: "is in Liked Songs",
     not_like_q: "Not a fan?",
-    not_like: "Not a fan",
-    you_finish_often: "you often listen to it through",
+    not_like: "Don't recommend",
+    you_finish_often: "you often listen to the end",
     keep_it: "Keep",
     keep: "Keep",
     at: "at",
@@ -820,30 +820,30 @@ pub static EN: ActivityStrings = ActivityStrings {
     suggestions_sign_in: "Suggestions — after you sign in",
     suggestions_not_loaded: "Suggestions not loaded yet",
     reconnect: "Reconnect",
-    to_get_your_top: "to get your top",
+    to_get_your_top: "to get your top tracks",
     lottery_subtitle: "different every time — tap to find out",
 
     files: PluralForms { one: "file", few: "files", many: "files" },
     masters_title: "FLAC masters",
     masters_origin: "Copies are on other devices",
-    masters_question: "Move them from this computer to the Trash? The copies on your devices stay",
+    masters_question: "Move them from this computer to the Trash? Copies on your other devices will stay.",
     masters_skip: "Keep",
     masters_accept: "Move to Trash",
     untitled: "Untitled",
     masters_devices_changed: "Devices or the selection changed",
-    masters_no_answer: "Devices did not answer",
+    masters_no_answer: "Devices did not respond",
     masters_choice_changed: "The selection changed",
     masters_unverified: "Copies are not verified",
     masters_too_few: "Fewer copies than needed",
     masters_import_unavailable: "Import is unavailable",
     masters_stay: "the masters stay on this computer",
-    masters_stayed: "The masters stay on this computer",
+    masters_stayed: "The masters stayed on this computer",
     masters_trashed: "FLAC masters in the Trash",
     masters_stayed_count: "stayed on this computer",
-    masters_back: "The masters are back",
-    masters_not_back: "The masters did not come back: their place is taken or they are not in the Trash",
-    masters_back_n: "Back",
-    masters_not_back_n: "did not come back",
+    masters_back: "Masters restored",
+    masters_not_back: "Could not restore masters: the destination is occupied or they are not in the Trash",
+    masters_back_n: "Restored",
+    masters_not_back_n: "not restored",
 
     quality_busy: "Still finishing the previous file",
     separate_tracks: "Separate tracks",
@@ -853,7 +853,7 @@ pub static EN: ActivityStrings = ActivityStrings {
     cutoff: "cutoff",
     fake_flac: "Fake FLAC",
     keep_flac: "Keep FLAC",
-    fake_question: "Tick the ones to turn into MP3: the FLAC files go to the Trash, “Restore FLAC” in Settings brings them back",
+    fake_question: "Select files to convert to MP3. FLAC files go to the Trash; use “Restore FLAC” in Settings to get them back.",
     convert_to_mp3: "Convert to MP3",
     convert: "Convert",
     to_mp3: "to MP3",
@@ -870,21 +870,21 @@ pub static EN: ActivityStrings = ActivityStrings {
     in_trash: "in the Trash",
     could_not_make_mp3: "Could not make MP3 from",
 
-    model_runtime: "Model base (ONNX Runtime)",
-    model_separator: "Voice from music separation",
-    model_aligner_ru: "Words from the voice: Russian",
-    model_aligner_ja: "Words from the voice: Japanese",
-    model_aligner_en: "Words from the voice: English",
-    model_aligner_mms: "Words from the voice: other languages",
-    model_whisper: "Make out the lyrics",
-    model_separator_deep: "Deep creation: voice separation",
-    model_aligner_ru_deep: "Deep creation: Russian",
-    model_aligner_sung: "Deep creation: English and other languages",
+    model_runtime: "Model runtime (ONNX Runtime)",
+    model_separator: "Vocal separation",
+    model_aligner_ru: "Word alignment: Russian",
+    model_aligner_ja: "Word alignment: Japanese",
+    model_aligner_en: "Word alignment: English",
+    model_aligner_mms: "Word alignment: other languages",
+    model_whisper: "Lyrics recognition",
+    model_separator_deep: "Deep sync: vocal separation",
+    model_aligner_ru_deep: "Deep sync: Russian",
+    model_aligner_sung: "Deep sync: English and other languages",
     model_sound_effnet: "Neural sound analysis",
-    highlight_failed: "Could not make the highlight",
+    highlight_failed: "Could not sync lyrics",
     models_download_failed: "Could not download the models",
     file_unavailable: "File is unavailable",
-    text_not_alignable: "This text cannot be aligned",
+    text_not_alignable: "These lyrics cannot be synced",
     yt_music_off: "YouTube Music is off",
     song_audio_failed: "Could not get the song's audio",
 
@@ -906,37 +906,37 @@ pub static EN: ActivityStrings = ActivityStrings {
     mins_ago: "min ago",
     hours_ago: "hr ago",
     days_ago: "days ago",
-    asks_to_wait: "asks to wait",
-    syncing_myself: "syncing myself",
+    asks_to_wait: "needs more time",
+    syncing_myself: "syncing automatically",
     cannot_change: "can't be changed",
     cannot_change_in: "can't be changed in",
-    follow_only: "follow only",
+    follow_only: "receive changes only",
     sync_no_changes: "Playlist synced: no changes",
     sync_done: "Playlist synced",
     here: "here",
     liked_syncs_by_likes: "“Liked Songs” syncs through likes",
-    sync_two_way: "changes both ways",
+    sync_two_way: "sync both ways",
     sync_off: "off",
     sync_label: "Sync",
     creating: "Creating",
     in_word: "in",
     playlist_not_linked: "The playlist is not linked to a service",
 
-    unnamed_highlight: "Can't make the highlight: it's unclear whose song this is",
-    empty_text: "empty text",
-    other_text_there: "another text is in its place",
+    unnamed_highlight: "Cannot sync lyrics: the song's artist is unknown",
+    empty_text: "no lyrics",
+    other_text_there: "different lyrics are already saved there",
     save_text_failed: "Could not save the lyrics",
-    save_text_unnamed: "Could not save the lyrics: it's unclear whose song this is",
+    save_text_unnamed: "Could not save lyrics: the song's artist is unknown",
     remove_own_failed: "Could not remove your lyrics",
     own_in_trash: "Your lyrics are in the Trash",
-    restore_own_failed: "Could not bring your lyrics back",
+    restore_own_failed: "Could not restore your lyrics",
     saving_song_yt: "Saving the song from YouTube…",
     save_from_yt: "Saving from YouTube",
     save_song_failed: "Could not save the song",
 
     no_local_file: "The track has no local file",
     online_search_off: "Online search is off",
-    musicbrainz_no_answer: "MusicBrainz did not answer",
+    musicbrainz_no_answer: "MusicBrainz did not respond",
     nothing_found: "Nothing found",
     tags_saved: "Tags saved",
     save_failed: "Could not save",
@@ -948,8 +948,8 @@ pub static EN: ActivityStrings = ActivityStrings {
     dont_download: "Don't download",
     download: "Download",
     no_settings_place: "Nowhere to save the settings",
-    settings_unreadable: "settings.toml cannot be read — fix the file by hand",
-    token_unnamed: "Token without a name",
+    settings_unreadable: "Cannot read settings.toml — edit the file manually",
+    token_unnamed: "Unnamed token",
     token_exists: "That token already exists",
     token: "Token",
     revoked: "revoked",
@@ -958,21 +958,21 @@ pub static EN: ActivityStrings = ActivityStrings {
     dont_know_what: "Nothing to search for: the song has no artist or title",
     no_download_sources: "Download sources are not set up",
 
-    yt_age_signed_in: "YouTube marked this 18+, and it did not open even signed in",
-    yt_age_sign_in: "YouTube marked this 18+ — sign in to YouTube Music",
-    sc_drm: "only DRM-protected on SoundCloud",
+    yt_age_signed_in: "age-restricted on YouTube, even when signed in",
+    yt_age_sign_in: "age-restricted on YouTube — sign in to YouTube Music",
+    sc_drm: "copy-protected on SoundCloud",
     region_blocked: "unavailable in your region",
     the_service: "the service",
-    yt_refusing_audio: "YouTube is refusing audio right now — try again later",
+    yt_refusing_audio: "YouTube audio is unavailable right now — try again later",
     could_not_play: "could not play",
 
     share_searching: "Looking for a link…",
     link_copied: "Link copied",
-    musiclink_key_refused_songlink: "MusicLink key refused — copied the song.link",
-    musiclink_no_answer: "MusicLink did not answer",
-    musiclink_key_refused: "MusicLink key refused",
-    deezer_no_answer: "Deezer did not answer",
-    songlink_no_answer: "song.link did not answer",
+    musiclink_key_refused_songlink: "MusicLink key rejected — copied a song.link URL",
+    musiclink_no_answer: "MusicLink did not respond",
+    musiclink_key_refused: "MusicLink key rejected",
+    deezer_no_answer: "Deezer did not respond",
+    songlink_no_answer: "song.link did not respond",
     not_in_services: "Not on any service — copied the title",
 
     likes_err: "likes",
@@ -989,7 +989,7 @@ pub static EN: ActivityStrings = ActivityStrings {
 
     yt_deezer_off: "YouTube Music and Deezer are off",
     need_yt_sign_in: "Sign in to YouTube Music",
-    clip_not_liked_yt: "The clip is not liked on YouTube Music",
+    clip_not_liked_yt: "The video is not liked on YouTube Music",
     track_not_liked_yt: "The track is not liked on YouTube Music",
     replace_err: "track replacement",
     undo_replace_err: "replacement undo",
@@ -1000,18 +1000,18 @@ pub static EN: ActivityStrings = ActivityStrings {
     search_no_connection: "Cannot reach",
 
     prowlarr_not_set_up_sources: "Prowlarr is not set up — the address and key are in Settings → Sources → Torrents",
-    prowlarr_no_answer_90: "Prowlarr did not answer in 90 s",
+    prowlarr_no_answer_90: "Prowlarr did not respond within 90 s",
     prowlarr_not_set_up: "Prowlarr is not set up",
     checking: "Checking…",
     enter_prowlarr_key: "Enter the Prowlarr API key",
     prowlarr_bad_address: "That Prowlarr address does not work — it needs http:// or https://",
     no_torrents_found: "No torrents found",
-    prowlarr_no_trackers: "Prowlarr answers, but no trackers are enabled in it",
-    prowlarr_answers: "Prowlarr answers",
+    prowlarr_no_trackers: "Prowlarr is responding, but no trackers are enabled",
+    prowlarr_answers: "Prowlarr is responding",
     trackers_plural: PluralForms { one: "tracker", few: "trackers", many: "trackers" },
     prowlarr_key_refused: "Prowlarr did not accept the key — check the API key",
-    prowlarr_unreachable: "Prowlarr does not answer at that address",
-    not_prowlarr: "That address is not Prowlarr",
+    prowlarr_unreachable: "Prowlarr is not responding at that address",
+    not_prowlarr: "This address does not belong to Prowlarr",
 
     cover_looking: "Looking for a cover…",
     no_better_cover: "No better cover found",
@@ -1020,13 +1020,13 @@ pub static EN: ActivityStrings = ActivityStrings {
     same_song_q: "The same song?",
     different_songs: "Different songs",
     one_song: "One song",
-    which_file_other: "Which file has the other song?",
+    which_file_other: "Which file has the wrong song?",
     all_correct: "All correct",
-    file_has_other: "The file has the other song",
-    put_back: "Put back",
-    file_back: "The file is back",
-    file_not_back: "The file did not come back: its place is taken",
-    could_not_restore_file: "Could not put the file back",
+    file_has_other: "Wrong song in file",
+    put_back: "Restore",
+    file_back: "File restored",
+    file_not_back: "Could not restore the file: the destination is occupied",
+    could_not_restore_file: "Could not restore the file",
 
     lib_library: "library",
     lib_artists: "artists",
@@ -1216,7 +1216,7 @@ pub fn fmt_newest_in(loc: Locale, year: Option<i32>) -> String {
 pub fn fmt_rate_limited_in(loc: Locale, who: &str) -> String {
     match loc {
         Locale::Ru => format!("{who} просит подождать — включи трек чуть позже"),
-        Locale::En => format!("{who} asks to wait — try playing this track later"),
+        Locale::En => format!("{who} needs more time — try playing this track later"),
     }
 }
 
@@ -1250,7 +1250,7 @@ pub fn fmt_link_copied_after_in(loc: Locale, why: &str, name: &str) -> String {
 pub fn fmt_service_no_answer_in(loc: Locale, name: &str) -> String {
     match loc {
         Locale::Ru => format!("{name} не ответил"),
-        Locale::En => format!("{name} did not answer"),
+        Locale::En => format!("{name} did not respond"),
     }
 }
 
@@ -1307,7 +1307,7 @@ pub fn fmt_replaced_with_in(loc: Locale, title: &str) -> String {
 pub fn fmt_wait_short_in(loc: Locale, name: &str) -> String {
     match loc {
         Locale::Ru => format!("{name} отвечает с задержкой — результаты появятся сами"),
-        Locale::En => format!("{name} is slow to answer — results will appear on their own"),
+        Locale::En => format!("{name} is slow to respond — results will appear automatically"),
     }
 }
 
@@ -1342,7 +1342,7 @@ pub fn fmt_wait_busy_other_in(loc: Locale, name: &str, until: &str, other: &str)
 pub fn fmt_wait_busy_retry_in(loc: Locale, name: &str, until: &str) -> String {
     match loc {
         Locale::Ru => format!("{name} сейчас перегружен{until} — поищу ещё раз сам"),
-        Locale::En => format!("{name} is overloaded right now{until} — I'll try again myself"),
+        Locale::En => format!("{name} is overloaded right now{until} — retrying automatically"),
     }
 }
 
@@ -1367,7 +1367,7 @@ pub fn fmt_prowlarr_answers_in(loc: Locale, n: usize) -> String {
 pub fn fmt_prowlarr_http_error_in(loc: Locale, status: u16) -> String {
     match loc {
         Locale::Ru => format!("Prowlarr ответил ошибкой {status}"),
-        Locale::En => format!("Prowlarr answered with error {status}"),
+        Locale::En => format!("Prowlarr returned error {status}"),
     }
 }
 
@@ -1524,7 +1524,7 @@ mod tests {
         assert_eq!(fmt_heard_when_in(Locale::En, Some(8)), "Listened a week ago");
         assert_eq!(fmt_heard_when_in(Locale::Ru, Some(12)), "Слушал две недели назад");
         assert_eq!(fmt_heard_when_in(Locale::Ru, Some(40)), "Давно не слушал");
-        assert_eq!(fmt_heard_when_in(Locale::En, Some(40)), "Not listened in a while");
+        assert_eq!(fmt_heard_when_in(Locale::En, Some(40)), "Not played in a while");
 
         assert_eq!(fmt_count_in(Locale::Ru, 1, &activity_in(Locale::Ru).albums), "1 альбом");
         assert_eq!(fmt_count_in(Locale::Ru, 3, &activity_in(Locale::Ru).albums), "3 альбома");
@@ -1544,7 +1544,7 @@ mod tests {
     #[test]
     fn streams_shares_and_prowlarr_translate() {
         assert_eq!(fmt_rate_limited_in(Locale::Ru, "YouTube"), "YouTube просит подождать — включи трек чуть позже");
-        assert_eq!(fmt_rate_limited_in(Locale::En, "YouTube"), "YouTube asks to wait — try playing this track later");
+        assert_eq!(fmt_rate_limited_in(Locale::En, "YouTube"), "YouTube needs more time — try playing this track later");
         assert_eq!(fmt_no_connection_in(Locale::Ru, "Spotify"), "нет связи с Spotify — проверь интернет");
         assert_eq!(fmt_no_connection_in(Locale::En, "Spotify"), "cannot reach Spotify — check your internet");
 
@@ -1559,7 +1559,7 @@ mod tests {
             "Deezer did not answer — copied the YouTube Music link"
         );
         assert_eq!(fmt_service_no_answer_in(Locale::Ru, "YouTube Music"), "YouTube Music не ответил");
-        assert_eq!(fmt_service_no_answer_in(Locale::En, "YouTube Music"), "YouTube Music did not answer");
+        assert_eq!(fmt_service_no_answer_in(Locale::En, "YouTube Music"), "YouTube Music did not respond");
 
         assert_eq!(fmt_first_likes_in(Locale::Ru, "Spotify", 1), "Spotify: 1 лайк теперь в Любимых");
         assert_eq!(fmt_first_likes_in(Locale::Ru, "Spotify", 3), "Spotify: 3 лайка теперь в Любимых");
@@ -1572,9 +1572,9 @@ mod tests {
 
         assert_eq!(fmt_prowlarr_answers_in(Locale::Ru, 1), "Prowlarr отвечает · 1 трекер");
         assert_eq!(fmt_prowlarr_answers_in(Locale::Ru, 12), "Prowlarr отвечает · 12 трекеров");
-        assert_eq!(fmt_prowlarr_answers_in(Locale::En, 12), "Prowlarr answers · 12 trackers");
+        assert_eq!(fmt_prowlarr_answers_in(Locale::En, 12), "Prowlarr is responding · 12 trackers");
         assert_eq!(fmt_prowlarr_http_error_in(Locale::Ru, 500), "Prowlarr ответил ошибкой 500");
-        assert_eq!(fmt_prowlarr_http_error_in(Locale::En, 500), "Prowlarr answered with error 500");
+        assert_eq!(fmt_prowlarr_http_error_in(Locale::En, 500), "Prowlarr returned error 500");
 
         assert_eq!(fmt_wait_short_in(Locale::Ru, "Spotify"), "Spotify отвечает с задержкой — результаты появятся сами");
         assert_eq!(fmt_wait_until_in(Locale::Ru, "14:30"), " до 14:30");
@@ -1586,7 +1586,7 @@ mod tests {
         );
         assert_eq!(
             fmt_wait_busy_retry_in(Locale::En, "Spotify", ""),
-            "Spotify is overloaded right now — I'll try again myself"
+            "Spotify is overloaded right now — retrying automatically"
         );
         assert_eq!(fmt_search_overloaded_in(Locale::Ru, "Spotify"), "Spotify сейчас перегружен");
         assert_eq!(fmt_search_no_connection_in(Locale::En, "Spotify"), "Cannot reach Spotify");

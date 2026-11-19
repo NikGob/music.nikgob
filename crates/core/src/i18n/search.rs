@@ -52,20 +52,20 @@ pub static RU: SearchStrings = SearchStrings {
 pub static EN: SearchStrings = SearchStrings {
     chip_torrents: "Torrents",
     no_results: "Nothing found",
-    library_none_body: "Not in the library.",
+    library_none_body: "Nothing found in your library.",
     no_results_body: "Check the spelling, or look for torrents.",
-    prowlarr_hint: "Torrents need Prowlarr: address and key — in Settings → Sources → Torrents.",
+    prowlarr_hint: "Torrents require Prowlarr. Add its address and key in Settings → Sources → Torrents.",
     setup: "Set up",
     search_torrents: "Search torrents",
     none_found: "No torrents found.",
     recommended: "recommended",
-    pick_files: "Pick files…",
+    pick_files: "Choose files…",
     pick_files_title: "Choose files",
     torrent_word: "Torrent",
     reading_files: "Reading the file list…",
     no_files: "No files in this torrent.",
     select_none: "None",
-    files_readonly_note: "Picking files for a .torrent or magnet is not available yet: the list is read-only.",
+    files_readonly_note: "File selection is not available for .torrent files or magnet links yet. You can only view the list.",
     best_result: "Top result",
     more_tracks: "More tracks",
     turn_on: "Turn on",
@@ -136,7 +136,7 @@ pub fn fmt_sign_in_title(name: &str) -> String {
 pub fn fmt_sign_in_body_in(loc: Locale) -> &'static str {
     match loc {
         Locale::Ru => "Тогда поиск найдёт и там: треки, альбомы, исполнителей и плейлисты.",
-        Locale::En => "Then search finds tracks, albums, artists and playlists there too.",
+        Locale::En => "Search will include tracks, albums, artists and playlists from this service.",
     }
 }
 
@@ -175,7 +175,7 @@ pub fn fmt_signing_in(name: &str) -> String {
 pub fn fmt_paused_until_in(loc: Locale, name: &str, hm: &str) -> String {
     match loc {
         Locale::Ru => format!("{name} просит подождать до {hm}."),
-        Locale::En => format!("{name} asks to wait until {hm}."),
+        Locale::En => format!("{name} is asking you to wait until {hm}."),
     }
 }
 
@@ -201,7 +201,7 @@ pub fn fmt_nothing_on_service(name: &str) -> String {
 pub fn fmt_artist_in_library_in(loc: Locale, kind: &str) -> String {
     match loc {
         Locale::Ru => format!("{kind} · в библиотеке"),
-        Locale::En => format!("{kind} · in library"),
+        Locale::En => format!("{kind} · in your library"),
     }
 }
 
@@ -274,11 +274,11 @@ mod tests {
         assert_eq!(fmt_sign_in_title_in(ru, "Spotify"), "Войди в Spotify");
         assert_eq!(fmt_sign_in_title_in(en, "Spotify"), "Sign in to Spotify");
         assert_eq!(fmt_paused_until_in(ru, "Spotify", "12:00"), "Spotify просит подождать до 12:00.");
-        assert_eq!(fmt_paused_until_in(en, "Spotify", "12:00"), "Spotify asks to wait until 12:00.");
+        assert_eq!(fmt_paused_until_in(en, "Spotify", "12:00"), "Spotify is asking you to wait until 12:00.");
         assert_eq!(fmt_nothing_on_service_in(ru, "Deezer"), "В Deezer ничего не нашлось.");
         assert_eq!(fmt_nothing_on_service_in(en, "Deezer"), "Nothing found on Deezer.");
         assert_eq!(fmt_artist_in_library_in(ru, "Исполнитель"), "Исполнитель · в библиотеке");
-        assert_eq!(fmt_artist_in_library_in(en, "Artist"), "Artist · in library");
+        assert_eq!(fmt_artist_in_library_in(en, "Artist"), "Artist · in your library");
         assert_eq!(fmt_track_kind_in(ru, "Кино"), "Трек · Кино");
         assert_eq!(fmt_track_kind_in(en, "Kino"), "Track · Kino");
         assert_eq!(fmt_album_kind_in(ru, "Кино", Some(1988)), "Альбом · Кино · 1988");

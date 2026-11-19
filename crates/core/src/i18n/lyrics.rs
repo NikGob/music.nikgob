@@ -141,11 +141,11 @@ pub static EN: LyricsStrings = LyricsStrings {
     src_file: "File",
     src_recognized: "Recognized",
     sync_plain: "no sync",
-    sync_line: "by line",
-    sync_word: "by word",
-    sync_syllable: "by syllable",
+    sync_line: "Line sync",
+    sync_word: "Word sync",
+    sync_syllable: "Syllable sync",
     name_file: "Track file",
-    name_recognized: "Heard by the player",
+    name_recognized: "Recognized by the player",
     kept: "Saved lyrics",
     searching: "Searching for lyrics…",
     no_text: "No lyrics",
@@ -154,13 +154,13 @@ pub static EN: LyricsStrings = LyricsStrings {
     without_highlight: "no highlighting",
     state_loading: "searching…",
     state_missing: "no lyrics",
-    state_mismatch: "lyrics of another song or version",
-    show_word: "By word",
-    show_line: "By line",
+    state_mismatch: "lyrics for a different song or version",
+    show_word: "Word sync",
+    show_line: "Line sync",
     show_plain: "No sync",
-    action_line: "Sync by line",
-    action_word: "Sync by word",
-    action_word_deep: "Sync by word (deep)",
+    action_line: "Create line sync",
+    action_word: "Create word sync",
+    action_word_deep: "Create deep word sync",
     action_again: "Re-sync lyrics",
     action_again_button: "Re-sync",
     action_deep: "Deep sync",
@@ -178,10 +178,10 @@ pub static EN: LyricsStrings = LyricsStrings {
     craft: "Sync…",
     stage_download: "Downloading models",
     stage_decode: "Reading the song",
-    stage_separate: "Separating the vocal",
-    stage_listen: "Listening to the vocal",
-    stage_align: "Aligning the words",
-    stage_recognise: "Recognizing the words",
+    stage_separate: "Separating vocals",
+    stage_listen: "Analyzing vocals",
+    stage_align: "Aligning words",
+    stage_recognise: "Recognizing words",
     edit_title: "Edit lyrics",
     mark: "Mark",
     nudge_earlier: "−0.1 s",
@@ -209,7 +209,7 @@ pub fn fmt_timed_in(loc: Locale, by: &str, by_player: bool) -> String {
             if by_player { format!("плеер синхронизировал {by}") } else { format!("синхронизирован {by}") }
         }
         Locale::En => {
-            if by_player { format!("player-synced {by}") } else { format!("synced {by}") }
+            if by_player { format!("Player: {by}") } else { format!("{by}") }
         }
     }
 }
@@ -277,8 +277,8 @@ mod tests {
     fn timed_and_source_phrases_translate() {
         assert_eq!(fmt_timed_in(Locale::Ru, "по словам", false), "синхронизирован по словам");
         assert_eq!(fmt_timed_in(Locale::Ru, "по слогам", true), "плеер синхронизировал по слогам");
-        assert_eq!(fmt_timed_in(Locale::En, "by word", false), "synced by word");
-        assert_eq!(fmt_timed_in(Locale::En, "by syllable", true), "player-synced by syllable");
+        assert_eq!(fmt_timed_in(Locale::En, "Word sync", false), "Word sync");
+        assert_eq!(fmt_timed_in(Locale::En, "Syllable sync", true), "Player: Syllable sync");
         assert_eq!(fmt_from_source_in(Locale::Ru, "Genius"), "Текст с Genius");
         assert_eq!(fmt_from_source_in(Locale::En, "Genius"), "Lyrics from Genius");
         assert_eq!(fmt_stage_download_in(Locale::Ru, None), "Скачиваю модели");

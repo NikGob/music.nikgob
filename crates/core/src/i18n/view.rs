@@ -264,22 +264,22 @@ pub static EN: ViewStrings = ViewStrings {
     menu_album: "Go to album",
     menu_artist: "Go to artist",
     menu_share: "Share",
-    menu_info: "Source & quality",
-    menu_sound: "Speed & equalizer",
+    menu_info: "Source and quality",
+    menu_sound: "Speed and equalizer",
     menu_visualizer: "Visualizer",
     menu_tags: "Edit tags…",
     menu_lyrics: "Edit lyrics…",
     menu_download: "Download",
     menu_torrents: "Find better quality",
     menu_pick_release: "Choose torrent…",
-    menu_wrong_file: "Different song in file",
-    menu_dislike: "Dislike",
+    menu_wrong_file: "Wrong song in file",
+    menu_dislike: "Don't recommend",
     menu_ban: "Don't recommend artist",
     home_shortcuts: "Shortcuts",
     home_daily: "Daily mixes",
     home_mixes: "Mixes for you",
     home_listen_again: "Listen again",
-    home_of_day: "Tiles of the day",
+    home_of_day: "Daily picks",
     home_from_library: "From your library",
     home_new: "New",
     home_releases: "Releases",
@@ -319,35 +319,35 @@ pub static EN: ViewStrings = ViewStrings {
     eq_headphones: "Headphones",
     eq_warm: "Warm",
     have_yours: "Yours",
-    have_in_library: "In library",
+    have_in_library: "In your library",
     songs: PluralForms { one: "song", few: "songs", many: "songs" },
     upgrade_mp3_320: "MP3 320 or better",
     upgrade_lossless: "Lossless",
     preset_custom: "Custom",
-    preset_recs_0: "Only mine",
+    preset_recs_0: "My music only",
     preset_recs_1: "Balanced",
-    preset_recs_2: "More new",
+    preset_recs_2: "More new music",
     preset_lyrics_0: "Karaoke",
     preset_lyrics_1: "Calm",
     preset_lyrics_2: "Bounce",
-    preset_lyrics_3: "Sharp",
-    preset_track_0: "Strict",
+    preset_lyrics_3: "Crisp",
+    preset_track_0: "Minimal",
     preset_track_1: "Lively",
     preset_track_2: "Maximum",
-    preset_sources_0: "Usual",
+    preset_sources_0: "Standard",
     preset_sources_1: "All",
     preset_seeding_0: "Don't seed",
-    preset_seeding_1: "Usual",
+    preset_seeding_1: "Standard",
     preset_seeding_2: "Generous",
     preset_load_0: "Quiet",
-    preset_load_1: "Usual",
+    preset_load_1: "Standard",
     preset_load_2: "Fast",
     unit_b: "B",
     unit_kb: "KB",
     unit_tb: "TB",
     music_word: "Music",
     library_word: "Library",
-    originals_word: "Lossless originals",
+    originals_word: "Lossless masters",
     wave_balance: "Balance",
     wave_more: "More new",
     wave_only_new: "Only new",
@@ -366,9 +366,9 @@ pub static EN: ViewStrings = ViewStrings {
     api_actor_guest: "Guest",
     sign_in_youtube: "Sign in to YouTube Music",
     sign_in_soundcloud: "Sign in to SoundCloud",
-    no_webview2: "no WebView2 in the system",
-    no_webkitgtk: "no WebKitGTK in the system",
-    window_no_cookies: "the window gave no cookies",
+    no_webview2: "WebView2 is not installed",
+    no_webkitgtk: "WebKitGTK is not installed",
+    window_no_cookies: "the sign-in window returned no cookies",
     window_crashed: "the window crashed",
 };
 
@@ -385,7 +385,7 @@ pub fn fmt_songs_yours_in(loc: Locale, n: u32) -> String {
     let unit = plural_forms(loc, u64::from(n), &view_in(loc).songs);
     match loc {
         Locale::Ru => format!("{n} {unit} у тебя"),
-        Locale::En => format!("{n} {unit} of yours"),
+        Locale::En => format!("{n} {unit} in your library"),
     }
 }
 
@@ -401,7 +401,7 @@ pub fn fmt_have_of_in(loc: Locale, n: u32, total: u32) -> String {
 pub fn fmt_have_of_yours_in(loc: Locale, n: u32, total: u32) -> String {
     match loc {
         Locale::Ru => format!("{n} из {total} у тебя"),
-        Locale::En => format!("{n} of {total} yours"),
+        Locale::En => format!("{n} of {total} in your library"),
     }
 }
 
@@ -555,12 +555,12 @@ mod tests {
         assert_eq!(fmt_songs_yours_in(Locale::Ru, 2), "2 песни у тебя");
         assert_eq!(fmt_songs_yours_in(Locale::Ru, 5), "5 песен у тебя");
         assert_eq!(fmt_songs_yours_in(Locale::Ru, 21), "21 песня у тебя");
-        assert_eq!(fmt_songs_yours_in(Locale::En, 1), "1 song of yours");
-        assert_eq!(fmt_songs_yours_in(Locale::En, 3), "3 songs of yours");
+        assert_eq!(fmt_songs_yours_in(Locale::En, 1), "1 song in your library");
+        assert_eq!(fmt_songs_yours_in(Locale::En, 3), "3 songs in your library");
         assert_eq!(fmt_have_of_in(Locale::Ru, 3, 12), "3 из 12");
         assert_eq!(fmt_have_of_in(Locale::En, 3, 12), "3 of 12");
         assert_eq!(fmt_have_of_yours_in(Locale::Ru, 3, 12), "3 из 12 у тебя");
-        assert_eq!(fmt_have_of_yours_in(Locale::En, 3, 12), "3 of 12 yours");
+        assert_eq!(fmt_have_of_yours_in(Locale::En, 3, 12), "3 of 12 in your library");
     }
 
     #[test]
@@ -580,7 +580,7 @@ mod tests {
         assert_eq!(fmt_free_disk_in(Locale::Ru, GB * 62, "C:"), "свободно 62 ГБ (C:)");
         assert_eq!(fmt_free_disk_in(Locale::En, GB * 62, "C:"), "62 GB free (C:)");
         assert_eq!(fmt_library_line_in(Locale::Ru, GB * 30), "Библиотека: 30 ГБ");
-        assert_eq!(fmt_originals_line_in(Locale::En, GB * 112 / 10), "Lossless originals: 11.2 GB");
+        assert_eq!(fmt_originals_line_in(Locale::En, GB * 112 / 10), "Lossless masters: 11.2 GB");
         assert_eq!(fmt_disk_full_in(Locale::Ru, "C:", GB * 62, GB * 237), "C:: свободно 62 ГБ из 237 ГБ");
         assert_eq!(fmt_disk_full_in(Locale::En, "C:", GB * 62, GB * 237), "C:: 62 GB free of 237 GB");
     }

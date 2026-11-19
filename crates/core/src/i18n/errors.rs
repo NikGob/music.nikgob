@@ -148,7 +148,7 @@ impl ErrorStrings {
     pub fn sidecar_verification_failed_in(loc: Locale, path: &str) -> String {
         match loc {
             Locale::Ru => format!("проверка метаданных не прошла для {path}"),
-            Locale::En => format!("sidecar verification failed for {path}"),
+            Locale::En => format!("metadata verification failed for {path}"),
         }
     }
 
@@ -172,7 +172,7 @@ impl ErrorStrings {
     pub fn api_port_busy_in(loc: Locale, port: u16) -> String {
         match loc {
             Locale::Ru => format!("Порт {port} занят"),
-            Locale::En => format!("Port {port} is busy"),
+            Locale::En => format!("Port {port} is already in use"),
         }
     }
 
@@ -188,7 +188,7 @@ impl ErrorStrings {
     pub fn api_no_address_in(loc: Locale, ip: &str) -> String {
         match loc {
             Locale::Ru => format!("У компьютера нет адреса {ip}"),
-            Locale::En => format!("The computer has no address {ip}"),
+            Locale::En => format!("This computer does not have the address {ip}"),
         }
     }
 
@@ -220,7 +220,7 @@ impl ErrorStrings {
     pub fn sync_update_failed_in(loc: Locale, detail: &str) -> String {
         match loc {
             Locale::Ru => format!("Не получилось обновить плейлист в сервисе: {detail}"),
-            Locale::En => format!("Could not update playlist on service: {detail}"),
+            Locale::En => format!("Could not update the playlist on the service: {detail}"),
         }
     }
 
@@ -228,7 +228,7 @@ impl ErrorStrings {
     pub fn sync_create_failed_in(loc: Locale, service_name: &str, detail: &str) -> String {
         match loc {
             Locale::Ru => format!("Не получилось создать плейлист в {service_name}: {detail}"),
-            Locale::En => format!("Could not create playlist on {service_name}: {detail}"),
+            Locale::En => format!("Could not create a playlist on {service_name}: {detail}"),
         }
     }
 
@@ -271,8 +271,8 @@ impl ErrorStrings {
                 None => "Сервис просит подождать".into(),
             },
             Locale::En => match until_hm {
-                Some(hm) => format!("Service asks to wait until {hm}"),
-                None => "Service asks to wait".into(),
+                Some(hm) => format!("Please wait until {hm} before using the service"),
+                None => "Please wait before using the service".into(),
             },
         }
     }
@@ -313,8 +313,8 @@ impl ErrorStrings {
                 None => format!("{title}: {who} просит подождать — включи трек позже"),
             },
             Locale::En => match until_hm {
-                Some(hm) => format!("{title}: {who} asks to wait until {hm} — try playing this track later"),
-                None => format!("{title}: {who} asks to wait — try playing this track later"),
+                Some(hm) => format!("{title}: {who} is asking you to wait until {hm} — try playing this track later"),
+                None => format!("{title}: {who} needs more time — try playing this track later"),
             },
         }
     }
@@ -327,8 +327,8 @@ impl ErrorStrings {
                 None => format!("{who} просит подождать — продолжу сам"),
             },
             Locale::En => match until_hm {
-                Some(hm) => format!("{who} asks to wait until {hm} — will resume automatically"),
-                None => format!("{who} asks to wait — will resume automatically"),
+                Some(hm) => format!("{who} is asking you to wait until {hm} — playback will resume automatically"),
+                None => format!("{who} needs more time — playback will resume automatically"),
             },
         }
     }
@@ -371,8 +371,8 @@ impl ErrorStrings {
         match (loc, sounds_like) {
             (Locale::Ru, Some(s)) => format!("в файле «{title}» другая песня — «{s}»"),
             (Locale::Ru, None) => format!("в файле «{title}» другая песня"),
-            (Locale::En, Some(s)) => format!("another song is in the file “{title}” — “{s}”"),
-            (Locale::En, None) => format!("another song is in the file “{title}”"),
+            (Locale::En, Some(s)) => format!("wrong song in file “{title}” — “{s}”"),
+            (Locale::En, None) => format!("wrong song in file “{title}”"),
         }
     }
 
@@ -388,7 +388,7 @@ impl ErrorStrings {
     pub fn fmt_purged_in(loc: Locale, n: usize) -> String {
         match loc {
             Locale::Ru => format!("Удалено навсегда: {n}"),
-            Locale::En => format!("Deleted for good: {n}"),
+            Locale::En => format!("Permanently deleted: {n}"),
         }
     }
 
@@ -532,7 +532,7 @@ impl ErrorStrings {
     pub fn fmt_downloads_with_source_in(loc: Locale, what: &str) -> String {
         match loc {
             Locale::Ru => format!("{what} · скачается, когда включишь источник скачивания"),
-            Locale::En => format!("{what} · downloads once a download source is on"),
+            Locale::En => format!("{what} · will download when you enable a download source"),
         }
     }
 }
@@ -638,14 +638,14 @@ pub static EN: ErrorStrings = ErrorStrings {
     spotify_audio_enabled: "Spotify audio enabled",
     spotify_connected_enable_audio: "Spotify connected · enable audio next",
     enable_audio: "Enable audio",
-    find_song: "Find song…",
+    find_song: "Find a song…",
     sign_in: "Sign in",
-    playback_failed: "Failed to play track",
+    playback_failed: "Could not play the track",
     no_file_for_track: "No file for this track",
     audio_output_failed: "Could not open audio output device",
     not_on_youtube: "Not on YouTube Music",
     no_settings_path: "Nowhere to save settings",
-    settings_unreadable: "Could not read settings.toml — fix the file manually",
+    settings_unreadable: "Cannot read settings.toml — edit the file manually",
     masters_move_unavailable: "Moving the FLAC archive folder is unavailable",
     masters_inside_work_dir: "Cannot store the FLAC archive inside the music, Inbox, or downloads folder",
     sources_file_failed: "Could not create instances file",
@@ -658,21 +658,21 @@ pub static EN: ErrorStrings = ErrorStrings {
     album_download_failed: "Could not download album",
     album_like_failed: "Could not like album",
     soulseek_connected: "Soulseek connected",
-    soulseek_enable_in_sources: "Soulseek saved — enable it in Download Sources",
-    soulseek_daemon_unresponsive: "Soulseek saved, but the daemon is not responding",
+    soulseek_enable_in_sources: "Soulseek saved — enable it in “Download sources”",
+    soulseek_daemon_unresponsive: "Soulseek saved, but the server is not responding",
     soulseek_not_connected: "Soulseek saved, but could not connect",
     stream_not_configured: "Service is not configured",
-    stream_not_logged_in: "Sign in required",
+    stream_not_logged_in: "Sign-in required",
     stream_need_premium: "Premium required",
     stream_unavailable: "Unavailable",
     stream_unsupported: "Not supported by this service",
-    stream_age_restricted: "Age-restricted — sign in required",
+    stream_age_restricted: "Age-restricted — sign-in required",
     stream_region_blocked: "Unavailable in your region",
-    stream_drm: "DRM-protected — will play from YouTube Music",
+    stream_drm: "Copy-protected — will play from YouTube Music",
     stream_network: "No connection — check your internet",
     stream_parse: "Unexpected response from service",
     save_setting_failed: "Could not save setting",
-    link_playlist_sign_in: "Sign in to Spotify or YouTube Music to link playlist",
+    link_playlist_sign_in: "Sign in to Spotify or YouTube Music to link the playlist",
     stream_track_stale: "Track is out of date — search for it again",
     song_stale: "Song is out of date — search for it again",
     nothing_to_share: "Nothing to share",
@@ -680,22 +680,22 @@ pub static EN: ErrorStrings = ErrorStrings {
     youtube_disabled: "YouTube Music is disabled",
     not_found_on_youtube: "Track not found on YouTube Music",
     mix_gone_home: "That mix is no longer available — Home refreshed",
-    mix_gone_world: "That mix is no longer available — World page refreshed",
+    mix_gone_world: "That mix is no longer available — the world page has changed",
     tile_gone_home: "That collection is no longer available — Home refreshed",
-    downloaded_only_no_new: "Downloaded Only is enabled — no new releases right now",
-    discover_still_loading: "Still looking for new discoveries — check back soon",
+    downloaded_only_no_new: "“Downloaded only” is on — no new music right now",
+    discover_still_loading: "Still finding new music — check back soon",
     nothing_to_download: "Nothing to download",
     recs_still_building: "Recommendations are still building — try again shortly",
     blend_impossible: "Could not build a mix from these profiles",
     import_unavailable: "Import unavailable",
-    deleting_unavailable: "Deleting unavailable",
+    deleting_unavailable: "Deletion unavailable",
     could_not_delete: "Could not delete",
     restored: "Restored",
     restore_partly: "Not everything was restored",
     purge_partly: "Deleted, but some files could not be erased",
     import_failed_file: "Could not import the file",
     import_started: "Import started · see Downloads",
-    import_cancelling: "Cancelling the import — added files go back",
+    import_cancelling: "Cancelling import — removing added files",
     torrent: "Torrent",
     import: "Import",
     masters_folder_in_use: "This FLAC folder is already in use",
@@ -703,20 +703,20 @@ pub static EN: ErrorStrings = ErrorStrings {
     torrent_client_failed: "The torrent client did not start",
     import_no_pause: "An import cannot be paused — only cancelled",
     search_stale: "The search result is out of date — search again",
-    prowlarr_no_torrent: "Prowlarr did not give the torrent",
+    prowlarr_no_torrent: "Prowlarr did not return the torrent",
     adding_torrent: "Adding the torrent…",
-    torrent_gone: "the torrent left the session",
+    torrent_gone: "the torrent is no longer in the session",
     already_in_wishlist: "Already in Wishlist",
     everything_downloaded: "Everything is already downloaded",
-    downloads_with_source: "downloads once a download source is on",
+    downloads_with_source: "will download when you enable a download source",
     finding_on_youtube: "Finding the track on YouTube Music…",
     could_not_read_torrent: "Could not read the .torrent",
     not_a_magnet: "That is not a magnet link",
     could_not_create_folder: "Could not create the download folder",
     files_gone: "The downloaded files are gone — searching again",
     need_download_source: "A download source is needed",
-    search_later: "Not it — search later",
-    nothing_found_to_download: "Couldn't find where to download it",
+    search_later: "Not a match — search later",
+    nothing_found_to_download: "No download found",
 };
 
 locale_table! {
@@ -734,11 +734,11 @@ mod tests {
     #[test]
     fn bind_and_hash_errors_translate_both_locales() {
         assert_eq!(ErrorStrings::api_port_busy_in(Locale::Ru, 47210), "Порт 47210 занят");
-        assert_eq!(ErrorStrings::api_port_busy_in(Locale::En, 47210), "Port 47210 is busy");
+        assert_eq!(ErrorStrings::api_port_busy_in(Locale::En, 47210), "Port 47210 is already in use");
         assert_eq!(ErrorStrings::api_port_busy_other_in(Locale::Ru, 8989), "Порт 8989 занят другой программой");
         assert_eq!(ErrorStrings::api_port_busy_other_in(Locale::En, 8989), "Port 8989 is used by another program");
         assert_eq!(ErrorStrings::api_no_address_in(Locale::Ru, "192.168.0.157"), "У компьютера нет адреса 192.168.0.157");
-        assert_eq!(ErrorStrings::api_no_address_in(Locale::En, "192.168.0.157"), "The computer has no address 192.168.0.157");
+        assert_eq!(ErrorStrings::api_no_address_in(Locale::En, "192.168.0.157"), "This computer does not have the address 192.168.0.157");
         assert_eq!(ErrorStrings::api_port_denied_in(Locale::Ru, 80), "Нет доступа к порту 80");
         assert_eq!(ErrorStrings::api_port_denied_in(Locale::En, 80), "No access to port 80");
         assert_eq!(ErrorStrings::api_port_failed_in(Locale::Ru, 47210, "x"), "Не удалось открыть порт 47210: x");

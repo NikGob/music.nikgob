@@ -53,10 +53,10 @@ pub static RU: BackendStrings = BackendStrings {
 
 pub static EN: BackendStrings = BackendStrings {
     seeders_short: "seeds",
-    soloist_unsupported: "Spotify does not publish Soloist for this system",
+    soloist_unsupported: "Spotify Soloist is not available for this system",
     soloist_wont_run: "Soloist will not run on this computer",
-    soloist_only_expired: "Spotify has only an expired Soloist build for now",
-    soloist_redirected: "download failed: the download left Spotify's server",
+    soloist_only_expired: "Spotify only has an expired Soloist build available",
+    soloist_redirected: "download failed: redirected away from Spotify's server",
     soloist_build_expired: "The Soloist build has expired and there is no new one yet",
     soloist_stopped: "Soloist stopped",
     soloist_not_connected: "Spotify Soloist is not connected",
@@ -64,10 +64,10 @@ pub static EN: BackendStrings = BackendStrings {
     soloist_did_not_start: "Spotify Soloist did not start the track",
     soundcloud_session_expired: "Your SoundCloud sign-in has expired — sign in again",
     soundcloud_no_token: "No SoundCloud oauth_token — paste soundcloud.com cookies or a token",
-    soundcloud_login_refused: "SoundCloud refused the sign-in — the token has expired",
+    soundcloud_login_refused: "SoundCloud sign-in failed — the token has expired",
     soundcloud_player: "SoundCloud player",
-    spotify_premium_required: "Spotify Premium is required — Spotify can't connect without it; YouTube Music works anyway",
-    sync_epoch_unwritten: "Sync stopped: the database's sync mark was not written",
+    spotify_premium_required: "Spotify Premium is required to connect; YouTube Music works without it",
+    sync_epoch_unwritten: "Sync stopped: the database sync marker was not saved",
 };
 
 locale_table! {
@@ -152,12 +152,12 @@ impl SoloistArchiveFault {
             (Locale::Ru, Self::Symlink) => "ссылка в архиве",
             (Locale::Ru, Self::NoExe) => "нет программы",
             (Locale::En, Self::TooLarge) => "too large",
-            (Locale::En, Self::PathOutside) => "a path outside the folder",
-            (Locale::En, Self::SizeOrRepeat) => "wrong size or repeated",
+            (Locale::En, Self::PathOutside) => "path outside the folder",
+            (Locale::En, Self::SizeOrRepeat) => "invalid size or duplicate entry",
             (Locale::En, Self::Truncated) => "truncated",
             (Locale::En, Self::TooManyFiles) => "too many files",
-            (Locale::En, Self::Symlink) => "a link in the archive",
-            (Locale::En, Self::NoExe) => "no program inside",
+            (Locale::En, Self::Symlink) => "symbolic link in the archive",
+            (Locale::En, Self::NoExe) => "missing executable",
         }
     }
 }
@@ -220,7 +220,7 @@ pub fn fmt_soloist_network_in(loc: Locale, detail: &str) -> String {
 pub fn fmt_soloist_archive_in(loc: Locale, fault: SoloistArchiveFault) -> String {
     match loc {
         Locale::Ru => format!("архив Soloist не тот: {}", fault.word_in(Locale::Ru)),
-        Locale::En => format!("the Soloist archive is wrong: {}", fault.word_in(Locale::En)),
+        Locale::En => format!("invalid Soloist archive: {}", fault.word_in(Locale::En)),
     }
 }
 
@@ -228,7 +228,7 @@ pub fn fmt_soloist_archive_in(loc: Locale, fault: SoloistArchiveFault) -> String
 pub fn fmt_soloist_archive_text_in(loc: Locale, detail: &str) -> String {
     match loc {
         Locale::Ru => format!("архив Soloist не тот: {detail}"),
-        Locale::En => format!("the Soloist archive is wrong: {detail}"),
+        Locale::En => format!("invalid Soloist archive: {detail}"),
     }
 }
 
@@ -326,7 +326,7 @@ mod tests {
         );
         assert_eq!(
             fmt_soloist_archive_in(Locale::En, too_large),
-            "the Soloist archive is wrong: too large"
+            "invalid Soloist archive: too large"
         );
         assert_eq!(too_large.to_string(), "too large");
         assert_eq!(

@@ -214,8 +214,8 @@ pub static RU: PagesStrings = PagesStrings {
 };
 
 pub static EN: PagesStrings = PagesStrings {
-    stream: "stream",
-    you_have: "yours",
+    stream: "streaming",
+    you_have: "in your library",
     in_queue: "queued",
     no_file: "no file",
     clip: "video",
@@ -224,8 +224,8 @@ pub static EN: PagesStrings = PagesStrings {
     and: " and ",
     and_others: "others",
     and_new: "new: ",
-    dl_missing_tip: "Download missing — in “Wishlist”",
-    dl_tip: "Download — in “Wishlist”",
+    dl_missing_tip: "Add missing tracks to Wishlist",
+    dl_tip: "Add to Wishlist",
     mine_add: "Add to my tracks",
     mine_remove: "Remove from my tracks",
     versions_head: "Other versions",
@@ -236,19 +236,19 @@ pub static EN: PagesStrings = PagesStrings {
     wish_downloading: "Downloading",
     wish_not_found: "No download found — “Wishlist”",
     wish_done: "Downloaded",
-    sync_state_two_way: "two-way changes",
+    sync_state_two_way: "syncing both ways",
     sync_state_follow: "receiving changes only",
     sync_state_off: "not syncing",
     syncing: "syncing…",
-    sync_link_tip: "Linked to a service playlist; how to sync — in ⋮",
-    ed_title: "Looks like one album",
+    sync_link_tip: "Linked to a service playlist. Choose sync options in ⋮.",
+    ed_title: "These look like editions of one album",
     ed_and: " and ",
     ed_merge: "Merge",
     ed_keep: "Keep separate",
     ed_keep_tip: "Don't ask about these albums again",
     track_no_number: "Track with no number",
-    marks_title: "Dislikes & speed",
-    marks_disliked: "Tracks marked “Dislike”",
+    marks_title: "“Don't recommend” and speed",
+    marks_disliked: "Tracks marked “Don't recommend”",
     marks_banned: "Artists not recommended",
     marks_speed: "Custom speed",
     take_back: "Remove",
@@ -261,12 +261,12 @@ pub static EN: PagesStrings = PagesStrings {
     close_esc: "Close (Esc)",
     equalizer: "Equalizer",
     speed_tab: "Speed",
-    keep_timbre: "Keep voice timbre",
+    keep_timbre: "Preserve vocal tone",
     db_unit: "dB",
     hz_unit: "Hz",
     empty_line: "No music yet",
     find_music: "Find music",
-    add_folder: "Add folder",
+    add_folder: "Add folder…",
     forward: "Forward",
     back_to_player: "Back to player",
     collapse_menu: "Collapse menu",
@@ -293,12 +293,12 @@ pub static EN: PagesStrings = PagesStrings {
     ask_title_rename: "Rename",
     magnet_title: "Magnet link",
     magnet_placeholder: "magnet:?xt=…",
-    magnet_as_track: "The torrent downloads as this track from “Wishlist”.",
-    magnet_must_start: "The link must start with magnet:",
+    magnet_as_track: "Downloads this torrent for the selected Wishlist track.",
+    magnet_must_start: "The link must start with “magnet:”.",
     enter_name: "Enter a name",
     delete_playlist_q: "Delete playlist?",
     playlist_delete_plain: "The tracks will stay in the library.",
-    playlist_delete_kept: "The tracks will stay in the library, and the playlist on {service} stays as it is.",
+    playlist_delete_kept: "The tracks will stay in your library. The playlist on {service} will not change.",
     delete_btn: "Delete",
     link_service_q: "Link to a service?",
     link_service_body: "The playlist will appear on Spotify or YouTube Music, and changes will go both ways.",
@@ -308,9 +308,9 @@ pub static EN: PagesStrings = PagesStrings {
     trash_q: "Delete from library?",
     purge_q: "Delete forever?",
     trash_note_30: "{title} moves to the Trash for 30 days: it leaves the library at once and can be restored from Library → Trash.",
-    trash_note_off: "{title}: the files will be erased from disk. The Trash is off in the settings, this cannot be undone.",
+    trash_note_off: "{title}: files will be deleted from disk. The Trash is off in Settings. This cannot be undone.",
     purge_forever_field: "Delete forever",
-    purge_note: "{title}: the files will be erased from disk, the tracks leave playlists and Liked Songs. This cannot be undone.",
+    purge_note: "{title}: files will be deleted from disk and tracks removed from playlists and Liked Songs. This cannot be undone.",
     empty_trash_q: "Empty trash?",
     clear_trash_btn: "Empty",
     empty_trash_forever: "{count} and their files will be erased forever. This cannot be undone.",
@@ -447,7 +447,7 @@ pub fn fmt_synced(t: &str) -> String {
 pub fn fmt_ed_what_in(loc: Locale, names: &str, artist: &str) -> String {
     match loc {
         Locale::Ru => format!("{names} — издания одного альбома ({artist})."),
-        Locale::En => format!("{names} — editions of one album ({artist})."),
+        Locale::En => format!("{names} are editions of the same album ({artist})."),
     }
 }
 
@@ -462,7 +462,7 @@ pub fn fmt_ed_same_in(loc: Locale, n: u32) -> String {
         Locale::Ru => format!(" Одинаковых песен: {n} — останется по одной, файл получше будет играть."),
         Locale::En => {
             let noun = if n == 1 { "song" } else { "songs" };
-            format!(" {n} identical {noun} — one copy stays, the better file plays.")
+            format!(" {n} duplicate {noun} — one copy will remain, using the better file.")
         }
     }
 }
@@ -489,7 +489,7 @@ pub fn fmt_ed_new(n: u32, keep: &str) -> String {
 pub fn fmt_ed_merge_tip_in(loc: Locale, keep: &str) -> String {
     match loc {
         Locale::Ru => format!("Всё окажется в «{keep}»; файлы на диске не трогаются"),
-        Locale::En => format!("Everything lands in “{keep}”; files on disk stay untouched"),
+        Locale::En => format!("Everything will be merged into “{keep}”; files on disk will not change"),
     }
 }
 
@@ -565,10 +565,10 @@ mod tests {
         assert_eq!(fmt_synced_in(ru, "12:00"), "синхронизирован 12:00");
         assert_eq!(fmt_synced_in(en, "12:00"), "synced 12:00");
         assert_eq!(fmt_ed_what_in(ru, "«A» и «B»", "X"), "«A» и «B» — издания одного альбома (X).");
-        assert_eq!(fmt_ed_what_in(en, "“A” and “B”", "X"), "“A” and “B” — editions of one album (X).");
+        assert_eq!(fmt_ed_what_in(en, "“A” and “B”", "X"), "“A” and “B” are editions of the same album (X).");
         assert_eq!(fmt_ed_same_in(ru, 1), " Одинаковых песен: 1 — останется по одной, файл получше будет играть.");
-        assert_eq!(fmt_ed_same_in(en, 1), " 1 identical song — one copy stays, the better file plays.");
-        assert_eq!(fmt_ed_same_in(en, 2), " 2 identical songs — one copy stays, the better file plays.");
+        assert_eq!(fmt_ed_same_in(en, 1), " 1 duplicate song — one copy will remain, using the better file.");
+        assert_eq!(fmt_ed_same_in(en, 2), " 2 duplicate songs — one copy will remain, using the better file.");
         assert_eq!(fmt_ed_new_in(ru, 3, "A"), " Ещё 3 добавится в «A».");
         assert_eq!(fmt_ed_new_in(en, 3, "A"), " 3 more will be added to “A”.");
         assert_eq!(fmt_size_in(ru, 500), "500 Б");
