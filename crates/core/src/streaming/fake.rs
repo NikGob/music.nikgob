@@ -43,7 +43,7 @@ use super::{
     Account, AlbumRef, ArtistRef, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput,
     Played, RemoteId, SearchKind, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist,
     StreamSearch, StreamService, StreamTrack, SuggestedArtist, SuggestedTrack, SuggestionFeed, SuggestionKind,
-    SoloistAction, SoloistPhase, SoloistStatus, Suggestions, TrackKind, format, only_kind, rank_weight,
+    SoloistAction, SoloistPhase, SoloistStatus, Suggestions, TrackKind, StreamQuality, format, only_kind, rank_weight,
 };
 use crate::model::{ReleaseType, UnixMs};
 
@@ -1805,7 +1805,7 @@ struct FakeAudio {
     bytes: Option<Vec<u8>>,
     pos: u64,
     /// What the real service would play (for the player's label).
-    quality: Option<String>,
+    quality: Option<StreamQuality>,
 }
 
 impl FakeAudio {
@@ -1901,7 +1901,7 @@ impl AudioStream for FakeAudio {
         ))
     }
 
-    fn quality(&self) -> Option<String> {
+    fn quality(&self) -> Option<StreamQuality> {
         self.quality.clone()
     }
 }

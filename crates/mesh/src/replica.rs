@@ -922,6 +922,17 @@ fn masters_progress(lists: &HashMap<String, (Instant, Vec<MasterItem>)>, held: &
     })
 }
 
+/// The masters' part of a device's numbers, once every device of `peers`
+/// listed its masters; None while one did not (the device's copy is not
+/// known then).
+fn masters_plan(
+    lists: &HashMap<String, (Instant, Vec<MasterItem>)>,
+    peers: &[String],
+    held: &HashSet<String>,
+) -> Option<(u64, u64)> {
+    peers.iter().all(|p| lists.contains_key(p)).then(|| masters_progress(lists, held))
+}
+
 /// What device `target` (profile `profile`) is to hold of this computer's
 /// music and how much of it it holds, in bytes: the planned file of every
 /// track (`peers`: the devices it pulls from, itself not among them) and,
@@ -995,7 +1006,10 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, dirs: &Dirs, a: &Assigned, peer
         }
     };
     let mut jobs: Vec<Job> = songs.into_iter().map(Job::Track).collect();
-    let mut masters_seen = (0u64, 0u64);
+    // The masters' part of the numbers, once every device the plan pulls
+    // from said what it has (None while one has not: the numbers stay as
+    // they were).
+    let mut masters_seen = Some((0u64, 0u64));
     if a.profile == MeshProfile::Full {
         for peer in peers {
             let fresh = st.masters.get(peer).is_some_and(|(at, _)| at.elapsed() < MASTERS_AGAIN);
@@ -1023,7 +1037,7 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, dirs: &Dirs, a: &Assigned, peer
             }
         };
         let skip: HashSet<String> = held.iter().chain(pending.iter()).cloned().collect();
-        masters_seen = masters_progress(&st.masters, &held);
+        masters_seen = masters_plan(&st.masters, peers, &held);
         jobs.extend(plan_masters(&st.masters, &skip).into_iter().map(|(item, from)| Job::Master { item, from }));
     }
     jobs.retain(|j| !st.waiting(&j.key()));
@@ -1045,10 +1059,12 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, dirs: &Dirs, a: &Assigned, peer
     st.queue = jobs.into();
     st.planned_at = Some(Instant::now());
     st.plan_for = Some(a.clone());
-    st.copy = songs_seen.map(|(done, goal)| MeshCopy {
-        done: done.saturating_add(masters_seen.0),
-        goal: goal.saturating_add(masters_seen.1),
-    });
+    if let (Some((done, goal)), Some((masters_done, masters_goal))) = (songs_seen, masters_seen) {
+        st.copy = Some(MeshCopy {
+            done: done.saturating_add(masters_done),
+            goal: goal.saturating_add(masters_goal),
+        });
+    }
 }
 
 // ------------------------------------------------------------- the loop
@@ -1951,6 +1967,26 @@ mod tests {
         let plan = plan_masters(&lists, &held);
         assert_eq!(plan.iter().map(|(m, _)| m.hash.as_str()).collect::<Vec<_>>(), ["a", "b"]);
         assert_eq!(plan[1].1, ["lap", "pc"], "both devices have it");
+    }
+
+    /// A device's copy counts the masters only once every device it pulls
+    /// from listed them: a list that failed to come leaves the number as it
+    /// was, not a plan with no masters in it.
+    #[test]
+    fn a_copy_waits_for_the_masters_of_every_device() {
+        let item = |h: &str, size: u64| MasterItem { hash: h.into(), codec: "flac".into(), size, tracks: Vec::new() };
+        let now = Instant::now();
+        let peers = ["pc".to_owned(), "lap".to_owned()];
+        let held: HashSet<String> = ["a".to_owned()].into();
+        let lists: HashMap<String, (Instant, Vec<MasterItem>)> =
+            [("pc".to_owned(), (now, vec![item("a", 10)]))].into();
+        assert_eq!(masters_plan(&lists, &peers, &held), None, "lap's list is not in");
+        let all: HashMap<String, (Instant, Vec<MasterItem>)> = [
+            ("pc".to_owned(), (now, vec![item("a", 10)])),
+            ("lap".to_owned(), (now, vec![item("b", 20), item("a", 10)])),
+        ]
+        .into();
+        assert_eq!(masters_plan(&all, &peers, &held), Some((10, 30)), "a file shared by two once");
     }
 
     #[test]

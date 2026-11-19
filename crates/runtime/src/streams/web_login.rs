@@ -18,7 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nikgob_core::i18n::activity::{fmt_login_window_failed_in, fmt_sc_window_failed_in};
-use nikgob_core::i18n::{Locale, activity_in};
+use nikgob_core::i18n::view::{fmt_cookies_unreadable_in, fmt_window_error_in};
+use nikgob_core::i18n::{Locale, activity_in, view_in};
 use nikgob_core::streaming::{Account, LoginInput, LoginPrompt, Service};
 
 use super::Msg;
@@ -49,8 +50,9 @@ pub fn window_hint(service: Service) -> &'static str {
 pub trait WebLogin: Send + Sync {
     /// Opens the window and blocks until it is done: the session cookies as
     /// a Netscape cookies.txt. Stops soon after `cancel` becomes true. `loc`
-    /// is the UI's language of this sign-in (the window's title and its
-    /// errors are in it), not the one the app started with.
+    /// is the UI's language of this sign-in (the window's title), not the
+    /// one the app started with; the reason of a failure is data and is
+    /// worded where the account is shown.
     fn sign_in(&self, cancel: &AtomicBool, loc: Locale) -> Result<String, WebLoginError>;
     /// Forgets the window's saved session (its browser profile). Blocking.
     fn forget(&self);
@@ -67,20 +69,51 @@ pub enum WebLoginError {
     Refused,
     /// `sign_in` was cancelled.
     Cancelled,
-    /// The window could not run (no WebView2, ...).
+    /// The window ended without writing the cookies.
+    NoCookies,
+    /// The cookies it wrote could not be read: what the system said.
+    CookiesUnreadable { err: String },
+    /// The system has no webview for the window.
+    NoWebView,
+    /// The window ended with this exit code.
+    Exit { code: i32 },
+    /// The window's process died without an exit code.
+    Crashed,
+    /// The window could not run (its process could not start): the system's
+    /// words.
     Failed(String),
 }
 
 impl WebLoginError {
+    /// Why the window failed, without the advice that follows it, in `loc`
+    /// (None: the reason is a message of its own).
+    fn window_why_in(&self, loc: Locale) -> Option<String> {
+        let v = view_in(loc);
+        match self {
+            Self::Closed | Self::TimedOut | Self::Refused | Self::Cancelled => None,
+            Self::NoCookies => Some(v.window_no_cookies.to_owned()),
+            Self::CookiesUnreadable { err } => Some(fmt_cookies_unreadable_in(loc, err)),
+            Self::NoWebView => {
+                let missing = if cfg!(windows) { v.no_webview2 } else { v.no_webkitgtk };
+                Some(missing.to_owned())
+            }
+            Self::Exit { code } => Some(fmt_window_error_in(loc, *code)),
+            Self::Crashed => Some(v.window_crashed.to_owned()),
+            Self::Failed(m) => Some(m.clone()),
+        }
+    }
+
     /// As the user reads it, for a service's window, in `loc`.
     pub fn text_for_in(&self, service: Service, loc: Locale) -> String {
         if service != Service::Soundcloud {
             return self.text_in(loc);
         }
-        match self {
-            Self::Refused => activity_in(loc).sc_refused.to_owned(),
-            Self::Failed(m) => fmt_sc_window_failed_in(loc, m),
-            other => other.text_in(loc),
+        if matches!(self, Self::Refused) {
+            return activity_in(loc).sc_refused.to_owned();
+        }
+        match self.window_why_in(loc) {
+            Some(why) => fmt_sc_window_failed_in(loc, &why),
+            None => self.text_in(loc),
         }
     }
 
@@ -97,7 +130,7 @@ impl WebLoginError {
             Self::TimedOut => s.login_timed_out.to_owned(),
             Self::Refused => s.login_refused.to_owned(),
             Self::Cancelled => s.login_cancelled.to_owned(),
-            Self::Failed(m) => fmt_login_window_failed_in(loc, m),
+            _ => fmt_login_window_failed_in(loc, &self.window_why_in(loc).unwrap_or_default()),
         }
     }
 
@@ -200,5 +233,36 @@ impl Worker {
                 .name(format!("{service}-web-forget"))
                 .spawn(move || login.forget());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the window's own failures say: their kind and arguments are
+    /// worded where the account is shown, in the language of that moment.
+    #[test]
+    fn a_windows_failure_is_worded_in_both_locales() {
+        let failed = WebLoginError::NoCookies.text_in(Locale::Ru);
+        assert_eq!(failed, "Окно входа не открылось (окно не отдало cookies). Можно войти по cookies: «Вставить cookies…»");
+        assert_eq!(
+            WebLoginError::NoCookies.text_in(Locale::En),
+            "The sign-in window did not open (the sign-in window returned no cookies). You can sign in with cookies: “Paste cookies…”"
+        );
+        assert!(WebLoginError::Exit { code: 7 }.text_in(Locale::Ru).starts_with("Окно входа не открылось (ошибка 7)"));
+        assert!(WebLoginError::CookiesUnreadable { err: "x".into() }.text_in(Locale::Ru).contains("cookies не читаются: x"));
+        assert!(WebLoginError::Crashed.text_in(Locale::Ru).contains("(окно упало)"));
+        assert!(WebLoginError::NoWebView.text_in(Locale::Ru).contains("в системе нет Web"));
+        // SoundCloud's window says what to paste instead.
+        assert_eq!(
+            WebLoginError::NoCookies.text_for_in(Service::Soundcloud, Locale::Ru),
+            "Окно входа не открылось (окно не отдало cookies). Можно вставить токен: «Вставить токен…»"
+        );
+        assert_eq!(
+            WebLoginError::Refused.text_for_in(Service::Soundcloud, Locale::En),
+            activity_in(Locale::En).sc_refused
+        );
+        assert_eq!(WebLoginError::Closed.text_for_in(Service::Youtube, Locale::Ru), "Вход отменён: окно закрыто раньше, чем вход завершился");
     }
 }

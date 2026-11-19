@@ -465,9 +465,9 @@ impl AudioStream for SpotifyStream {
         self.info.and_then(|i| i.duration)
     }
 
-    fn quality(&self) -> Option<String> {
+    fn quality(&self) -> Option<nikgob_core::streaming::StreamQuality> {
         self.info
-            .map(|i| nikgob_core::streaming::quality_label("Vorbis", i.kbps, false))
+            .map(|i| nikgob_core::streaming::StreamQuality::new("Vorbis", i.kbps, false))
     }
 
     fn interrupter(&self) -> Option<StreamInterrupter> {

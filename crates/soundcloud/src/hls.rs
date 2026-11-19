@@ -477,9 +477,9 @@ impl AudioStream for HlsStream {
         *self.duration.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn quality(&self) -> Option<String> {
+    fn quality(&self) -> Option<nikgob_core::streaming::StreamQuality> {
         let kbps = u32::try_from(self.kbps.load(Ordering::SeqCst)).unwrap_or(160);
-        Some(nikgob_core::streaming::quality_label("AAC", kbps, false))
+        Some(nikgob_core::streaming::StreamQuality::new("AAC", kbps, false))
     }
 
     /// Wakes a read waiting for its segment (or for the playlist), also

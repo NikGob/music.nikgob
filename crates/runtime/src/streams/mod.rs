@@ -418,31 +418,21 @@ impl Streams {
     }
 }
 
+/// A service error as the cold import's problems keep it: its kind and
+/// arguments (the end of a wait is a clock time, made once here).
+pub(crate) fn service_error_words(e: &StreamError) -> nikgob_core::i18n::status::ServiceErrorWords {
+    let until = match e {
+        StreamError::RateLimited { retry_after } => {
+            retry_after.filter(|d| *d > search::SHORT_WAIT).and_then(accounts::hm_after)
+        }
+        _ => None,
+    };
+    nikgob_core::i18n::status::ServiceErrorWords::of(e, until)
+}
+
 /// A service error as the user reads it, localized for `loc`.
 pub(crate) fn error_text_in(e: &StreamError, loc: nikgob_core::i18n::Locale) -> String {
-    use nikgob_core::i18n::{ErrorStrings, errors_in};
-    let err = errors_in(loc);
-    match e {
-        StreamError::NotConfigured => err.stream_not_configured.into(),
-        StreamError::NotLoggedIn => err.stream_not_logged_in.into(),
-        StreamError::PremiumRequired => err.stream_need_premium.into(),
-        // Said with its end when that is a while away.
-        StreamError::RateLimited { retry_after } => {
-            let hm = retry_after
-                .filter(|d| *d > search::SHORT_WAIT)
-                .and_then(accounts::hm_after);
-            ErrorStrings::stream_rate_limited_in(loc, hm.as_deref())
-        }
-        StreamError::Unavailable => err.stream_unavailable.into(),
-        StreamError::Unsupported => err.stream_unsupported.into(),
-        StreamError::AgeRestricted => err.stream_age_restricted.into(),
-        StreamError::RegionBlocked => err.stream_region_blocked.into(),
-        StreamError::Drm => err.stream_drm.into(),
-        StreamError::Http { status } => ErrorStrings::stream_http_in(loc, *status),
-        // The details go to the log at the call site.
-        StreamError::Network(_) => err.stream_network.into(),
-        StreamError::Parse(_) => err.stream_parse.into(),
-    }
+    service_error_words(e).words_in(loc)
 }
 
 /// Whether a service can be asked anything in this account state: Spotify

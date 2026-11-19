@@ -518,8 +518,8 @@ impl StreamBytes {
             self.inner.byte_len().unwrap_or(0)
         );
         let to = self.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        if let (Some(label), Some(to)) = (quality, to) {
-            let _ = to.send(PlaybackEvent::Quality { id: self.item, label: QualityLabel::Text(label) });
+        if let (Some(quality), Some(to)) = (quality, to) {
+            let _ = to.send(PlaybackEvent::Quality { id: self.item, label: QualityLabel::Stream(quality) });
         }
     }
 }

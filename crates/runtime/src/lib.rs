@@ -128,7 +128,9 @@ pub struct PlayRequest {
 /// player is published, in the UI's language of that moment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QualityLabel {
-    /// The service's own words (a codec and a bitrate).
+    /// What the stream plays: its codec, bitrate and whether it varies.
+    Stream(nikgob_core::streaming::StreamQuality),
+    /// A name of its own, not a codec («Soloist»).
     Text(String),
     /// SoundCloud's own player.
     SoundcloudPlayer,
@@ -138,6 +140,7 @@ impl QualityLabel {
     /// The label in `loc`.
     pub fn text_in(&self, loc: nikgob_core::i18n::Locale) -> String {
         match self {
+            Self::Stream(q) => q.words_in(loc),
             Self::Text(text) => text.clone(),
             Self::SoundcloudPlayer => nikgob_core::i18n::backend_in(loc).soundcloud_player.to_owned(),
         }
@@ -3525,7 +3528,7 @@ impl Worker {
         let service = self.playing_source.and_then(|(_, k)| k.service())?;
         let id = self.playing?.id;
         let known = self.qualities.iter().find(|(i, _)| *i == id).map(|(_, q)| q.text_in(self.locale()));
-        Some(known.unwrap_or_else(|| service.nominal_quality()))
+        Some(known.unwrap_or_else(|| service.nominal_quality().words_in(self.locale())))
     }
 
     fn publish_player(&mut self) {
@@ -4067,6 +4070,8 @@ impl Worker {
             self.publish_wishlist();
             self.relocalize_running();
             self.relocalize_torrents();
+            // Cold-start jobs and their history are data too: said again.
+            self.publish_cold_jobs();
         }
     }
 

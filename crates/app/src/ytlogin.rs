@@ -49,7 +49,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use nikgob_core::i18n::{Locale, locale, parse_locale_tag, set_locale, view_in};
-use nikgob_core::i18n::view::{fmt_cookies_unreadable_in, fmt_window_error_in};
 use nikgob_runtime::{WebLogin, WebLoginError};
 
 pub const EXIT_OK: i32 = 0;
@@ -401,12 +400,6 @@ impl WindowLogin {
     }
 }
 
-/// What the user is told when the child finds no webview to show, in `loc`.
-fn no_webview_in(loc: Locale) -> &'static str {
-    let v = view_in(loc);
-    if cfg!(windows) { v.no_webview2 } else { v.no_webkitgtk }
-}
-
 /// How long the child gets to close by itself after «Отмена».
 const CANCEL_GRACE: Duration = Duration::from_secs(3);
 
@@ -481,19 +474,15 @@ impl WebLogin for WindowLogin {
         match code {
             Some(EXIT_OK) => match read() {
                 Ok(t) if !t.trim().is_empty() => Ok(t),
-                Ok(_) => Err(WebLoginError::Failed(view_in(loc).window_no_cookies.into())),
-                Err(e) => Err(WebLoginError::Failed(fmt_cookies_unreadable_in(loc, &e.to_string()))),
+                Ok(_) => Err(WebLoginError::NoCookies),
+                Err(e) => Err(WebLoginError::CookiesUnreadable { err: e.to_string() }),
             },
             Some(EXIT_CLOSED) => Err(WebLoginError::Closed),
             Some(EXIT_TIMEOUT) => Err(WebLoginError::TimedOut),
             Some(EXIT_REFUSED) => Err(WebLoginError::Refused),
-            Some(EXIT_NO_WEBVIEW) => Err(WebLoginError::Failed(no_webview_in(loc).into())),
-            other => {
-                Err(WebLoginError::Failed(match other {
-                    Some(c) => fmt_window_error_in(loc, c),
-                    None => view_in(loc).window_crashed.into(),
-                }))
-            }
+            Some(EXIT_NO_WEBVIEW) => Err(WebLoginError::NoWebView),
+            Some(code) => Err(WebLoginError::Exit { code }),
+            None => Err(WebLoginError::Crashed),
         }
     }
 

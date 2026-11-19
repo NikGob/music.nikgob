@@ -63,7 +63,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use nikgob_core::i18n::activity::{fmt_import_counts_in, fmt_import_skipped_in, group_in};
-use nikgob_core::i18n::status::{self, StoredLine};
+use nikgob_core::i18n::status::{self, ColdFailure, ColdProblem, ColdProblemKind, StoredLine};
 use nikgob_core::i18n::{Locale, activity_in};
 use nikgob_core::model::{
     DeviceId, Event, EventContext, EventOrigin, EventType, LikeTarget, PlaylistId, TrackId, UnixMs, Uuid,
@@ -77,7 +77,7 @@ use nikgob_view as v;
 
 use super::export::{self, ExportData, Item, Outcome, Play};
 use super::songs::{Probe, Shelf};
-use super::{Msg, error_text_in};
+use super::{Msg, service_error_words};
 use crate::Worker;
 use crate::import::{IMPORT_ID, Internal};
 
@@ -141,13 +141,13 @@ fn video_key(remote: &RemoteId) -> String {
 pub(crate) enum ColdMsg {
     Progress {
         job: u64,
-        subtitle: String,
+        step: Step,
         progress: Option<f32>,
     },
     /// An export is read and its history stored.
     Parsed {
         job: u64,
-        result: Result<Box<Parsed>, String>,
+        result: Result<Box<Parsed>, ColdFailure>,
     },
     /// What the API gave.
     Fetched {
@@ -161,6 +161,52 @@ pub(crate) enum ColdMsg {
         service: Service,
         results: Vec<(TrackId, String, Result<StreamTrack, StreamError>)>,
     },
+}
+
+/// What a running cold import says it does now, as data: the words are
+/// made when the job is published, in the language of that moment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Step {
+    Preparing,
+    Likes,
+    Playlists,
+    RecentPlays,
+    /// «Узнаю названия в YouTube Music: 1 200».
+    YtTitles { count: usize },
+    /// «Плейлисты: 2 из 5».
+    PlaylistsOf { done: usize, all: usize },
+    /// «Ищу песни плейлистов: 10 из 1 200».
+    PlaylistSongs { done: usize, all: usize },
+    /// «История: 1 200 из 3 400».
+    History { done: usize, all: usize },
+    /// «Импорт: 3 прослушивания, 1 лайк».
+    Imported { counts: Counts },
+}
+
+impl Step {
+    /// Its words in `loc`.
+    pub(crate) fn words_in(&self, loc: Locale) -> String {
+        let s = activity_in(loc);
+        match self {
+            Self::Preparing => s.preparing.to_owned(),
+            Self::Likes => s.likes_progress.to_owned(),
+            Self::Playlists => s.playlists_progress.to_owned(),
+            Self::RecentPlays => s.recent_plays.to_owned(),
+            Self::YtTitles { count } => format!("{}: {}", s.yt_titles, group_in(loc, *count)),
+            Self::PlaylistsOf { done, all } => format!("{}: {done} {} {all}", s.playlists, s.of),
+            Self::PlaylistSongs { done, all } => {
+                format!("{}: {} {} {}", s.playlist_songs, group_in(loc, *done), s.of, group_in(loc, *all))
+            }
+            Self::History { done, all } => {
+                format!("{}: {} {} {}", s.history, group_in(loc, *done), s.of, group_in(loc, *all))
+            }
+            Self::Imported { counts } => format!(
+                "{}: {}",
+                s.import,
+                fmt_import_counts_in(loc, counts.plays, counts.likes, counts.saved, counts.playlists)
+            ),
+        }
+    }
 }
 
 /// A track an import wants in the library.
@@ -196,6 +242,7 @@ pub(crate) struct Parsed {
     /// YouTube playlists left out as not music.
     skipped_playlists: usize,
     files: usize,
+    /// What the export's reader complained of (its own words).
     problems: Vec<String>,
 }
 
@@ -243,14 +290,14 @@ enum Origin {
 struct ColdJob {
     origin: Origin,
     title: String,
-    subtitle: String,
+    step: Step,
     progress: Option<f32>,
     counts: Counts,
     likes: VecDeque<Wanted>,
     playlists: VecDeque<PendingPlaylist>,
     /// Steps in total, for the progress bar of the worker part.
     steps: usize,
-    problems: Vec<String>,
+    problems: Vec<ColdProblem>,
 }
 
 #[derive(Default)]
@@ -606,13 +653,11 @@ fn store_saved(
 /// wait is not asked again this time.
 async fn catalogue_songs(
     job: u64,
-    loc: Locale,
     lib: &Library,
     services: &[Arc<dyn StreamService>],
     ask: &[(RemoteId, Probe)],
     tx: &Sender<Internal>,
 ) -> Vec<(RemoteId, StreamTrack)> {
-    let s = activity_in(loc);
     let mut out = Vec::new();
     let mut waiting = vec![false; services.len()];
     let mut asked = 0;
@@ -632,13 +677,7 @@ async fn catalogue_songs(
             if k % 10 == 0 {
                 send(tx, ColdMsg::Progress {
                     job,
-                    subtitle: format!(
-                        "{}: {} {} {}",
-                        s.playlist_songs,
-                        group_in(loc, k + 1),
-                        s.of,
-                        group_in(loc, ask.len())
-                    ),
+                    step: Step::PlaylistSongs { done: k + 1, all: ask.len() },
                     progress: Some(k as f32 / ask.len().max(1) as f32),
                 });
             }
@@ -693,24 +732,22 @@ fn send(tx: &Sender<Internal>, m: ColdMsg) {
 /// the music library are read).
 async fn read_export(
     job: u64,
-    loc: Locale,
     path: PathBuf,
     lib: Library,
     youtube: Option<Arc<dyn StreamService>>,
     deezer: Option<Arc<dyn StreamService>>,
     saved: bool,
     tx: Sender<Internal>,
-) -> Result<Box<Parsed>, String> {
-    let s = activity_in(loc);
+) -> Result<Box<Parsed>, ColdFailure> {
     let mut data: ExportData = tokio::task::spawn_blocking(move || export::read_export(&path, saved))
         .await
-        .map_err(|e| e.to_string())??;
+        .map_err(|e| ColdFailure::Words(e.to_string()))??;
     if data.is_empty() {
-        return Err(if data.problems.is_empty() {
-            s.export_not_found.into()
+        return Err(ColdFailure::Reasons(vec![ColdProblem::Known(if data.problems.is_empty() {
+            ColdProblemKind::ExportNotFound
         } else {
-            format!("{}: {}", s.export_read_failed, data.problems.join("; "))
-        });
+            ColdProblemKind::ExportRead { problems: data.problems.clone() }
+        })]));
     }
     // How a watch history's plays ended: by the gaps between its entries,
     // music or not.
@@ -791,7 +828,7 @@ async fn read_export(
         if !blank.is_empty() {
             send(&tx, ColdMsg::Progress {
                 job,
-                subtitle: format!("{}: {}", s.yt_titles, group_in(loc, blank.len())),
+                step: Step::YtTitles { count: blank.len() },
                 progress: None,
             });
             full = youtube_lookups(yt, blank).await;
@@ -850,7 +887,7 @@ async fn read_export(
     let hits = if ask.is_empty() || services.is_empty() {
         Vec::new()
     } else {
-        catalogue_songs(job, loc, &lib, &services, &ask, &tx).await
+        catalogue_songs(job, &lib, &services, &ask, &tx).await
     };
     let mut found = Vec::new();
     for (remote, hit) in hits {
@@ -908,26 +945,21 @@ async fn read_export(
     let saved = data.saved.len();
     let progress_tx = tx.clone();
     let (new_plays, new_saved) = tokio::task::spawn_blocking(move || {
-        let new_saved = store_saved(&lib, &data.saved, &songs, &shelf).map_err(|e| e.to_string())?;
+        let new_saved = store_saved(&lib, &data.saved, &songs, &shelf).map_err(|e| ColdFailure::Words(e.to_string()))?;
         let progress = |done: usize| {
             let done = done.min(plays);
             send(&progress_tx, ColdMsg::Progress {
                 job,
-                subtitle: format!(
-                    "{}: {} {} {}",
-                    s.history,
-                    group_in(loc, done),
-                    s.of,
-                    group_in(loc, plays)
-                ),
+                step: Step::History { done, all: plays },
                 progress: Some(done as f32 / plays.max(1) as f32),
             });
         };
-        let new_plays = store_history(&lib, &data.plays, &full, &shelf, &progress).map_err(|e| e.to_string())?;
-        Ok::<_, String>((new_plays, new_saved))
+        let new_plays =
+            store_history(&lib, &data.plays, &full, &shelf, &progress).map_err(|e| ColdFailure::Words(e.to_string()))?;
+        Ok::<_, ColdFailure>((new_plays, new_saved))
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| ColdFailure::Words(e.to_string()))??;
     Ok(Box::new(Parsed {
         plays,
         new_plays,
@@ -943,14 +975,13 @@ async fn read_export(
 }
 
 /// The API part: likes, the user's playlists with their tracks, recent plays.
-async fn fetch_service(job: u64, loc: Locale, svc: Arc<dyn StreamService>, tx: Sender<Internal>) -> Fetched {
-    let s = activity_in(loc);
-    let progress = |subtitle: String, progress: Option<f32>| {
-        send(&tx, ColdMsg::Progress { job, subtitle, progress });
+async fn fetch_service(job: u64, svc: Arc<dyn StreamService>, tx: Sender<Internal>) -> Fetched {
+    let progress = |step: Step, progress: Option<f32>| {
+        send(&tx, ColdMsg::Progress { job, step, progress });
     };
-    progress(s.likes_progress.into(), None);
+    progress(Step::Likes, None);
     let liked = svc.liked().await;
-    progress(s.playlists_progress.into(), None);
+    progress(Step::Playlists, None);
     let mut mine = svc.my_playlists().await.unwrap_or_else(|e| {
         log::warn!("{}: my_playlists: {e}", svc.service());
         Vec::new()
@@ -961,7 +992,7 @@ async fn fetch_service(job: u64, loc: Locale, svc: Arc<dyn StreamService>, tx: S
     let mut missed = 0;
     for (i, p) in mine.iter().enumerate() {
         progress(
-            format!("{}: {} {} {}", s.playlists, i + 1, s.of, mine.len()),
+            Step::PlaylistsOf { done: i + 1, all: mine.len() },
             Some(i as f32 / mine.len().max(1) as f32),
         );
         let mut r = svc.playlist(&p.id.id).await;
@@ -977,7 +1008,7 @@ async fn fetch_service(job: u64, loc: Locale, svc: Arc<dyn StreamService>, tx: S
             }
         }
     }
-    progress(s.recent_plays.into(), None);
+    progress(Step::RecentPlays, None);
     let recent = svc.recent().await;
     Fetched {
         liked,
@@ -1001,7 +1032,7 @@ impl Worker {
             ColdJob {
                 origin,
                 title,
-                subtitle: s.preparing.into(),
+                step: Step::Preparing,
                 progress: None,
                 counts: Counts::default(),
                 likes: VecDeque::new(),
@@ -1026,14 +1057,13 @@ impl Worker {
             self.toast_err(msg, None);
             return;
         }
-        let loc = self.locale();
         let title = StoredLine::ImportFromService { service }.encode();
         let Some(job) = self.cold_job(Origin::Service(service), title) else {
             return;
         };
         let tx = self.streaming.internal.clone();
         self.streaming.spawn(async move {
-            let fetched = Box::new(fetch_service(job, loc, svc, tx).await);
+            let fetched = Box::new(fetch_service(job, svc, tx).await);
             Msg::Cold(ColdMsg::Fetched { job, service, fetched })
         });
     }
@@ -1043,7 +1073,6 @@ impl Worker {
         let name = path
             .file_name()
             .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-        let loc = self.locale();
         let title = StoredLine::ImportExport { name }.encode();
         let Some(job) = self.cold_job(Origin::Files(path.clone()), title) else {
             return;
@@ -1054,16 +1083,16 @@ impl Worker {
         let saved = self.state.read().prefs.import_saved_songs;
         let tx = self.streaming.internal.clone();
         self.streaming.spawn(async move {
-            let result = read_export(job, loc, path, lib, youtube, deezer, saved, tx).await;
+            let result = read_export(job, path, lib, youtube, deezer, saved, tx).await;
             Msg::Cold(ColdMsg::Parsed { job, result })
         });
     }
 
     pub(crate) fn cold_msg(&mut self, m: ColdMsg) {
         match m {
-            ColdMsg::Progress { job, subtitle, progress } => {
+            ColdMsg::Progress { job, step, progress } => {
                 if let Some(j) = self.streaming.cold.jobs.get_mut(&job) {
-                    j.subtitle = subtitle;
+                    j.step = step;
                     j.progress = progress;
                     self.publish_cold_jobs();
                 }
@@ -1075,7 +1104,7 @@ impl Worker {
         }
     }
 
-    fn export_parsed(&mut self, job: u64, result: Result<Box<Parsed>, String>) {
+    fn export_parsed(&mut self, job: u64, result: Result<Box<Parsed>, ColdFailure>) {
         let Some(j) = self.streaming.cold.jobs.get_mut(&job) else { return };
         match result {
             Ok(p) => {
@@ -1093,7 +1122,7 @@ impl Worker {
                 j.counts.saved = p.saved;
                 j.counts.new_saved = p.new_saved;
                 j.counts.skipped_playlists = p.skipped_playlists;
-                j.problems = p.problems;
+                j.problems = p.problems.into_iter().map(ColdProblem::Words).collect();
                 j.steps = p.likes.len().div_ceil(LIKES_PER_STEP) + p.playlists.len();
                 j.likes = p.likes.into();
                 j.playlists = p.playlists.into();
@@ -1116,23 +1145,19 @@ impl Worker {
                 counts.likes = liked.len();
                 counts.new_likes = self.apply_remote_likes(service, liked, true, false);
             }
-            Err(e) => problems.push(nikgob_core::i18n::ErrorStrings::cold_problem_likes_in(
-                self.locale(),
-                &error_text_in(e, self.locale()),
-            )),
+            Err(e) => problems.push(ColdProblem::Known(ColdProblemKind::Likes { why: service_error_words(e) })),
         }
         match &f.recent {
             Ok(recent) => {
                 counts.plays = recent.len();
                 counts.new_plays = self.store_recent(recent);
             }
-            Err(e) => problems.push(nikgob_core::i18n::ErrorStrings::cold_problem_history_in(
-                self.locale(),
-                &error_text_in(e, self.locale()),
-            )),
+            Err(e) => {
+                problems.push(ColdProblem::Known(ColdProblemKind::History { why: service_error_words(e) }))
+            }
         }
         if f.missed > 0 {
-            problems.push(format!("{}: {}", activity_in(self.locale()).playlists_not_opened, f.missed));
+            problems.push(ColdProblem::Known(ColdProblemKind::PlaylistsNotOpened { count: f.missed }));
         }
         let playlists: Vec<PendingPlaylist> = f
             .playlists
@@ -1151,8 +1176,8 @@ impl Worker {
         j.steps = playlists.len();
         j.playlists = playlists.into();
         if f.liked.is_err() && f.recent.is_err() && j.playlists.is_empty() {
-            let e = j.problems.join("; ");
-            self.cold_finish(job, Some(e));
+            let why = ColdFailure::Reasons(j.problems.clone());
+            self.cold_finish(job, Some(why));
             return;
         }
         self.cold_step(job);
@@ -1211,7 +1236,6 @@ impl Worker {
 
     /// One step of a job's worker part: a batch of likes, or one playlist.
     fn cold_step(&mut self, job: u64) {
-        let loc = self.locale();
         let Some(j) = self.streaming.cold.jobs.get_mut(&job) else { return };
         if !j.likes.is_empty() {
             let n = j.likes.len().min(LIKES_PER_STEP);
@@ -1231,11 +1255,7 @@ impl Worker {
         }
         let Some(j) = self.streaming.cold.jobs.get_mut(&job) else { return };
         let left = j.likes.len().div_ceil(LIKES_PER_STEP) + j.playlists.len();
-        j.subtitle = format!(
-            "{}: {}",
-            activity_in(loc).import,
-            fmt_import_counts_in(loc, j.counts.plays, j.counts.likes, j.counts.saved, j.counts.playlists)
-        );
+        j.step = Step::Imported { counts: j.counts };
         j.progress = Some(1.0 - left as f32 / j.steps.max(1) as f32);
         self.publish_cold_jobs();
         let _ = self
@@ -1392,24 +1412,30 @@ impl Worker {
         }
     }
 
-    fn cold_finish(&mut self, job: u64, error: Option<String>) {
+    fn cold_finish(&mut self, job: u64, why: Option<ColdFailure>) {
         let loc = self.locale();
         let Some(j) = self.streaming.cold.jobs.remove(&job) else { return };
-        let text = match &error {
-            Some(e) => format!("{}: {e}", activity_in(loc).import_failed),
+        let text = match &why {
+            Some(why) => format!("{}: {}", activity_in(loc).import_failed, why.words_in(loc)),
             None => summary_in(loc, &j.counts),
         };
-        let subtitle = match &error {
-            Some(e) => StoredLine::ColdFailed { detail: e.clone() },
-            None => StoredLine::ColdSummary {
-                found: j.counts.found(),
-                new: j.counts.found_new(),
-                skipped: j.counts.skipped_playlists,
-                problems: j.problems.clone(),
-            },
+        let (subtitle, error) = match &why {
+            Some(why) => (
+                StoredLine::ColdFailed { detail: why.clone() }.encode(),
+                Some(StoredLine::ColdReason { detail: why.clone() }.encode()),
+            ),
+            None => (
+                StoredLine::ColdSummary {
+                    found: j.counts.found(),
+                    new: j.counts.found_new(),
+                    skipped: j.counts.skipped_playlists,
+                    problems: j.problems.clone(),
+                }
+                .encode(),
+                None,
+            ),
         };
         let has_new = j.counts.new_plays + j.counts.new_likes + j.counts.new_saved + j.counts.new_playlists > 0;
-        let subtitle = subtitle.encode();
         let _ = self.lib.log_job("import", &j.title, &subtitle, error.as_deref());
         let cold = &mut self.streaming.cold;
         cold.history.push_front(v::Job {
@@ -1423,12 +1449,12 @@ impl Worker {
             queued: false,
             controllable: false,
             pausable: false,
-            error: error.clone(),
+            error,
             at: nikgob_library::now_ms(),
         });
         cold.history.truncate(HISTORY_KEEP);
         self.publish_cold_jobs();
-        if error.is_some() {
+        if why.is_some() {
             self.toast_err(text, None);
         } else if has_new {
             self.toast_ok(text, None);
@@ -1452,8 +1478,8 @@ impl Worker {
             .iter()
             .map(|(&id, j)| v::Job {
                 id,
-                title: status::line_words_in(loc, &j.title),
-                subtitle: j.subtitle.clone(),
+                title: status::job_line_words_in(loc, &j.title),
+                subtitle: j.step.words_in(loc),
                 progress: j.progress,
                 rate: None,
                 eta: None,
@@ -1666,6 +1692,31 @@ mod tests {
             summary_in(Locale::Ru, &only),
             "Импорт: ничего не нашлось · пропущено 5 плейлистов не с музыкой"
         );
+    }
+
+    /// What a running import says it does is data: the same job says it in
+    /// the language of the moment it is shown.
+    #[test]
+    fn a_progress_line_is_worded_when_it_is_shown() {
+        assert_eq!(Step::Preparing.words_in(Locale::Ru), "Подготовка…");
+        assert_eq!(Step::Preparing.words_in(Locale::En), "Preparing…");
+        assert_eq!(Step::Likes.words_in(Locale::En), "Likes…");
+        assert_eq!(Step::YtTitles { count: 1200 }.words_in(Locale::Ru), "Узнаю названия в YouTube Music: 1\u{a0}200");
+        assert_eq!(
+            Step::PlaylistsOf { done: 2, all: 5 }.words_in(Locale::Ru),
+            "Плейлисты: 2 из 5"
+        );
+        assert_eq!(
+            Step::PlaylistSongs { done: 10, all: 1200 }.words_in(Locale::Ru),
+            "Ищу песни плейлистов: 10 из 1\u{a0}200"
+        );
+        assert_eq!(
+            Step::History { done: 1200, all: 3400 }.words_in(Locale::En),
+            "History: 1,200 of 3,400"
+        );
+        let counts = Counts { plays: 3, likes: 1, ..Counts::default() };
+        assert_eq!(Step::Imported { counts }.words_in(Locale::Ru), "Импорт: 3 прослушивания, 1 лайк");
+        assert_eq!(Step::Imported { counts }.words_in(Locale::En), "Import: 3 plays, 1 like");
     }
 
     #[test]

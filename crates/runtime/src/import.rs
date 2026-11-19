@@ -173,7 +173,7 @@ pub(crate) fn logged_job(e: &nikgob_library::JobLogEntry, kind_bit: u64) -> v::J
 /// files that waited for «Подтверди» still said they wait, and is said as
 /// done.
 pub(crate) fn shown_job_in(loc: nikgob_core::i18n::Locale, j: &v::Job) -> v::Job {
-    let words = |s: &str| nikgob_core::i18n::status::line_words_in(loc, s);
+    let words = |s: &str| nikgob_core::i18n::status::job_line_words_in(loc, s);
     v::Job {
         title: words(&j.title),
         subtitle: words(&j.subtitle).replace(LEGACY_PARKED, &parked_in(loc)),
@@ -516,7 +516,7 @@ impl ImportService {
                     id: IMPORT_ID | id,
                     title: nikgob_core::i18n::status::fmt_import_title_in(
                         loc,
-                        &nikgob_core::i18n::status::line_words_in(loc, &p.title),
+                        &nikgob_core::i18n::status::job_line_words_in(loc, &p.title),
                         p.done,
                         p.files,
                     ),
@@ -1153,7 +1153,7 @@ impl Worker {
             self.offer_editions();
             let loc = self.locale();
             let import = nikgob_core::i18n::errors_in(loc).import;
-            let summary = nikgob_core::i18n::status::line_words_in(loc, &summary);
+            let summary = nikgob_core::i18n::status::job_line_words_in(loc, &summary);
             if has_failed {
                 self.toast_err(format!("{import}: {summary}"), None);
             } else {
@@ -1790,5 +1790,41 @@ mod tests {
         );
         let kept = logged_job(&line(1, "import", "x", "добавлено 1 · ждут подтверждения 2", None), 0);
         assert_eq!(shown_job_in(Locale::Ru, &kept).subtitle, "добавлено 1 · отправлено на подтверждение 2");
+    }
+
+    /// A job's title is a name of its own (a torrent's, a file's): one that
+    /// spells a note code or the done sentinel is shown as it is, and only
+    /// a line kept as data is worded.
+    #[test]
+    fn a_job_title_is_never_read_as_a_note() {
+        use nikgob_core::i18n::Locale;
+        use nikgob_core::i18n::status::{LEGACY_NOTE_FILES_WAIT, NOTE_DONE};
+        let job = |name: &str| v::Job {
+            id: 1,
+            title: name.into(),
+            subtitle: name.into(),
+            progress: Some(1.0),
+            rate: None,
+            eta: None,
+            paused: false,
+            queued: false,
+            controllable: false,
+            pausable: false,
+            error: Some(name.into()),
+            at: 0,
+        };
+        for name in ["searching", NOTE_DONE, LEGACY_NOTE_FILES_WAIT, "files_wait"] {
+            let shown = shown_job_in(Locale::En, &job(name));
+            assert_eq!(shown.title, name);
+            assert_eq!(shown.subtitle, name);
+            assert_eq!(shown.error.as_deref(), Some(name));
+        }
+        let kept = StoredLine::Torrent { title: "Album".into() }.encode();
+        let shown = shown_job_in(Locale::Ru, &job(&kept));
+        assert_eq!(shown.title, "Раздача: Album");
+        assert_eq!(shown.subtitle, "Раздача: Album");
+        assert_eq!(shown.error.as_deref(), Some("Раздача: Album"));
+        // A wishlist's note keeps its codes: they are notes there.
+        assert_eq!(nikgob_core::i18n::status::line_words_in(Locale::En, "searching"), "Searching…");
     }
 }

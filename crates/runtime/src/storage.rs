@@ -150,9 +150,10 @@ fn file_len(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().filter(|m| m.is_file()).map(|m| m.len())
 }
 
-/// The bytes of the audio under `dir` (the sidecars beside the originals
-/// and any other file are not music, nor are dot names: `.nikgob-backup`'s
-/// copies of the database and the like). Links are not followed.
+/// The bytes of the audio under `dir`, the disc images (APE, WavPack) a cue
+/// sheet cuts included (the sidecars beside the originals and any other
+/// file are not music, nor are dot names: `.nikgob-backup`'s copies of the
+/// database and the like). Links are not followed.
 fn folder_size(dir: &Path) -> u64 {
     let mut total = 0u64;
     let mut todo = vec![dir.to_owned()];
@@ -165,7 +166,10 @@ fn folder_size(dir: &Path) -> u64 {
             let Ok(kind) = e.file_type() else { continue };
             if kind.is_dir() {
                 todo.push(e.path());
-            } else if kind.is_file() && nikgob_import::fsutil::is_audio_file(&e.path()) {
+            } else if kind.is_file()
+                && (nikgob_import::fsutil::is_audio_file(&e.path())
+                    || nikgob_import::fsutil::is_sheet_image_file(&e.path()))
+            {
                 total = total.saturating_add(e.metadata().map(|m| m.len()).unwrap_or(0));
             }
         }
@@ -362,8 +366,8 @@ mod tests {
 
     /// The originals' folder keeps out its dot names: `.nikgob-backup` is
     /// the database's own, not music, and a dot file or folder inside is
-    /// no original either. Only audio counts: covers, sheets and anything
-    /// else beside the originals are not.
+    /// no original either. Only audio counts — a cue sheet's APE or WavPack
+    /// image too: covers, sheets and anything else beside them are not.
     #[test]
     fn the_originals_folder_count_skips_dot_names_and_other_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -372,6 +376,8 @@ mod tests {
         std::fs::create_dir_all(masters.join(".nikgob-backup")).unwrap();
         std::fs::create_dir_all(masters.join("ab").join(".hidden")).unwrap();
         std::fs::write(masters.join("ab").join("x.flac"), vec![0u8; 5_000]).unwrap();
+        std::fs::write(masters.join("ab").join("disc.ape"), vec![0u8; 2_000]).unwrap();
+        std::fs::write(masters.join("ab").join("disc.wv"), vec![0u8; 1_000]).unwrap();
         std::fs::write(masters.join("ab").join(".y.flac"), vec![0u8; 700]).unwrap();
         std::fs::write(masters.join("ab").join(".hidden").join("z.flac"), vec![0u8; 900]).unwrap();
         std::fs::write(masters.join("ab").join("cover.jpg"), vec![0u8; 800]).unwrap();
@@ -379,7 +385,7 @@ mod tests {
         std::fs::write(masters.join("ab").join("x.json"), vec![0u8; 300]).unwrap();
         std::fs::write(masters.join("library-1.sqlite"), vec![0u8; 4_000]).unwrap();
         std::fs::write(masters.join(".nikgob-backup").join("library-1.sqlite"), vec![0u8; 12_000]).unwrap();
-        assert_eq!(folder_size(&masters), 5_000);
+        assert_eq!(folder_size(&masters), 8_000);
     }
 
     #[test]

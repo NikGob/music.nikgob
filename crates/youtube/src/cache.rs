@@ -260,7 +260,7 @@ impl AudioStream for CachedStream {
         self.note.duration_ms.map(Duration::from_millis)
     }
 
-    fn quality(&self) -> Option<String> {
+    fn quality(&self) -> Option<nikgob_core::streaming::StreamQuality> {
         Some(crate::range::quality_of(self.note.itag, self.is_opus(), self.note.bitrate))
     }
 }
@@ -298,7 +298,10 @@ mod tests {
         let mut all = Vec::new();
         s.read_to_end(&mut all).unwrap();
         assert_eq!((all.len(), s.byte_len(), s.gain_db()), (10, Some(10), Some(-2.0)));
-        assert_eq!(s.quality().as_deref(), Some("Opus ~160 кбит/с"));
+        assert_eq!(
+            s.quality().map(|q| q.words_in(nikgob_core::i18n::Locale::Ru)).as_deref(),
+            Some("Opus ~160 кбит/с")
+        );
         drop(s);
         std::thread::sleep(Duration::from_millis(30));
         c.store("def", &resolved(10), &mut &[2; 10][..]);

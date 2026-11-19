@@ -459,11 +459,8 @@ impl Fakes {
         if let Some(svc) = self.audio {
             s.player.audio_service = Some(svc);
             // What that service's sound is.
-            s.player.audio_quality = Some(match svc {
-                Service::Youtube | Service::Deezer => nikgob_core::streaming::quality_label("Opus", 160, true),
-                Service::Spotify => nikgob_core::streaming::quality_label("Vorbis", 320, false),
-                Service::Soundcloud => nikgob_core::streaming::quality_label("AAC", 160, false),
-            });
+            let loc = s.prefs.resolved_locale();
+            s.player.audio_quality = Some(svc.nominal_quality().words_in(loc));
             if self.soloist {
                 s.player.soloist = true;
                 s.player.audio_quality = Some("Soloist".into());

@@ -1529,6 +1529,135 @@ pub fn fmt_offer_words_in(loc: Locale, w: &OfferWords) -> String {
 /// The mark of a line kept as data.
 const LINE_MARK: &str = "@line:";
 
+/// A service's error as a line keeps it: its kind and arguments, worded
+/// where it is read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "e", rename_all = "snake_case")]
+pub enum ServiceErrorWords {
+    NotConfigured,
+    NotLoggedIn,
+    PremiumRequired,
+    /// «Сервис просит подождать до 02:07»: `until` is the clock time.
+    RateLimited { until: Option<String> },
+    Unavailable,
+    AgeRestricted,
+    RegionBlocked,
+    Drm,
+    Unsupported,
+    Http { status: u16 },
+    Network,
+    Parse,
+}
+
+impl ServiceErrorWords {
+    /// The error as data; `until` is the clock time a rate limit ends at
+    /// (told here, as only the caller knows the time).
+    pub fn of(e: &crate::streaming::StreamError, until: Option<String>) -> Self {
+        match e {
+            crate::streaming::StreamError::NotConfigured => Self::NotConfigured,
+            crate::streaming::StreamError::NotLoggedIn => Self::NotLoggedIn,
+            crate::streaming::StreamError::PremiumRequired => Self::PremiumRequired,
+            crate::streaming::StreamError::RateLimited { .. } => Self::RateLimited { until },
+            crate::streaming::StreamError::Unavailable => Self::Unavailable,
+            crate::streaming::StreamError::AgeRestricted => Self::AgeRestricted,
+            crate::streaming::StreamError::RegionBlocked => Self::RegionBlocked,
+            crate::streaming::StreamError::Drm => Self::Drm,
+            crate::streaming::StreamError::Unsupported => Self::Unsupported,
+            crate::streaming::StreamError::Http { status } => Self::Http { status: *status },
+            crate::streaming::StreamError::Network(_) => Self::Network,
+            crate::streaming::StreamError::Parse(_) => Self::Parse,
+        }
+    }
+
+    /// Its words in `loc`.
+    pub fn words_in(&self, loc: Locale) -> String {
+        use crate::i18n::{ErrorStrings, errors_in};
+        let err = errors_in(loc);
+        match self {
+            Self::NotConfigured => err.stream_not_configured.to_owned(),
+            Self::NotLoggedIn => err.stream_not_logged_in.to_owned(),
+            Self::PremiumRequired => err.stream_need_premium.to_owned(),
+            Self::RateLimited { until } => ErrorStrings::stream_rate_limited_in(loc, until.as_deref()),
+            Self::Unavailable => err.stream_unavailable.to_owned(),
+            Self::AgeRestricted => err.stream_age_restricted.to_owned(),
+            Self::RegionBlocked => err.stream_region_blocked.to_owned(),
+            Self::Drm => err.stream_drm.to_owned(),
+            Self::Unsupported => err.stream_unsupported.to_owned(),
+            Self::Http { status } => ErrorStrings::stream_http_in(loc, *status),
+            Self::Network => err.stream_network.to_owned(),
+            Self::Parse => err.stream_parse.to_owned(),
+        }
+    }
+}
+
+/// Why a cold-start import did not bring everything, as data: the words
+/// are made where the history line is read.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ColdProblem {
+    /// The words themselves: an export file's own complaint, or a row
+    /// written before the kinds.
+    Words(String),
+    Known(ColdProblemKind),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "p", rename_all = "snake_case")]
+pub enum ColdProblemKind {
+    /// «лайки: {why}».
+    Likes { why: ServiceErrorWords },
+    /// «история: {why}».
+    History { why: ServiceErrorWords },
+    /// «не открылись плейлисты: 3».
+    PlaylistsNotOpened { count: usize },
+    /// «Не получилось прочитать: …»: what an export file's reader said.
+    ExportRead { problems: Vec<String> },
+    /// «Не нашёл файлов выгрузки Spotify или Google Takeout».
+    ExportNotFound,
+}
+
+impl ColdProblem {
+    /// Its words in `loc`.
+    pub fn words_in(&self, loc: Locale) -> String {
+        let s = crate::i18n::activity_in(loc);
+        match self {
+            Self::Words(w) => w.clone(),
+            Self::Known(kind) => match kind {
+                ColdProblemKind::Likes { why } => {
+                    crate::i18n::ErrorStrings::cold_problem_likes_in(loc, &why.words_in(loc))
+                }
+                ColdProblemKind::History { why } => {
+                    crate::i18n::ErrorStrings::cold_problem_history_in(loc, &why.words_in(loc))
+                }
+                ColdProblemKind::PlaylistsNotOpened { count } => format!("{}: {count}", s.playlists_not_opened),
+                ColdProblemKind::ExportRead { problems } => {
+                    format!("{}: {}", s.export_read_failed, problems.join("; "))
+                }
+                ColdProblemKind::ExportNotFound => s.export_not_found.to_owned(),
+            },
+        }
+    }
+}
+
+/// Why a cold import failed: its own reasons as data, or the words of an
+/// outside failure (a file, the database), and rows written before.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ColdFailure {
+    Words(String),
+    Reasons(Vec<ColdProblem>),
+}
+
+impl ColdFailure {
+    /// Its words in `loc`, the reasons joined as they were said.
+    pub fn words_in(&self, loc: Locale) -> String {
+        match self {
+            Self::Words(w) => w.clone(),
+            Self::Reasons(why) => why.iter().map(|p| p.words_in(loc)).collect::<Vec<_>>().join("; "),
+        }
+    }
+}
+
 /// A «Хочу скачать» note or a «История» line, kept as data (a kind and its
 /// arguments) and worded when it is read, in the reader's locale.
 ///
@@ -1622,9 +1751,12 @@ pub enum StoredLine {
     FailedWords { failed: usize, wrong: Vec<String> },
     /// A cold import's outcome: what it found, what was new, what it left
     /// out, and what it could not do.
-    ColdSummary { found: [usize; 4], new: [usize; 4], skipped: usize, problems: Vec<String> },
+    ColdSummary { found: [usize; 4], new: [usize; 4], skipped: usize, problems: Vec<ColdProblem> },
     /// «Импорт не удался: …».
-    ColdFailed { detail: String },
+    ColdFailed { detail: ColdFailure },
+    /// A cold import's failure as the row's error line says it: the reason
+    /// alone, without «Импорт не удался».
+    ColdReason { detail: ColdFailure },
     /// «Перенос архива FLAC».
     MovedMastersTitle,
     /// «перенесено 3 · проверено BLAKE3 → папка».
@@ -1729,17 +1861,27 @@ impl StoredLine {
                 );
                 text.push_str(&fmt_import_skipped_in(loc, *skipped));
                 if !problems.is_empty() {
-                    text.push_str(&format!(" · {}: {}", activity_in(loc).import_not_all, problems.join("; ")));
+                    let why: Vec<String> = problems.iter().map(|p| p.words_in(loc)).collect();
+                    text.push_str(&format!(" · {}: {}", activity_in(loc).import_not_all, why.join("; ")));
                 }
                 text
             }
-            Self::ColdFailed { detail } => format!("{}: {detail}", activity_in(loc).import_failed),
+            Self::ColdFailed { detail } => format!("{}: {}", activity_in(loc).import_failed, detail.words_in(loc)),
+            Self::ColdReason { detail } => detail.words_in(loc),
             Self::MovedMastersTitle => status_in(loc).moved_masters_title.to_owned(),
             Self::MovedMasters { moved, dir } => fmt_masters_move_line_in(loc, *moved, dir),
             Self::Joined { a, b } => format!("{} · {}", a.words_in(loc), b.words_in(loc)),
             Self::Capitalised { line } => capitalised(&line.words_in(loc)),
         }
     }
+}
+
+/// A job's field (its title, summary or error) in `loc`: a line kept as
+/// data (`"@line:…"`), or the text as it was written. Jobs hold names of
+/// their own (a torrent's title, a file's), so a bare note code or the
+/// done sentinel is a name here, not a wishlist note.
+pub fn job_line_words_in(loc: Locale, s: &str) -> String {
+    StoredLine::decode(s).map_or_else(|| s.to_owned(), |line| line.words_in(loc))
 }
 
 /// The words a kept line stands for in `loc`: a note code, a line kept as
@@ -2056,11 +2198,34 @@ mod tests {
             found: [3, 2, 0, 1],
             new: [1, 0, 0, 0],
             skipped: 2,
-            problems: vec!["a playlist".into()],
+            problems: vec![ColdProblem::Words("a playlist".into())],
         };
         assert_eq!(
             line_words_in(Locale::Ru, &cold.encode()),
             "Найдено: 3 прослушивания, 2 лайка, 1 плейлист · новых: 1 прослушивание · пропущено 2 плейлиста не с музыкой · не всё: a playlist"
         );
+        // A problem keeps its kind and arguments: it says the same in both
+        // locales, the wait's time being the one the job wrote.
+        let problems = vec![
+            ColdProblem::Known(ColdProblemKind::Likes { why: ServiceErrorWords::RateLimited { until: Some("02:07".into()) } }),
+            ColdProblem::Known(ColdProblemKind::PlaylistsNotOpened { count: 3 }),
+            ColdProblem::Known(ColdProblemKind::ExportNotFound),
+        ];
+        let failed = StoredLine::ColdReason { detail: ColdFailure::Reasons(problems) };
+        assert_eq!(
+            line_words_in(Locale::Ru, &failed.encode()),
+            "лайки: Сервис просит подождать до 02:07; не открылись плейлисты: 3; Не нашёл файлов выгрузки Spotify или Google Takeout"
+        );
+        assert_eq!(
+            line_words_in(Locale::En, &failed.encode()),
+            "likes: Please wait until 02:07 before using the service; playlists could not be opened: 3; No Spotify or Google Takeout export files found"
+        );
+        // A row of the older kind (the words, not the kinds) still reads.
+        let old = StoredLine::ColdSummary { found: [0; 4], new: [0; 4], skipped: 0, problems: vec![ColdProblem::Words("x".into())] };
+        assert_eq!(line_words_in(Locale::Ru, &old.encode()), "Найдено: ничего · новых: ничего · не всё: x");
+        // The failure line keeps «Импорт не удался» in front of the reason.
+        let failed = StoredLine::ColdFailed { detail: ColdFailure::Words("disk full".into()) };
+        assert_eq!(line_words_in(Locale::Ru, &failed.encode()), "Импорт не удался: disk full");
+        assert_eq!(line_words_in(Locale::En, &failed.encode()), "Import failed: disk full");
     }
 }

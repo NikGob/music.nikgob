@@ -77,8 +77,8 @@ pub(crate) struct Resolved {
     pub route: Option<usize>,
 }
 
-/// "Opus ~160 кбит/с", "AAC ~128 кбит/с": what an itag plays.
-pub(crate) fn quality_of(itag: u32, opus: bool, bitrate: u32) -> String {
+/// What an itag plays (Opus ~160, AAC ~128): a codec and its bitrate.
+pub(crate) fn quality_of(itag: u32, opus: bool, bitrate: u32) -> nikgob_core::streaming::StreamQuality {
     let kbps = match itag {
         251 => 160,
         250 => 70,
@@ -87,7 +87,7 @@ pub(crate) fn quality_of(itag: u32, opus: bool, bitrate: u32) -> String {
         141 => 256,
         _ => (bitrate / 1000).max(1),
     };
-    nikgob_core::streaming::quality_label(if opus { "Opus" } else { "AAC" }, kbps, true)
+    nikgob_core::streaming::StreamQuality::new(if opus { "Opus" } else { "AAC" }, kbps, true)
 }
 
 /// Gets the whole resource once it is downloaded (for the disk cache).
@@ -588,7 +588,7 @@ impl AudioStream for HttpStream {
         self.info_now().and_then(|r| r.duration)
     }
 
-    fn quality(&self) -> Option<String> {
+    fn quality(&self) -> Option<nikgob_core::streaming::StreamQuality> {
         self.info_now()
             .map(|r| quality_of(r.itag, r.format == format::WEBM, r.bitrate))
     }

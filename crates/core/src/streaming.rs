@@ -106,12 +106,12 @@ impl Service {
     }
 
     /// What the stream usually is, until the opened stream says
-    /// ([`AudioStream::quality`]): "Vorbis 320 кбит/с", "Opus ~160 кбит/с".
-    pub fn nominal_quality(self) -> String {
+    /// ([`AudioStream::quality`]).
+    pub fn nominal_quality(self) -> StreamQuality {
         match self {
-            Self::Spotify => quality_label("Vorbis", 320, false),
-            Self::Youtube | Self::Deezer => quality_label("Opus", 160, true),
-            Self::Soundcloud => quality_label("AAC", 160, false),
+            Self::Spotify => StreamQuality::new("Vorbis", 320, false),
+            Self::Youtube | Self::Deezer => StreamQuality::new("Opus", 160, true),
+            Self::Soundcloud => StreamQuality::new("AAC", 160, false),
         }
     }
 
@@ -749,9 +749,10 @@ pub trait AudioStream: Read + Seek + Send {
     fn duration(&self) -> Option<Duration> {
         None
     }
-    /// What actually plays, for the player ("Opus ~160 кбит/с", "AAC ~128
-    /// кбит/с", "Vorbis 320 кбит/с"), if known. Called after the first read.
-    fn quality(&self) -> Option<String> {
+    /// What actually plays (`StreamQuality`: a codec and a bitrate), if
+    /// known. Called after the first read; the words are made where the
+    /// player is shown.
+    fn quality(&self) -> Option<StreamQuality> {
         None
     }
     /// Makes reads that wait for bytes give up, for a stream whose reads
@@ -778,13 +779,29 @@ pub fn interrupted_read() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::WouldBlock, "read interrupted")
 }
 
-/// "Opus ~160 кбит/с": a codec and its bitrate, `approx` for a variable
-/// one, in the active process locale (the settings' own unit).
-pub fn quality_label(codec: &str, kbps: u32, approx: bool) -> String {
-    quality_label_in(crate::i18n::locale(), codec, kbps, approx)
+/// What a stream plays, as data: a codec, a bitrate and whether it varies.
+/// The words ("Opus ~160 кбит/с") are made where the player is shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamQuality {
+    pub codec: String,
+    pub kbps: u32,
+    /// A variable bitrate: "Opus ~160 кбит/с".
+    pub approx: bool,
 }
 
-/// [`quality_label`] in `loc`.
+impl StreamQuality {
+    pub fn new(codec: &str, kbps: u32, approx: bool) -> Self {
+        Self { codec: codec.to_owned(), kbps, approx }
+    }
+
+    /// Its words in `loc` (`"Opus ~160 кбит/с"`, `"Vorbis 320 kbps"`).
+    pub fn words_in(&self, loc: crate::i18n::Locale) -> String {
+        quality_label_in(loc, &self.codec, self.kbps, self.approx)
+    }
+}
+
+/// `"Opus ~160 кбит/с"`: a codec and its bitrate, `approx` for a variable
+/// one, in `loc` (the settings' own unit).
 pub fn quality_label_in(loc: crate::i18n::Locale, codec: &str, kbps: u32, approx: bool) -> String {
     format!("{codec} {}{kbps} {}", if approx { "~" } else { "" }, crate::i18n::common_in(loc).kbps)
 }
