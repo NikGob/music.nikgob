@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use nikgob_core::i18n::status::StoredLine;
 use nikgob_core::i18n::{Locale, status_in};
 use nikgob_core::model::{
     Master, ReleaseId, SourceId, SourceOrigin, Track, TrackId, WishlistId, WishlistItem, WishlistOrigin, WishlistScope,
@@ -411,11 +412,10 @@ impl Worker {
             .collect();
         let plan = plan_of(&slots, &files);
         let title = self.item_title(id);
-        let loc = self.locale();
         if plan.is_empty() {
             log::info!("upgrade: nothing of the {} files that came for {title} is better than the album's", files.len());
             self.album_files_go(id, &origin);
-            self.wish_line(id, title, nikgob_core::i18n::status::fmt_nothing_better_in(loc), None);
+            self.wish_line(id, title, StoredLine::NothingBetter.encode(), None);
             if matches!(self.wish_next_candidate(id), Next::NotFound) {
                 self.upgrade_none(id, true);
             }
@@ -430,11 +430,7 @@ impl Worker {
             i.status = WishlistStatus::Confirm;
             i.next_try_at = None;
         });
-        let what = nikgob_core::i18n::status::fmt_better_found_in(
-            loc,
-            n as u64,
-            nikgob_core::i18n::downloads_in(loc).tab_confirm,
-        );
+        let what = StoredLine::BetterFound { count: n }.encode();
         self.wish_line(id, title, what, None);
         self.publish_wishlist();
     }
@@ -509,8 +505,7 @@ impl Worker {
             return;
         }
         let targets = replace_targets(&rows, st.release, id, self.streaming.wish.offer_keys.get(&id).cloned());
-        let loc = self.locale();
-        let title = nikgob_core::i18n::status::fmt_better_import_title_in(loc, &self.item_title(id));
+        let title = StoredLine::BetterQualityTitle { title: self.item_title(id) }.encode();
         let files: Vec<PathBuf> = rows.iter().map(|r| r.path.clone()).collect();
         if self.import_for(files, title, st.origin, targets) {
             self.streaming.wish.album.replacing.insert(id, Replacing { release: st.release, before });

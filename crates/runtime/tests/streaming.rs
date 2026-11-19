@@ -868,7 +868,11 @@ fn an_album_is_downloaded_only_when_every_track_has_its_file() {
     wait_until("the files on the album's tracks", || local(one) && local(two));
     let settled = || lib.get_wishlist_item(item.id).unwrap().unwrap();
     wait_until("the item settled", || settled().status == WishlistStatus::Done);
-    assert_eq!(settled().note.as_deref(), Some("Скачано 2 из 3"), "not «Скачано»: a song is missing");
+    assert_eq!(
+        settled().note.as_deref().map(|n| nikgob_core::i18n::status::line_words_in(nikgob_core::i18n::Locale::Ru, n)).as_deref(),
+        Some("Скачано 2 из 3"),
+        "not «Скачано»: a song is missing"
+    );
     wait_for(&r.rt, "the row says what is missing", |s| {
         s.downloads.wishlist.items.iter().any(|row| row.id == item.id && row.missing == 1)
     });

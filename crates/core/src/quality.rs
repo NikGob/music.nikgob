@@ -406,6 +406,32 @@ pub fn row_label_mp3_inside(label: &str) -> bool {
     })
 }
 
+/// What a label says beyond the codec and its numbers: a lossless file found
+/// made from a lossy one, a lossy copy of a fake lossless, or nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabelKind<'a> {
+    /// The codec and its numbers.
+    Plain,
+    /// A lossless file whose content is lossy: the bitrate it was cut at
+    /// (when the estimate has one), and whether the cut is plain.
+    Fake { kbps: Option<u32>, sure: bool },
+    /// A lossy file made from a lossless one that turned out fake itself.
+    FromFake { from: Option<&'a Codec>, sure: bool },
+}
+
+/// The kind of a label for `codec` and its check, as [`label_in`] words it.
+/// A lossy file's own check says nothing (see [`check_counts`]).
+pub fn label_kind<'a>(codec: &Codec, check: Option<&'a CheckSummary>) -> LabelKind<'a> {
+    let Some(c) = check.filter(|c| check_counts(codec, c.made_from.as_ref())) else { return LabelKind::Plain };
+    if c.fake(codec) {
+        return LabelKind::Fake { kbps: c.origin.lossy_kbps(), sure: c.sure() };
+    }
+    if c.from_fake(codec) {
+        return LabelKind::FromFake { from: c.made_from.as_ref(), sure: c.sure() };
+    }
+    LabelKind::Plain
+}
+
 /// The full label of the quality panel and of the import's questions, with
 /// the bitrate where it says something and a doubt worded as one: «MP3 320
 /// из поддельного FLAC», «MP3 320 из FLAC, возможно поддельного», «FLAC из
@@ -416,44 +442,42 @@ pub fn label_in(codec: &Codec, bitrate: Option<u32>, check: Option<&CheckSummary
         Some(b) => format!("{name} {b}"),
         None => name.clone(),
     };
-    // A lossy file's own check says nothing (see [`check_counts`]).
-    let Some(c) = check.filter(|c| check_counts(codec, c.made_from.as_ref())) else { return with_rate };
-    if c.fake(codec) {
-        return match loc {
-            Locale::Ru => match (c.origin.lossy_kbps(), c.sure()) {
+    match label_kind(codec, check) {
+        LabelKind::Plain => with_rate,
+        LabelKind::Fake { kbps, sure } => match loc {
+            Locale::Ru => match (kbps, sure) {
                 (Some(k), true) => format!("{name} из MP3 ~{k}"),
                 (Some(k), false) => format!("{name}, возможно из MP3 {k}"),
                 (None, true) => format!("{name} из сжатого"),
                 (None, false) => format!("{name}, возможно из сжатого"),
             },
-            Locale::En => match (c.origin.lossy_kbps(), c.sure()) {
+            Locale::En => match (kbps, sure) {
                 (Some(k), true) => format!("{name} from MP3 ~{k}"),
                 (Some(k), false) => format!("{name}, possibly from MP3 {k}"),
                 (None, true) => format!("{name} from lossy"),
                 (None, false) => format!("{name}, possibly from lossy"),
             },
-        };
-    }
-    if c.from_fake(codec) {
-        let from = c.made_from.as_ref().map(codec_name).unwrap_or_default();
-        return match loc {
-            Locale::Ru => {
-                if c.sure() {
-                    format!("{with_rate} из поддельного {from}")
-                } else {
-                    format!("{with_rate} из {from}, возможно поддельного")
+        },
+        LabelKind::FromFake { from, sure } => {
+            let from = from.map(codec_name).unwrap_or_default();
+            match loc {
+                Locale::Ru => {
+                    if sure {
+                        format!("{with_rate} из поддельного {from}")
+                    } else {
+                        format!("{with_rate} из {from}, возможно поддельного")
+                    }
+                }
+                Locale::En => {
+                    if sure {
+                        format!("{with_rate} from fake {from}")
+                    } else {
+                        format!("{with_rate} from possibly fake {from}")
+                    }
                 }
             }
-            Locale::En => {
-                if c.sure() {
-                    format!("{with_rate} from fake {from}")
-                } else {
-                    format!("{with_rate} from possibly fake {from}")
-                }
-            }
-        };
+        }
     }
-    with_rate
 }
 
 /// [`label_in`] in the active locale.

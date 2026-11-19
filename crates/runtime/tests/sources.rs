@@ -610,6 +610,11 @@ fn tidal_first() -> Prefs {
     }
 }
 
+/// A note as it was kept, in the words it stands for.
+fn words(note: Option<&str>) -> String {
+    note.map_or_else(String::new, |n| nikgob_core::i18n::status::line_words_in(nikgob_core::i18n::Locale::Ru, n))
+}
+
 fn history(rt: &Runtime) -> Vec<String> {
     rt.state()
         .downloads
@@ -691,8 +696,9 @@ fn a_source_asking_to_wait_is_searched_again_after_the_wait() {
     let item = lib.wishlist_for_track(track).unwrap().pop().unwrap();
     let at = item.next_try_at.unwrap();
     assert!(at >= before + 4 * 60_000 && at < before + 3_600_000, "minutes, not a week: {}", at - before);
-    assert!(item.note.as_deref().unwrap_or_default().starts_with("Qobuz просит подождать · в "), "{:?}", item.note);
-    assert!(item.note.as_deref().unwrap_or_default().ends_with(" спрошу Qobuz"), "{:?}", item.note);
+    let note = words(item.note.as_deref());
+    assert!(note.starts_with("Qobuz просит подождать · в "), "{note}");
+    assert!(note.ends_with(" спрошу Qobuz"), "{note}");
     wait_for(&r.rt, "its line", |s| s.downloads.history.iter().any(|j| j.subtitle.starts_with("Qobuz просит подождать")));
     assert_eq!(*qobuz.fetched.lock().unwrap(), 0);
 
@@ -770,7 +776,7 @@ fn an_album_cut_short_by_a_refusal_waits_for_its_rest() {
     assert!(lib.active_source(tracks[0]).unwrap().is_some_and(|s| s.kind.is_local()), "the track that came stays");
     assert!(!lib.active_source(tracks[1]).unwrap().is_some_and(|s| s.kind.is_local()));
     let it = album_item(&lib, release);
-    assert!(it.note.as_deref().unwrap_or_default().starts_with("Есть 1 из 2 · Tidal просит подождать · в "), "{:?}", it.note);
+    assert!(words(it.note.as_deref()).starts_with("Есть 1 из 2 · Tidal просит подождать · в "), "{:?}", it.note);
     assert!(it.next_try_at.unwrap() >= nikgob_library::now_ms() + 9 * 60_000, "the wait it asked for");
     wait_for(&r.rt, "one line of the album", |s| {
         s.downloads.history.iter().filter(|j| j.title == "Тестер — Обрыв").count() == 1
@@ -809,7 +815,7 @@ fn a_source_refusing_again_and_again_is_set_aside() {
     r.rt.send(Command::WishlistRetry(id));
     wait_until("searched again", || *tidal.searched.lock().unwrap() == 3 && later());
     assert_eq!(*tidal.fetched.lock().unwrap(), 2, "set aside: its offer is not tried");
-    let note = lib.get_wishlist_item(id).unwrap().unwrap().note.unwrap_or_default();
+    let note = words(lib.get_wishlist_item(id).unwrap().unwrap().note.as_deref());
     assert!(note.starts_with("Tidal сейчас не отдаёт этот трек · в "), "{note}");
     // Three refusals, one line: the latest.
     let lines = history(&r.rt);

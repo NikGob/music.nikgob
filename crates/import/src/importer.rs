@@ -1029,7 +1029,7 @@ impl Importer {
             year: analyzed.tags.year,
             track_no: analyzed.tags.track_no,
             duration_ms: Some(analyzed.info.duration_ms()),
-            quality: Some(quality_line(&analyzed)),
+            quality: Some(nikgob_core::i18n::status::SavedQuality::Data(quality_line(&analyzed))),
         };
         let payload = Payload {
             origin: analyzed.origin.clone(),
@@ -1497,15 +1497,21 @@ fn sound_origin(audio: &AudioAnalysis) -> nikgob_core::quality::SoundOrigin {
     })
 }
 
-/// What a file really is, for «Подтверди»: «FLAC из MP3 ~320», «MP3 320».
-fn quality_line(a: &Analyzed) -> String {
+/// What a file really is, for «Подтверди» and the words of a copy that was
+/// no better («FLAC из MP3 ~320», «MP3 320»), kept as data so it is said in
+/// the reader's locale.
+fn quality_line(a: &Analyzed) -> nikgob_core::i18n::status::QualityWords {
     let check = a.audio.spectrum.map(|s| nikgob_core::quality::CheckSummary {
         verdict: s.verdict,
         origin: nikgob_core::quality::SoundOrigin::estimate(s.verdict, s.cutoff_hz),
         made_from: None,
         cutoff_hz: (s.cutoff_hz >= 1.0).then_some(s.cutoff_hz as u32),
     });
-    nikgob_core::quality::label(&a.info.codec, a.info.bitrate_kbps, check.as_ref())
+    nikgob_core::i18n::status::QualityWords::Label {
+        codec: a.info.codec.clone(),
+        bitrate_kbps: a.info.bitrate_kbps,
+        check,
+    }
 }
 
 /// What [`find_existing`] needs about an analyzed file.

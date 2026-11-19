@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use nikgob_core::lyrics::LyricsSource;
+use nikgob_core::i18n::status::StoredLine;
 use nikgob_core::model::{SourceOrigin, TrackId, WishlistId};
 use nikgob_import::{ImportConfig, ImportEvent, Importer, InboxWatcher, ItemId, Stage};
 use nikgob_metadata::{Metadata, MetadataConfig};
@@ -136,18 +137,6 @@ struct Progress {
     wrong: Vec<String>,
 }
 
-/// The error line of a finished import, in Russian (callers with no locale
-/// at hand); see [`failed_words_in`].
-pub(crate) fn failed_words(failed: usize, wrong: &[String]) -> Option<String> {
-    failed_words_in(nikgob_core::i18n::Locale::Ru, failed, wrong)
-}
-
-/// The error line of a finished import: which files held another song
-/// (said by title), and how many failed otherwise.
-pub(crate) fn failed_words_in(loc: nikgob_core::i18n::Locale, failed: usize, wrong: &[String]) -> Option<String> {
-    nikgob_core::i18n::status::fmt_failed_words_in(loc, failed, wrong)
-}
-
 /// Ids of history entries loaded from the job log (above any job id of
 /// this session).
 pub(crate) const LOGGED_ID: u64 = 1 << 40;
@@ -158,14 +147,14 @@ const MOVE_JOB: u64 = 1 << 40;
 pub(crate) type LaterImport = (Vec<PathBuf>, String, SourceOrigin, nikgob_import::ImportTargets);
 
 /// A persisted job as a history row; `kind_bit` is [`IMPORT_ID`] or 0.
+/// Its strings are what the job log keeps — the data of the lines (see
+/// [`nikgob_core::i18n::status::StoredLine`]) — and [`shown_job_in`] words
+/// them when the history is shown.
 pub(crate) fn logged_job(e: &nikgob_library::JobLogEntry, kind_bit: u64) -> v::Job {
     v::Job {
         id: kind_bit | LOGGED_ID | e.seq.max(0) as u64,
         title: e.title.clone(),
-        // Logged before it was put in the past tense: the files were long
-        // confirmed, the line still said they wait (versions before the
-        // summaries were translated wrote the words).
-        subtitle: e.subtitle.replace(LEGACY_PARKED, &parked_in(nikgob_core::i18n::locale())),
+        subtitle: e.subtitle.clone(),
         progress: Some(1.0),
         rate: None,
         eta: None,
@@ -175,6 +164,21 @@ pub(crate) fn logged_job(e: &nikgob_library::JobLogEntry, kind_bit: u64) -> v::J
         pausable: false,
         error: e.error.clone(),
         at: e.at,
+    }
+}
+
+/// A history row in `loc`'s words: a title, a summary or an error kept as
+/// data is said here, and the words a version before wrote are shown as
+/// they were read. Logged before it was put in the past tense, the line of
+/// files that waited for «Подтверди» still said they wait, and is said as
+/// done.
+pub(crate) fn shown_job_in(loc: nikgob_core::i18n::Locale, j: &v::Job) -> v::Job {
+    let words = |s: &str| nikgob_core::i18n::status::line_words_in(loc, s);
+    v::Job {
+        title: words(&j.title),
+        subtitle: words(&j.subtitle).replace(LEGACY_PARKED, &parked_in(loc)),
+        error: j.error.as_deref().map(words),
+        ..j.clone()
     }
 }
 
@@ -510,7 +514,12 @@ impl ImportService {
                 };
                 v::Job {
                     id: IMPORT_ID | id,
-                    title: nikgob_core::i18n::status::fmt_import_title_in(loc, &p.title, p.done, p.files),
+                    title: nikgob_core::i18n::status::fmt_import_title_in(
+                        loc,
+                        &nikgob_core::i18n::status::line_words_in(loc, &p.title),
+                        p.done,
+                        p.files,
+                    ),
                     subtitle,
                     progress: import_progress(p.done, p.files),
                     rate: None,
@@ -546,7 +555,7 @@ impl ImportService {
                 }
                 // What the file really is («FLAC из MP3 ~320»).
                 if let Some(q) = &item.quality {
-                    origin.push_str(&format!(" · {q}"));
+                    origin.push_str(&format!(" · {}", q.words_in(loc)));
                 }
                 // The file's own tags come first; the best other answer is
                 // the one to take.
@@ -612,7 +621,7 @@ impl ImportService {
                 }
             })
             .collect();
-        (active, confirm, self.history.iter().cloned().collect())
+        (active, confirm, self.history.iter().map(|j| shown_job_in(loc, j)).collect())
     }
 }
 
@@ -670,7 +679,11 @@ impl Worker {
         if paths.is_empty() {
             return;
         }
-        let title = nikgob_core::i18n::status::fmt_import_of_in(self.locale(), &file_name(&paths[0]), paths.len());
+        let title = nikgob_core::i18n::status::StoredLine::ImportOf {
+            name: file_name(&paths[0]),
+            count: paths.len(),
+        }
+        .encode();
         if self.import_with_origin(paths, title, SourceOrigin::Inbox) {
             self.toast_work(nikgob_core::i18n::errors_in(self.locale()).import_started, None);
         }
@@ -909,14 +922,14 @@ impl Worker {
                     Ok(report) => {
                         let loc = self.locale();
                         if let Some(svc) = &mut self.import {
-                            let subtitle = nikgob_core::i18n::status::fmt_masters_move_line_in(
-                                loc,
-                                report.audio_moved,
-                                &new_dir.display().to_string(),
-                            );
+                            let subtitle = StoredLine::MovedMasters {
+                                moved: report.audio_moved,
+                                dir: new_dir.display().to_string(),
+                            }
+                            .encode();
                             svc.history.push_front(v::Job {
                                 id: IMPORT_ID | job,
-                                title: nikgob_core::i18n::status_in(loc).moved_masters_title.to_owned(),
+                                title: StoredLine::MovedMastersTitle.encode(),
                                 subtitle,
                                 progress: Some(1.0),
                                 rate: None,
@@ -1009,7 +1022,6 @@ impl Worker {
             }
             _ => (false, None),
         };
-        let loc = self.locale();
         let Some(svc) = &mut self.import else { return };
         let mut finished = None;
         let mut parked_for = None;
@@ -1019,7 +1031,7 @@ impl Worker {
                 let title = svc
                     .titles
                     .remove(&job.0)
-                    .unwrap_or_else(|| nikgob_core::i18n::status_in(loc).import_from_inbox.to_owned());
+                    .unwrap_or_else(|| StoredLine::ImportFromInbox.encode());
                 svc.jobs.insert(
                     job.0,
                     Progress {
@@ -1084,23 +1096,20 @@ impl Worker {
                 left_out,
                 cancelled,
             } => {
-                let strings = nikgob_core::i18n::status_in(loc);
                 let (title, wrong) = svc
                     .jobs
                     .remove(&job.0)
-                    .map_or_else(|| (strings.import_title.to_owned(), Vec::new()), |p| (p.title, p.wrong));
+                    .map_or_else(|| (StoredLine::ImportTitle.encode(), Vec::new()), |p| (p.title, p.wrong));
                 let summary = if cancelled {
-                    strings.cancelled_summary.to_owned()
+                    StoredLine::Cancelled
                 } else if upgrade_job {
-                    let mut s = crate::streams::upgrade_job_words(loc, imported, duplicates, left_out, failed, dup.as_deref());
-                    if pending > 0 {
-                        s.push_str(&format!(" · {}", nikgob_core::i18n::status::fmt_parked_in(loc, pending)));
-                    }
-                    s
+                    StoredLine::UpgradeSummary { imported, duplicates, left_out, failed, pending, dup }
                 } else {
-                    nikgob_core::i18n::status::fmt_import_summary_in(loc, imported, duplicates, left_out, failed, pending)
+                    StoredLine::ImportSummary { imported, duplicates, left_out, failed, pending }
                 };
-                let error = failed_words_in(loc, failed, &wrong);
+                let error = (failed > 0 || !wrong.is_empty())
+                    .then(|| StoredLine::FailedWords { failed, wrong: wrong.clone() }.encode());
+                let summary = summary.encode();
                 if let Err(e) = self.lib.log_job("import", &title, &summary, error.as_deref()) {
                     log::warn!("job log: {e}");
                 }
@@ -1142,7 +1151,9 @@ impl Worker {
             }
             self.reload_after_import();
             self.offer_editions();
-            let import = nikgob_core::i18n::errors_in(self.locale()).import;
+            let loc = self.locale();
+            let import = nikgob_core::i18n::errors_in(loc).import;
+            let summary = nikgob_core::i18n::status::line_words_in(loc, &summary);
             if has_failed {
                 self.toast_err(format!("{import}: {summary}"), None);
             } else {
@@ -1445,7 +1456,6 @@ impl Worker {
             self.torrents.move_after = Some(chosen);
             return;
         }
-        let loc = self.locale();
         let Some(svc) = &mut self.import else {
             self.toast_err(nikgob_core::i18n::errors_in(self.locale()).masters_move_unavailable, None);
             return;
@@ -1483,7 +1493,7 @@ impl Worker {
         svc.jobs.insert(
             job_id,
             Progress {
-                title: nikgob_core::i18n::status_in(loc).moved_masters_title.to_owned(),
+                title: StoredLine::MovedMastersTitle.encode(),
                 files: 0,
                 done: 0,
                 imported: 0,
@@ -1774,7 +1784,11 @@ mod tests {
             nikgob_core::i18n::status::fmt_import_summary_in(Locale::Ru, 2, 1, 0, 1, 0),
             "добавлено 2 · дублей 1 · ошибок 1"
         );
-        assert_eq!(failed_words_in(Locale::En, 1, &[]).as_deref(), Some("Failed: 1"));
-        assert_eq!(logged_job(&line(1, "import", "x", "добавлено 1 · ждут подтверждения 2", None), 0).subtitle, "добавлено 1 · отправлено на подтверждение 2");
+        assert_eq!(
+            nikgob_core::i18n::status::fmt_failed_words_in(Locale::En, 1, &[]).as_deref(),
+            Some("Failed: 1")
+        );
+        let kept = logged_job(&line(1, "import", "x", "добавлено 1 · ждут подтверждения 2", None), 0);
+        assert_eq!(shown_job_in(Locale::Ru, &kept).subtitle, "добавлено 1 · отправлено на подтверждение 2");
     }
 }
