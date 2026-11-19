@@ -258,7 +258,7 @@ pub(crate) fn note_code(note: nikgob_core::i18n::status::WishNote) -> String {
 fn note_words(loc: Locale, note: &str) -> String {
     use nikgob_core::i18n::status;
     match status::wish_note_of(note) {
-        Some(status::WishNote::Done) => status::NOTE_DONE.to_owned(),
+        Some(status::WishNote::Done) => status::fmt_done_note_in(loc, None, None),
         Some(note) => status::fmt_wish_note_in(loc, note).to_owned(),
         None => note.to_owned(),
     }
@@ -2198,7 +2198,7 @@ impl Worker {
         let note = nikgob_core::i18n::status::fmt_torrent_found_in(
             loc,
             &format,
-            &nikgob_core::i18n::status::fmt_size_in(loc, size),
+            &crate::torrents::human_bytes_in(loc, size),
             seeders,
             &offer.title,
         );
@@ -2461,7 +2461,7 @@ impl Worker {
                 return Next::NotFound;
             }
             let reasons = if why.is_empty() { strings.sources_gave_nothing.to_owned() } else { why.join(", ") };
-            let line = capitalised(&format!("{reasons} · {}", nikgob_core::i18n::status::fmt_search_again_days_in(loc, 7)));
+            let line = capitalised(&format!("{reasons} · {}", nikgob_core::i18n::status::fmt_search_again_week_in(loc)));
             if !copy {
                 self.set_item(id, |i| i.note = Some(line.clone()));
                 self.publish_wishlist();
@@ -3115,17 +3115,20 @@ impl Worker {
         }
         let partial = self.streaming.wish.partial.remove(&id);
         let loc = self.locale();
-        let done_note = |have: (usize, usize)| {
-            nikgob_core::i18n::status::fmt_done_note_in(loc, Some(have), None)
-        };
         let (status, note) = match item.scope {
             WishlistScope::Album => match self.album_files(&item) {
-                (have, all) if all > 0 && have == all => (WishlistStatus::Done, done_note((all, all))),
+                // Every track of the album has a file: the plain «Скачано»
+                // its next settle and [`Self::wish_settle_albums`] expect.
+                (have, all) if all > 0 && have == all => (WishlistStatus::Done, note_code(WishNote::Done)),
                 // A source gave part of the album: the rest from the next
                 // offer (it leaves out what came), or later when a source
                 // turned it away.
                 _ if partial && self.album_goes_on(id) => return,
-                (have, all) if have > 0 => (WishlistStatus::Done, done_note((have, all))),
+                // A part of it is here: how much, and the rest searched for.
+                (have, all) if have > 0 => (
+                    WishlistStatus::Done,
+                    nikgob_core::i18n::status::fmt_done_note_in(loc, Some((have, all)), None),
+                ),
                 // Nothing of the album landed: still on its way, or left
                 // with nothing bringing it (searched again).
                 _ if stalled(item.status, item.note.as_deref(), self.moving(id)) => {
@@ -3171,12 +3174,14 @@ impl Worker {
                     self.relabel(track, names);
                 }
                 // What came, honestly: «Скачано · FLAC из MP3 ~320».
-                let loc = self.locale();
                 let got = item
                     .track_id
                     .and_then(|t| self.lib.get_track_row(t).ok().flatten())
                     .and_then(|r| r.codec.as_ref().map(|c| nikgob_core::quality::row_label_in(c, r.check.as_ref(), loc)));
-                (WishlistStatus::Done, nikgob_core::i18n::status::fmt_done_note_in(loc, None, got.as_deref()))
+                let note = got.map_or_else(|| note_code(WishNote::Done), |q| {
+                    nikgob_core::i18n::status::fmt_done_note_in(loc, None, Some(&q))
+                });
+                (WishlistStatus::Done, note)
             }
         };
         if status == WishlistStatus::Done {

@@ -132,12 +132,8 @@ fn config(p: &v::Prefs, downloads: &Path, state: &Path) -> TorrentConfig {
     }
 }
 
-/// A payload's size in decimal units: `"1.2 ГБ"`, `"820 МБ"`.
-pub(crate) fn human_bytes(b: u64) -> String {
-    human_bytes_in(nikgob_core::i18n::Locale::Ru, b)
-}
-
-/// [`human_bytes`] in `loc`'s units.
+/// A payload's size in decimal units: `"1.2 ГБ"`, `"820 МБ"` in `loc`'s
+/// units.
 pub(crate) fn human_bytes_in(loc: nikgob_core::i18n::Locale, b: u64) -> String {
     use nikgob_core::i18n::Locale;
     let (gb, mb, kb) = match loc {

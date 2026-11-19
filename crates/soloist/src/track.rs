@@ -38,6 +38,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nikgob_audio::{PcmError, PcmRead, PcmSource};
+use nikgob_core::i18n::{backend_in, locale};
 
 use crate::manager::LiveView;
 use crate::protocol::{Command, Status};
@@ -226,13 +227,13 @@ impl SoloistTrack {
     /// start or, after a takeover, from where it was.
     fn request(&mut self, view: &LiveView) -> Result<PcmRead, PcmError> {
         if !view.ready {
-            return Err(err("Spotify Soloist не подключён"));
+            return Err(err(backend_in(locale()).soloist_not_connected));
         }
         if !view.active {
             self.link.send(Command::Activate);
         }
         if !self.link.send(Command::Play(Some(self.uri.clone()))) {
-            return Err(err("Spotify Soloist не подключён"));
+            return Err(err(backend_in(locale()).soloist_not_connected));
         }
         self.link.clear_captured();
         if !self.counted {
@@ -378,7 +379,7 @@ impl PcmSource for SoloistTrack {
             Phase::Requested { at, changes, again } => {
                 self.link.prepare_output();
                 if !view.ready {
-                    return Err(err("Spotify Soloist отключился"));
+                    return Err(err(backend_in(locale()).soloist_disconnected));
                 }
                 if let Some(m) = refusal(&view, at) {
                     return Err(format!("Spotify Soloist: {m}").into());
@@ -406,7 +407,7 @@ impl PcmSource for SoloistTrack {
                     self.start_playing(&view);
                 } else if at.elapsed() > START_TIMEOUT {
                     log::warn!("soloist: the track did not start in {} s: {}", START_TIMEOUT.as_secs(), said(&view, self.ours(&view)));
-                    return Err(err("Spotify Soloist не начал трек"));
+                    return Err(err(backend_in(locale()).soloist_did_not_start));
                 } else {
                     if !again && at.elapsed() > ASK_AGAIN {
                         log::info!("soloist: nothing plays {} s after the request, asking again: {}", ASK_AGAIN.as_secs(), said(&view, self.ours(&view)));
@@ -421,7 +422,7 @@ impl PcmSource for SoloistTrack {
             }
             Phase::Seeking { target_ms, at } => {
                 if !view.ready {
-                    return Err(err("Spotify Soloist отключился"));
+                    return Err(err(backend_in(locale()).soloist_disconnected));
                 }
                 if let Some(r) = self.taken(&view) {
                     return r;
@@ -444,7 +445,7 @@ impl PcmSource for SoloistTrack {
             return Ok(PcmRead::Pending);
         }
         if !view.ready {
-            return Err(err("Spotify Soloist отключился"));
+            return Err(err(backend_in(locale()).soloist_disconnected));
         }
         if let Some(r) = self.taken(&view) {
             return r;

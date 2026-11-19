@@ -901,7 +901,10 @@ async fn a_start_deletes_the_shared_apps_grant_quietly() {
 
 /// After a login that found no Premium: nothing kept, the account says why.
 async fn assert_signed_out_for_premium(s: &Spotify, store: &Store) {
-    assert_eq!(s.account(), Account::Failed(SPOTIFY_PREMIUM_REQUIRED.into()));
+    assert_eq!(
+        s.account(),
+        Account::Failed(premium_required_in(nikgob_core::i18n::locale()).into())
+    );
     assert!(!s.web.has_grant());
     assert!(store.raw(Slot::Personal).await.is_none(), "no grant is kept");
     assert!(store.load_state().await.slots.is_empty());

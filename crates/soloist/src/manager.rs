@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
+use nikgob_core::i18n::backend as i18n_backend;
 use nikgob_core::streaming::{SoloistAction, SoloistPhase, SoloistStatus};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
@@ -437,7 +438,8 @@ impl Soloist {
             Ok(build) => {
                 log::info!("soloist: downloaded {} (built {})", build.version, build.built);
                 if let Err(e) = install::write_pointer(&self.builds(), CURRENT, &build) {
-                    st.download_error = Some(format!("Не сохранилось: {e}"));
+                    st.download_error =
+                        Some(i18n_backend::fmt_soloist_save_failed_in(nikgob_core::i18n::locale(), &e.to_string()));
                 } else {
                     // A staged renewal keeps its folder.
                     let pending = install::read_pointer_raw(&self.builds(), PENDING).map(|b| b.digest);
@@ -453,7 +455,7 @@ impl Soloist {
             }
             Err(e) => {
                 log::warn!("soloist: download failed: {e}");
-                st.download_error = Some(capitalised(&e.to_string()));
+                st.download_error = Some(capitalised(&e.message_in(nikgob_core::i18n::locale())));
             }
         }
         drop(st);
@@ -605,14 +607,16 @@ impl Soloist {
                     true
                 }
                 Outcome::Expired => {
-                    st.run = Run::Failed { why: "Сборка Soloist устарела, новой пока нет".into(), retry_at: None };
+                    let why = i18n_backend::backend_in(nikgob_core::i18n::locale()).soloist_build_expired.to_owned();
+                    st.run = Run::Failed { why, retry_at: None };
                     false
                 }
                 Outcome::Failed(why) => {
                     log::warn!("soloist: {why}");
                     let retry_at = BACKOFF.get(st.failures).map(|d| Instant::now() + *d);
                     st.failures += 1;
-                    st.run = Run::Failed { why: "Soloist остановился".into(), retry_at };
+                    let said = i18n_backend::backend_in(nikgob_core::i18n::locale()).soloist_stopped.to_owned();
+                    st.run = Run::Failed { why: said, retry_at };
                     false
                 }
             }

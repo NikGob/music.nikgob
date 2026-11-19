@@ -219,11 +219,17 @@ fn old_wish_line(e: &nikgob_library::JobLogEntry) -> bool {
 }
 
 /// What a wish's line is about: its title without the source an older
-/// line began with ("Tidal: Eve — Underdog" → "Eve — Underdog").
+/// line began with ("Tidal: Eve — Underdog" → "Eve — Underdog"). Those
+/// lines are history: written in Russian before the UI could be English,
+/// or with the English labels since, so both names of every source are
+/// tried, whatever the locale is now.
 fn wish_key(title: &str) -> &str {
     nikgob_core::source::SourceKey::ALL
         .iter()
-        .find_map(|k| title.strip_prefix(k.display_name()).and_then(|t| t.strip_prefix(": ")))
+        .flat_map(|k| {
+            [k.display_name_in(nikgob_core::i18n::Locale::Ru), k.display_name_in(nikgob_core::i18n::Locale::En)]
+        })
+        .find_map(|name| title.strip_prefix(name).and_then(|t| t.strip_prefix(": ")))
         .unwrap_or(title)
 }
 
@@ -1726,6 +1732,12 @@ mod tests {
         let kept: Vec<i64> = kept_history(entries).iter().map(|e| e.seq).collect();
         assert_eq!(kept, [9, 7, 5, 3, 2, 1]);
         assert_eq!(wish_key("Tidal: Artist — Track"), "Artist — Track");
+        // The source names of both locales: old lines were Russian, newer
+        // ones may say «Торренты» or "Torrents", and the item's key is the
+        // same either way.
+        assert_eq!(wish_key("Торренты: Artist — Track"), "Artist — Track");
+        assert_eq!(wish_key("Torrents: Artist — Track"), "Artist — Track");
+        assert_eq!(wish_key("Internet Archive: Artist — Track"), "Artist — Track");
     }
 
     #[test]

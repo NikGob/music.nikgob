@@ -133,7 +133,7 @@ impl Worker {
                 let text = match &e {
                     StreamError::Network(m) if !m.trim().is_empty() => m.clone(),
                     StreamError::PremiumRequired if service == Service::Spotify => {
-                        nikgob_core::streaming::SPOTIFY_PREMIUM_REQUIRED.to_owned()
+                        nikgob_core::streaming::premium_required_in(loc).to_owned()
                     }
                     e => error_text_in(e, loc),
                 };

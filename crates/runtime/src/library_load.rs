@@ -127,10 +127,12 @@ pub(crate) fn shelf(
     lib: &Library,
     res: &mut Resolver,
     only_local: bool,
+    loc: nikgob_core::i18n::Locale,
     errors: &mut Vec<&'static str>,
 ) -> (Vec<v::PlaylistCard>, Vec<(usize, v::ReleaseCard)>) {
-    let playlists = kept(errors, "плейлисты", lib.list_playlists());
-    let albums = kept(errors, "альбомы", lib.liked_releases(0, 10_000));
+    let strings = activity_in(loc);
+    let playlists = kept(errors, strings.lib_playlists, lib.list_playlists());
+    let albums = kept(errors, strings.lib_albums, lib.liked_releases(0, 10_000));
     let pinned = playlists.iter().take_while(|p| p.id.is_none()).count();
     let albums = albums
         .iter()
@@ -157,7 +159,7 @@ fn read(res: &mut Resolver, job: &Job) -> Loaded {
         v::ReleaseSort::Added => Sort::desc(ReleaseSortKey::Added),
     };
     let releases = kept(&mut errors, activity_in(job.locale).lib_library, lib.releases(0, 20_000, key));
-    let (playlists, liked_albums) = shelf(&lib, res, only_local, &mut errors);
+    let (playlists, liked_albums) = shelf(&lib, res, only_local, job.locale, &mut errors);
     let artists = kept(
         &mut errors,
         activity_in(job.locale).lib_artists,

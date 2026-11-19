@@ -351,6 +351,8 @@ pub struct ActivityStrings {
     pub lib_library: &'static str,
     pub lib_artists: &'static str,
     pub lib_tracks: &'static str,
+    pub lib_playlists: &'static str,
+    pub lib_albums: &'static str,
 
     // Albums that look like editions of one another.
     pub editions_repeat: &'static str,
@@ -691,6 +693,8 @@ pub static RU: ActivityStrings = ActivityStrings {
     lib_library: "библиотека",
     lib_artists: "исполнители",
     lib_tracks: "треки",
+    lib_playlists: "плейлисты",
+    lib_albums: "альбомы",
 
     editions_repeat: "Похоже, некоторые альбомы повторяются — посмотри в Библиотеке",
     editions_merge_failed: "Не получилось объединить альбомы",
@@ -1027,6 +1031,8 @@ pub static EN: ActivityStrings = ActivityStrings {
     lib_library: "library",
     lib_artists: "artists",
     lib_tracks: "tracks",
+    lib_playlists: "playlists",
+    lib_albums: "albums",
 
     editions_repeat: "Some albums look like duplicates — check the Library",
     editions_merge_failed: "Could not merge the albums",

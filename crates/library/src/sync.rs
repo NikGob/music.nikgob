@@ -55,6 +55,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use nikgob_core::i18n::backend_in;
 use nikgob_core::model::{TrackId, Uuid};
 use nikgob_core::names::name_key;
 use rusqlite::types::{Value as SqlValue, ValueRef};
@@ -754,7 +755,7 @@ fn settle_epoch(conn: &mut Connection, file: Option<&Path>) -> Result<Option<Str
             meta_set(&tx, "sync.epoch", &next)?;
             tx.commit()?;
         }
-        return Ok(Some("Синхронизация остановлена: метка базы не записана".to_owned()));
+        return Ok(Some(backend_in(nikgob_core::i18n::locale()).sync_epoch_unwritten.to_owned()));
     }
     if rotate {
         meta_set(&tx, "sync.epoch", &next)?;

@@ -548,6 +548,16 @@ pub fn fmt_search_again_days_in(loc: Locale, days: u64) -> String {
     }
 }
 
+/// `"поищу снова через неделю"`: the weekly search of an item nothing was
+/// found for (its next try is a week away, but the words are the ones it
+/// always had).
+pub fn fmt_search_again_week_in(loc: Locale) -> String {
+    match loc {
+        Locale::Ru => "поищу снова через неделю".to_owned(),
+        Locale::En => "searching again in a week".to_owned(),
+    }
+}
+
 /// `"Смотрю, есть ли трек в раздаче: Album (2020) FLAC"`.
 pub fn fmt_checking_torrent_in(loc: Locale, title: &str) -> String {
     match loc {
@@ -558,9 +568,7 @@ pub fn fmt_checking_torrent_in(loc: Locale, title: &str) -> String {
 
 /// `"Раздача: Album (2020) FLAC"`.
 pub fn fmt_torrent_note_in(loc: Locale, title: &str) -> String {
-    let s = status_in(loc);
-    let template = s.note_torrent.trim_end_matches(" {}");
-    format!("{template}: {title}")
+    status_in(loc).note_torrent.replace("{}", title)
 }
 
 /// `"FLAC · 312 МБ · 14 сид. · Album (2020) FLAC"`: a torrent found for an
@@ -806,7 +814,10 @@ pub fn fmt_found_instead_in(loc: Locale, found: Option<&str>, have: Option<&str>
         (Locale::En, Some(f), Some(h)) => format!("Found {f} instead of {h}"),
         (Locale::Ru, Some(f), None) => format!("Нашёл {f}"),
         (Locale::En, Some(f), None) => format!("Found {f}"),
-        (_, None, _) => status_in(loc).better_quality.to_owned(),
+        (_, None, _) => match loc {
+            Locale::Ru => "Нашёл качество лучше".to_owned(),
+            Locale::En => "Found better quality".to_owned(),
+        },
     };
     match loc {
         Locale::Ru => format!("{what} · подтверди замену в «{confirm_tab}»"),
@@ -847,7 +858,7 @@ pub fn fmt_offer_in(loc: Locale, offer: &crate::source::Offer) -> String {
         parts.push(format!("{s} {word}"));
     }
     let provider = if offer.provider.is_empty() {
-        offer.source.display_name().to_owned()
+        offer.source.display_name_in(loc).to_owned()
     } else {
         offer.provider.clone()
     };
@@ -1358,11 +1369,25 @@ mod tests {
             "Нашёл FLAC вместо MP3 128 · подтверди замену в «Подтверди»"
         );
         assert_eq!(
+            fmt_found_instead_in(Locale::Ru, None, Some("MP3 128"), "Подтверди"),
+            "Нашёл качество лучше · подтверди замену в «Подтверди»"
+        );
+        assert_eq!(
+            fmt_found_instead_in(Locale::En, None, None, "Confirm"),
+            "Found better quality · confirm the replacement in Confirm"
+        );
+        assert_eq!(
             fmt_wrong_audio_in(Locale::Ru, Some("Soulseek"), Some("Song"), true),
             "В файле от Soulseek другая песня — «Song» · ищу дальше"
         );
         assert_eq!(fmt_wrong_audio_in(Locale::En, None, None, false), "The file holds another song");
         assert_eq!(fmt_downloaded_of_in(Locale::Ru, 3, 10, "why"), "Скачано 3 из 10 · why");
+        assert_eq!(fmt_search_again_week_in(Locale::Ru), "поищу снова через неделю");
+        assert_eq!(fmt_search_again_week_in(Locale::En), "searching again in a week");
+        assert_eq!(fmt_torrent_note_in(Locale::Ru, "Album"), "Раздача: Album");
+        assert_eq!(fmt_torrent_note_in(Locale::En, "Album"), "Torrent: Album");
+        assert_eq!(fmt_done_note_in(Locale::Ru, Some((3, 10)), None), "Скачано 3 из 10");
+        assert_eq!(fmt_done_note_in(Locale::En, Some((3, 10)), None), "Downloaded 3 of 10");
     }
 
     /// What a copy that was no better really is, in the words the line used

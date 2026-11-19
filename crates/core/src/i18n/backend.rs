@@ -25,6 +25,9 @@ pub struct BackendStrings {
     pub soundcloud_login_refused: &'static str,
     /// What the player of a SoundCloud page plays as («Плеер SoundCloud»).
     pub soundcloud_player: &'static str,
+    /// Spotify without Premium is not connected at all: what its account
+    /// says.
+    pub spotify_premium_required: &'static str,
     /// Why syncing is off on this database (see `nikgob-library`'s sync).
     pub sync_epoch_unwritten: &'static str,
 }
@@ -44,6 +47,7 @@ pub static RU: BackendStrings = BackendStrings {
     soundcloud_no_token: "Нет oauth_token SoundCloud — вставь cookies soundcloud.com или токен",
     soundcloud_login_refused: "SoundCloud не принял вход — токен устарел",
     soundcloud_player: "Плеер SoundCloud",
+    spotify_premium_required: crate::streaming::SPOTIFY_PREMIUM_REQUIRED,
     sync_epoch_unwritten: "Синхронизация остановлена: метка базы не записана",
 };
 
@@ -62,6 +66,7 @@ pub static EN: BackendStrings = BackendStrings {
     soundcloud_no_token: "No SoundCloud oauth_token — paste soundcloud.com cookies or a token",
     soundcloud_login_refused: "SoundCloud refused the sign-in — the token has expired",
     soundcloud_player: "SoundCloud player",
+    spotify_premium_required: "Spotify Premium is required — Spotify can't connect without it; YouTube Music works anyway",
     sync_epoch_unwritten: "Sync stopped: the database's sync mark was not written",
 };
 
@@ -109,7 +114,10 @@ pub fn human_bytes_in(loc: Locale, b: u64) -> String {
 
 /// «14 сид.» / «14 seeds»: the seeders of a torrent offer's detail line.
 pub fn fmt_seeders_in(loc: Locale, seeders: u32) -> String {
-    format!("{seeders} {}", backend_in(loc).seeders_short)
+    match (loc, seeders) {
+        (Locale::En, 1) => "1 seed".to_owned(),
+        _ => format!("{seeders} {}", backend_in(loc).seeders_short),
+    }
 }
 
 /// What is wrong with a downloaded Soloist archive (an install error's
@@ -262,6 +270,7 @@ mod tests {
             RU.soundcloud_no_token,
             RU.soundcloud_login_refused,
             RU.soundcloud_player,
+            RU.spotify_premium_required,
             RU.sync_epoch_unwritten,
         ] {
             assert!(!ru.is_empty());
@@ -280,6 +289,7 @@ mod tests {
             EN.soundcloud_no_token,
             EN.soundcloud_login_refused,
             EN.soundcloud_player,
+            EN.spotify_premium_required,
             EN.sync_epoch_unwritten,
         ] {
             assert!(!en.is_empty());
@@ -302,7 +312,9 @@ mod tests {
         assert_eq!(human_bytes_in(Locale::Ru, 7 << 20), "7.0 МБ", "dot decimal as before");
         assert_eq!(human_bytes_in(Locale::En, 40 << 20), "40 MB");
         assert_eq!(fmt_seeders_in(Locale::Ru, 14), "14 сид.");
+        assert_eq!(fmt_seeders_in(Locale::Ru, 1), "1 сид.");
         assert_eq!(fmt_seeders_in(Locale::En, 14), "14 seeds");
+        assert_eq!(fmt_seeders_in(Locale::En, 1), "1 seed");
     }
 
     #[test]
