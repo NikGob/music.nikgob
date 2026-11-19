@@ -531,13 +531,13 @@ fn refusal_at<'a>(text: &'a str, loc: Locale) -> Option<(Refusal, &'a str)> {
     for key in SourceKey::ALL {
         let name = source_name_in(loc, key);
         let fixed = [
-            (fmt_source_limit_today_in(loc, name), Refusal::DayLimit { source: *key }),
-            (fmt_source_asks_to_wait_in(loc, name, None), Refusal::AsksToWait { source: *key, until: None }),
-            (fmt_source_check_in(loc, name), Refusal::Check { source: *key }),
-            (fmt_source_blocked_in(loc, name), Refusal::Blocked { source: *key }),
-            (fmt_source_finds_only_in(loc, name), Refusal::FindsOnly { source: *key }),
-            (fmt_source_server_down_in(loc, name), Refusal::ServerDown { source: *key }),
-            (fmt_source_no_download_in(loc, name), Refusal::NoDownload { source: *key }),
+            (fmt_source_limit_today_in(loc, name), Refusal::DayLimit { source: key }),
+            (fmt_source_asks_to_wait_in(loc, name, None), Refusal::AsksToWait { source: key, until: None }),
+            (fmt_source_check_in(loc, name), Refusal::Check { source: key }),
+            (fmt_source_blocked_in(loc, name), Refusal::Blocked { source: key }),
+            (fmt_source_finds_only_in(loc, name), Refusal::FindsOnly { source: key }),
+            (fmt_source_server_down_in(loc, name), Refusal::ServerDown { source: key }),
+            (fmt_source_no_download_in(loc, name), Refusal::NoDownload { source: key }),
         ];
         for (words, refusal) in fixed {
             if let Some(tail) = text.strip_prefix(&words)
@@ -551,7 +551,7 @@ fn refusal_at<'a>(text: &'a str, loc: Locale) -> Option<(Refusal, &'a str)> {
             if let Some(tail) = text.strip_prefix(&words)
                 && (tail.is_empty() || tail.starts_with(", "))
             {
-                return Some((Refusal::GivesNo { source: *key, what }, tail));
+                return Some((Refusal::GivesNo { source: key, what }, tail));
             }
         }
         // «Qobuz просит подождать до 03:00»: the clock is the one part not
@@ -565,7 +565,7 @@ fn refusal_at<'a>(text: &'a str, loc: Locale) -> Option<(Refusal, &'a str)> {
                 None => (rest, ""),
             };
             if is_hm(until) {
-                return Some((Refusal::AsksToWait { source: *key, until: Some(until.to_owned()) }, tail));
+                return Some((Refusal::AsksToWait { source: key, until: Some(until.to_owned()) }, tail));
             }
         }
     }
@@ -960,7 +960,8 @@ fn format_of(text: &str) -> Option<Format> {
 /// A size as [`fmt_size_in`] says it («312 МБ», «1.4 ГБ»), back to bytes.
 fn size_in(text: &str, loc: Locale) -> Option<u64> {
     for (bytes, factor) in [(1_500_000_000u64, 1u64 << 30), (1_500_000, 1 << 20)] {
-        let (_, unit) = fmt_size_in(loc, bytes).split_once(' ')?;
+        let said = fmt_size_in(loc, bytes);
+        let (_, unit) = said.split_once(' ')?;
         if let Some(number) = text.strip_suffix(&format!(" {unit}")) {
             return Some((number.parse::<f64>().ok()? * factor as f64).round() as u64);
         }
@@ -971,7 +972,8 @@ fn size_in(text: &str, loc: Locale) -> Option<u64> {
 /// A download's size as [`fmt_bytes_in`] says it («1.2 ГБ», «312.0 МБ»).
 fn bytes_in(text: &str, loc: Locale) -> Option<u64> {
     for (bytes, factor) in [(1_500_000_000u64, 1_000_000_000u64), (1_500_000, 1_000_000), (999_000, 1_000)] {
-        let (_, unit) = fmt_bytes_in(loc, bytes).split_once(' ')?;
+        let said = fmt_bytes_in(loc, bytes);
+        let (_, unit) = said.split_once(' ')?;
         if let Some(number) = text.strip_suffix(&format!(" {unit}")) {
             return Some((number.parse::<f64>().ok()? * factor as f64).round() as u64);
         }

@@ -1648,6 +1648,13 @@ pub enum ColdFailure {
     Reasons(Vec<ColdProblem>),
 }
 
+impl From<String> for ColdFailure {
+    /// An external error's own words (an I/O or a service error).
+    fn from(words: String) -> Self {
+        Self::Words(words)
+    }
+}
+
 impl ColdFailure {
     /// Its words in `loc`, the reasons joined as they were said.
     pub fn words_in(&self, loc: Locale) -> String {
