@@ -931,7 +931,7 @@ impl Shared {
                 storage: pres.and_then(|p| p.storage),
                 playing: if online { pres.and_then(|p| p.playing.clone()) } else { None },
                 transfer: if online { pres.and_then(|p| p.transfer) } else { None },
-                copy: copies.get(&id).copied(),
+                copy: copies.get(&c.node).copied(),
                 ..MeshNodeView::default()
             };
             nodes.push(MeshSnapshotNode { view, cert: serde_json::to_string(&c).unwrap_or_default() });
