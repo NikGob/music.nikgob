@@ -718,7 +718,7 @@ impl Worker {
                 };
                 let Some(svc) = self.service(service) else { return };
                 self.toast_work(
-                    format!("{} {} {} {}…", s.creating, fmt_quoted_in(loc, &local.name), s.in, service.display_name()),
+                    format!("{} {} {} {}…", s.creating, fmt_quoted_in(loc, &local.name), s.in_word, service.display_name()),
                     None,
                 );
                 self.streaming.sync.announce.insert(playlist);

@@ -19,10 +19,7 @@
 //!   (energy × brightness × steadiness, 2–3 per cell), picked by the day
 //!   and the part, so a name holds for its part of the day.
 
-use nikgob_core::i18n::home_recs::{
-    DAYLIST_ADJECTIVES_EN as ADJECTIVES_EN, DAYLIST_ADJECTIVES_RU as ADJECTIVES, DayGender as Gender,
-    agree_ru as agree, daylist_name_in, weekday_en, weekday_genitive_ru as weekday_genitive,
-};
+use nikgob_core::i18n::home_recs::{DAYLIST_ADJECTIVES_RU as ADJECTIVES, daylist_name_in, weekday_genitive_ru};
 use nikgob_core::i18n::Locale;
 use nikgob_core::model::TrackId;
 

@@ -494,6 +494,13 @@ struct Thread {
 }
 
 impl Thread {
+    /// The UI language: the align thread has no prefs of its own.
+    fn locale(&self) -> Locale {
+        nikgob_core::i18n::locale()
+    }
+}
+
+impl Thread {
     #[allow(clippy::too_many_arguments)]
     fn new(lib: Library, root: PathBuf, catalog: Catalog, settings: Settings, tx: Sender<Internal>, rx: Receiver<Req>, stop: Arc<AtomicBool>, start: Duration) -> Self {
         let device = if settings.gpu { Device::Gpu } else { Device::Cpu };

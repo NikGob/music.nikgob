@@ -226,7 +226,7 @@ pub struct ActivityStrings {
     pub sync_off: &'static str,
     pub sync_label: &'static str,
     pub creating: &'static str,
-    pub in: &'static str,
+    pub in_word: &'static str,
     pub playlist_not_linked: &'static str,
 
     // Lyrics kept by hand.
@@ -579,7 +579,7 @@ pub static RU: ActivityStrings = ActivityStrings {
     sync_off: "выключена",
     sync_label: "Синхронизация",
     creating: "Создаю",
-    in: "в",
+    in_word: "в",
     playlist_not_linked: "Плейлист не связан с сервисом",
 
     unnamed_highlight: "Подсветку не сделать: неясно, чья это песня",
@@ -915,7 +915,7 @@ pub static EN: ActivityStrings = ActivityStrings {
     sync_off: "off",
     sync_label: "Sync",
     creating: "Creating",
-    in: "in",
+    in_word: "in",
     playlist_not_linked: "The playlist is not linked to a service",
 
     unnamed_highlight: "Can't make the highlight: it's unclear whose song this is",
@@ -1153,7 +1153,7 @@ pub fn fmt_cannot_change_in(loc: Locale, name: &str, service: &str) -> String {
     let s = activity_in(loc);
     let quoted = fmt_quoted_in(loc, name);
     match loc {
-        Locale::Ru => format!("{quoted} {} {service} {} — {}", s.in, s.cannot_change, s.follow_only),
+        Locale::Ru => format!("{quoted} {} {service} {} — {}", s.in_word, s.cannot_change, s.follow_only),
         Locale::En => format!("{quoted} {} {service} — {}", s.cannot_change_in, s.follow_only),
     }
 }
@@ -1162,7 +1162,7 @@ pub fn fmt_cannot_change_in(loc: Locale, name: &str, service: &str) -> String {
 /// `"Playlist synced: +2 −1 here, 3 in Spotify"`.
 pub fn fmt_sync_done_in(loc: Locale, added: usize, removed: usize, there: usize, service: &str) -> String {
     let s = activity_in(loc);
-    format!("{}: +{added} −{removed} {}, {there} {} {service}", s.sync_done, s.here, s.in)
+    format!("{}: +{added} −{removed} {}, {there} {} {service}", s.sync_done, s.here, s.in_word)
 }
 
 /// `"4 трека"` / `"4 tracks"`: `n` with the plural form of `forms`.

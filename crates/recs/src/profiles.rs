@@ -563,7 +563,7 @@ pub enum Loudness {
 impl Loudness {
     /// Localized loudness word appended to a profile kind (`"потише"` / `"quieter"`).
     pub const fn word_in(self, loc: Locale) -> &'static str {
-        loudness_word_in(loc, self == Self::Quiet)
+        loudness_word_in(loc, matches!(self, Self::Quiet))
     }
 }
 

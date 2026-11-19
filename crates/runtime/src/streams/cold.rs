@@ -839,7 +839,7 @@ async fn read_export(
     let hits = if ask.is_empty() || services.is_empty() {
         Vec::new()
     } else {
-        catalogue_songs(job, &lib, &services, &ask, &tx).await
+        catalogue_songs(job, loc, &lib, &services, &ask, &tx).await
     };
     let mut found = Vec::new();
     for (remote, hit) in hits {

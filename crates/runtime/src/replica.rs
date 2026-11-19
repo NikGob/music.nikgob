@@ -316,7 +316,8 @@ impl Worker {
     }
 
     fn replica_publish(&mut self) {
-        let card = self.replica.card.as_ref().map(|(id, items)| keep_card(*id, items));
+        let loc = self.locale();
+        let card = self.replica.card.as_ref().map(|(id, items)| keep_card(*id, items, loc));
         self.publish(move |s| {
             s.downloads.confirm.retain(|c| c.id & REPLICA_ID == 0);
             s.downloads.confirm.extend(card);

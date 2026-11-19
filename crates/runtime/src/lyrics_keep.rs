@@ -252,8 +252,9 @@ impl Worker {
                 let Some(path) = self.kept_text(track) else { return };
                 let Some(svc) = self.import.as_ref() else { return };
                 let tx = svc.internal();
+                let loc = self.locale();
                 svc.spawn_blocking(move || {
-                    let result = write_ttml(&path, &keep);
+                    let result = write_ttml(&path, &keep, loc);
                     let _ = tx.send(Internal::Align(Msg::Kept { track, result }));
                 });
             }
@@ -387,8 +388,9 @@ impl Worker {
         }
         let Some(svc) = self.import.as_ref() else { return };
         let tx = svc.internal();
+        let loc = self.locale();
         svc.spawn_blocking(move || {
-            let result = write_ttml(&file.with_extension("ttml"), &keep).and_then(|text| {
+            let result = write_ttml(&file.with_extension("ttml"), &keep, loc).and_then(|text| {
                 if !later {
                     write_tag(&file, &keep)?;
                 }

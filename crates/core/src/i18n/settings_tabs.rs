@@ -537,7 +537,7 @@ pub fn ago_in(loc: Locale, now_ms: i64, then_ms: i64) -> String {
         86_400..172_800 => t.yesterday.to_owned(),
         _ => {
             let d = s / 86_400;
-            format!("{} {} {}", d, plural_forms(loc, d, &t.days), t.ago)
+            format!("{} {} {}", d, plural_forms(loc, d as u64, &t.days), t.ago)
         }
     }
 }
@@ -553,7 +553,7 @@ pub fn fmt_speed_in(loc: Locale, kbps: u32) -> String {
     match kbps {
         0 => t.no_limit.to_owned(),
         k if k < 1024 => format!("{k} {}", t.kibps),
-        k => format!("{:.1} {}", k as f32 / 1024.0, t.mibps).replace('.', decimal_point_in(loc)),
+        k => format!("{:.1} {}", k as f32 / 1024.0, t.mibps).replace('.', &decimal_point_in(loc).to_string()),
     }
 }
 
@@ -566,7 +566,7 @@ pub fn fmt_speed(kbps: u32) -> String {
 pub fn fmt_size_in(loc: Locale, bytes: u64) -> String {
     let c = common_in(loc);
     let mb = bytes as f64 / 1_048_576.0;
-    if mb >= 1000.0 { format!("{:.1} {}", mb / 1024.0, c.gb).replace('.', decimal_point_in(loc)) } else { format!("{mb:.0} {}", c.mb) }
+    if mb >= 1000.0 { format!("{:.1} {}", mb / 1024.0, c.gb).replace('.', &decimal_point_in(loc).to_string()) } else { format!("{mb:.0} {}", c.mb) }
 }
 
 /// Formats a byte size in the active locale.

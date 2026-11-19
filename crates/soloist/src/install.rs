@@ -361,7 +361,8 @@ pub async fn version_of(exe: &Path) -> Option<String> {
 }
 
 /// An archive entry worth keeping: the executable and Spotify's notices, by
-/// their bare names; anything with a path that climbs out is refused.fn wanted(path: &Path) -> Result<Option<&'static str>, InstallError> {
+/// their bare names; anything with a path that climbs out is refused.
+fn wanted(path: &Path) -> Result<Option<&'static str>, InstallError> {
     if !path.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir)) {
         return Err(InstallError::Archive(SoloistArchiveFault::PathOutside));
     }
