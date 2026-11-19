@@ -614,10 +614,16 @@ impl Account {
 }
 
 /// What Spotify's account says when it has no Premium: Spotify is not
-/// connected at all then. The service's
-/// [`Account::Failed`] and the runtime's login error both read this.
+/// connected at all then. The service's [`Account::Failed`] and the
+/// runtime's login error both read [`premium_required_in`]; this is the
+/// words the Russian UI always had.
 pub const SPOTIFY_PREMIUM_REQUIRED: &str =
     "Нужен Spotify Premium — без него Spotify не подключить; YouTube Music работает и так";
+
+/// [`SPOTIFY_PREMIUM_REQUIRED`] in `loc`'s words.
+pub fn premium_required_in(loc: crate::i18n::Locale) -> &'static str {
+    crate::i18n::backend_in(loc).spotify_premium_required
+}
 
 /// What the user must do to finish logging in.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

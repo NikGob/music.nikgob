@@ -1283,7 +1283,7 @@ fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> 
         let stage = if playing { playing_release } else { last_album.or_else(|| g.albums.first().map(|a| a.release.id)) };
 
         let k = g.albums.len();
-        let mut facts = vec![g.kind.label().to_owned()];
+        let mut facts = vec![g.kind.label_in(loc).to_owned()];
         match g.kind {
             v::WorldKind::Soundtrack => {
                 // Its artists, the one with the most tracks first.

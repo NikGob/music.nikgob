@@ -14,7 +14,7 @@
 //! Premium it is not connected at all (YouTube Music serves Free users):
 //! a login whose `/me` says another plan, whose app Spotify refuses because
 //! its owner has no Premium, or whose playback session is not Premium ends
-//! signed out with [`SPOTIFY_PREMIUM_REQUIRED`], keeping nothing.
+//! signed out with [`premium_required_in`], keeping nothing.
 //!
 //! # Grants
 //!
@@ -70,10 +70,10 @@ use std::time::{Duration, Instant};
 
 use librespot_core::authentication::Credentials;
 use nikgob_core::streaming::{
-    Account, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput, LoginPrompt, Played,
-    SPOTIFY_PREMIUM_REQUIRED, SearchKind, Service, SoloistAction, SoloistStatus, StreamAlbum, StreamArtist, StreamError,
-    StreamPlaylist, StreamSearch, StreamService, StreamTrack, SuggestedArtist, SuggestedTrack,
-    SuggestionFeed, SuggestionKind, Suggestions, rank_weight,
+    Account, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput, LoginPrompt, Played, SearchKind, Service,
+    SoloistAction, SoloistStatus, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamSearch,
+    StreamService, StreamTrack, SuggestedArtist, SuggestedTrack, SuggestionFeed, SuggestionKind, Suggestions,
+    premium_required_in, rank_weight,
 };
 use tokio::runtime::Handle;
 use tokio::sync::watch;
@@ -607,7 +607,7 @@ impl Spotify {
     /// the user's app), and the account says why.
     fn premium_required(&self) {
         log::info!("spotify: the account has no Premium; signed out");
-        self.sign_out(Some(SPOTIFY_PREMIUM_REQUIRED.into()));
+        self.sign_out(Some(premium_required_in(nikgob_core::i18n::locale()).into()));
     }
 
     /// Signs out of everything (the Client ID stays); `failure` is what the
@@ -748,7 +748,7 @@ impl Spotify {
     /// The Web API sign-in with the user's own app. Verified with `GET /me`
     /// on a scratch client before anything is kept: an account without
     /// Premium (its plan, or Spotify refusing the app for its owner) ends
-    /// signed out with [`SPOTIFY_PREMIUM_REQUIRED`].
+    /// signed out with [`premium_required_in`].
     async fn login_web(&self, grant: Grant) -> Result<(), StreamError> {
         let epoch = self.epoch();
         let endpoints = self.web.endpoints().clone();

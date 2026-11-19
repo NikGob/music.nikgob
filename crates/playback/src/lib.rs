@@ -383,7 +383,7 @@ impl Engine {
     fn live_item(&self, r: &PlayRequest) -> Option<PlayItem> {
         if let (Some(w), PlaySource::Stream { id, .. }) = (self.widget_for(r), &r.source) {
             log::debug!("soundcloud {id} plays through SoundCloud's player (item {})", r.id);
-            self.quality(r.id, "Плеер SoundCloud");
+            self.quality(r.id, nikgob_core::i18n::backend_in(nikgob_core::i18n::locale()).soundcloud_player);
             self.plays_live(r);
             return Some(PlayItem {
                 id: r.id,

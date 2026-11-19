@@ -52,6 +52,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use nikgob_core::i18n::backend_in;
 use nikgob_core::streaming::{
     Account, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput, Played, SearchKind, SearchParts, Service,
     StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamSearch, StreamService, StreamTrack,
@@ -72,7 +73,9 @@ pub const SIGNIN_URL: &str = "https://soundcloud.com/signin";
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 /// What a refused session reads (the account's failure).
-pub const SESSION_EXPIRED: &str = "Вход в SoundCloud истёк — войди снова";
+pub fn session_expired() -> &'static str {
+    backend_in(nikgob_core::i18n::locale()).soundcloud_session_expired
+}
 
 /// Hits per search category.
 const SEARCH_LIMIT: u32 = 20;
@@ -671,7 +674,7 @@ impl Inner {
         }
         log::warn!("soundcloud: the sign-in was refused");
         *lock(&self.me) = None;
-        *self.account() = Account::Failed(SESSION_EXPIRED.into());
+        *self.account() = Account::Failed(session_expired().into());
         self.store.clear();
     }
 
@@ -727,7 +730,9 @@ impl Inner {
             return Err(StreamError::Unsupported);
         };
         let Some(token) = token::parse(&text) else {
-            return Err(StreamError::Network("Нет oauth_token SoundCloud — вставь cookies soundcloud.com или токен".into()));
+            return Err(StreamError::Network(
+                backend_in(nikgob_core::i18n::locale()).soundcloud_no_token.into(),
+            ));
         };
         let generation = self.generation.load(Ordering::SeqCst);
         let before = lock(&self.token).replace(token.clone());
@@ -751,7 +756,9 @@ impl Inner {
                     *lock(&self.me) = me_before;
                 }
                 if matches!(e, StreamError::NotLoggedIn) {
-                    Err(StreamError::Network("SoundCloud не принял вход — токен устарел".into()))
+                    Err(StreamError::Network(
+                        backend_in(nikgob_core::i18n::locale()).soundcloud_login_refused.into(),
+                    ))
                 } else {
                     Err(e)
                 }

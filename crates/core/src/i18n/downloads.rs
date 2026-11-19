@@ -303,9 +303,10 @@ pub fn fmt_cap_in(loc: Locale, gb: u32) -> String {
 
 /// `"3 дн. после скачивания"`.
 pub fn fmt_days_after_download_in(loc: Locale, days: u32) -> String {
-    match loc {
-        Locale::Ru => format!("{days} дн. после скачивания"),
-        Locale::En => format!("{days} days after downloading"),
+    match (loc, days) {
+        (Locale::Ru, _) => format!("{days} дн. после скачивания"),
+        (Locale::En, 1) => "1 day after downloading".to_owned(),
+        (Locale::En, _) => format!("{days} days after downloading"),
     }
 }
 
@@ -375,7 +376,13 @@ pub fn fmt_shared_line_in(loc: Locale, files: u32, folders: u32, remote: bool) -
                     "папках"
                 }
             }
-            Locale::En => "folders",
+            Locale::En => {
+                if folders == 1 {
+                    "folder"
+                } else {
+                    "folders"
+                }
+            }
         };
         match loc {
             Locale::Ru => format!("{files} {files_word} в {folders} {folders_word}"),
@@ -413,9 +420,10 @@ pub fn fmt_upload_line_in(loc: Locale, user: &str, state: UploadState, sent: &st
 
 /// `"без файла 2 тр."`: what an album item still misses.
 pub fn fmt_without_file_in(loc: Locale, n: u32) -> String {
-    match loc {
-        Locale::Ru => format!("без файла {n} тр."),
-        Locale::En => format!("{n} tracks without a file"),
+    match (loc, n) {
+        (Locale::Ru, _) => format!("без файла {n} тр."),
+        (Locale::En, 1) => "1 track without a file".to_owned(),
+        (Locale::En, _) => format!("{n} tracks without a file"),
     }
 }
 
@@ -433,8 +441,11 @@ mod tests {
         assert_eq!(fmt_of_cap_in(Locale::Ru, 0), "без лимита");
         assert_eq!(fmt_cap_in(Locale::En, 0), "no cap");
         assert_eq!(fmt_days_after_download_in(Locale::Ru, 3), "3 дн. после скачивания");
+        assert_eq!(fmt_days_after_download_in(Locale::En, 3), "3 days after downloading");
+        assert_eq!(fmt_days_after_download_in(Locale::En, 1), "1 day after downloading");
         assert_eq!(fmt_without_file_in(Locale::Ru, 2), "без файла 2 тр.");
         assert_eq!(fmt_without_file_in(Locale::En, 2), "2 tracks without a file");
+        assert_eq!(fmt_without_file_in(Locale::En, 1), "1 track without a file");
         assert_eq!(fmt_seeding_disk_in(Locale::Ru, "12 ГБ"), "Раздачи занимают на диске 12 ГБ");
     }
 
@@ -456,6 +467,8 @@ mod tests {
             Some("nikgob-slsk на другом компьютере · 2 файла в 12 папках")
         );
         assert_eq!(fmt_shared_line_in(Locale::Ru, 0, 3, true).as_deref(), Some("nikgob-slsk на другом компьютере"));
+        assert_eq!(fmt_shared_line_in(Locale::En, 1, 1, false).as_deref(), Some("1 file in 1 folder"));
+        assert_eq!(fmt_shared_line_in(Locale::En, 2, 3, false).as_deref(), Some("2 files in 3 folders"));
         assert_eq!(fmt_shared_line_in(Locale::Ru, 0, 0, false), None);
         assert_eq!(
             fmt_upload_line_in(Locale::Ru, "peer", UploadState::Queued, "", "30.0 МБ", ""),
