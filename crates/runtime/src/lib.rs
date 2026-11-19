@@ -3660,8 +3660,8 @@ impl Worker {
     fn shelf(&mut self) -> (Vec<nikgob_view::PlaylistCard>, Vec<(usize, nikgob_view::ReleaseCard)>) {
         let only_local = self.state.read().prefs.library_only_downloaded;
         let mut errors = Vec::new();
-        let shelf = library_load::shelf(&self.lib, &mut self.res, only_local, self.locale(), &mut errors);
         let loc = self.locale();
+        let shelf = library_load::shelf(&self.lib, &mut self.res, only_local, loc, &mut errors);
         for what in errors {
             self.toast_err(nikgob_core::i18n::ErrorStrings::error_with_in(loc, &what), None);
         }
