@@ -15,40 +15,52 @@ use crate::{
         Button, Card, ConnectedGroup, IconButton, ListItem, Radii, Size, Style, Switch, badge,
         paint, segmented_list, wavy_progress, wavy_progress_indeterminate,
     },
-    screens::common::plural,
     tokens::shape,
 };
 
-/// The tabs, in order.
-const TABS: [(DownloadsTab, &str); 5] = [
-    (DownloadsTab::Active, "Активные"),
-    (DownloadsTab::Confirm, "Подтверди"),
-    (DownloadsTab::Wishlist, "Хочу скачать"),
-    (DownloadsTab::Seeding, "Раздача"),
-    (DownloadsTab::History, "История"),
-];
+/// The tabs, in order, in `loc`'s words.
+fn tabs_in(loc: nikgob_core::i18n::Locale) -> [(DownloadsTab, &'static str); 5] {
+    let d = nikgob_core::i18n::downloads_in(loc);
+    [
+        (DownloadsTab::Active, d.tab_active),
+        (DownloadsTab::Confirm, d.tab_confirm),
+        (DownloadsTab::Wishlist, d.tab_wishlist),
+        (DownloadsTab::Seeding, d.tab_seeding),
+        (DownloadsTab::History, d.tab_history),
+    ]
+}
+
+/// The tabs in the active locale.
+fn tabs() -> [(DownloadsTab, &'static str); 5] {
+    tabs_in(nikgob_core::i18n::locale())
+}
+
+/// How many tabs there are, whatever their words.
+const TAB_COUNT: usize = 5;
 
 /// Where `tab` is in the tab switch.
 pub fn tab_index(tab: DownloadsTab) -> usize {
-    TABS.iter().position(|(t, _)| *t == tab).unwrap_or(0)
+    tabs().iter().position(|(t, _)| *t == tab).unwrap_or(0)
 }
 
 pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let d = &state.downloads;
+    let words = nikgob_core::i18n::downloads();
     let mut nav = None;
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-        ui.label(TypeRole::HeadlineMedium.style().rich("Загрузки", s.on_surface));
+        ui.label(TypeRole::HeadlineMedium.style().rich(words.title, s.on_surface));
         storage(ui, &d.storage);
     });
     ui.add_space(8.0);
-    let labels = TABS.map(|(_, l)| l);
-    let tab = pages.downloads_tab.min(TABS.len() - 1);
+    let tabs = tabs();
+    let labels = tabs.map(|(_, l)| l);
+    let tab = pages.downloads_tab.min(TAB_COUNT - 1);
     let (picked, rects) = connected(ui, egui::Id::new("dl-tabs"), &labels, tab, &[]);
     if let Some(i) = picked {
         pages.downloads_tab = i;
-        if TABS[i].0 == DownloadsTab::Wishlist {
+        if tabs[i].0 == DownloadsTab::Wishlist {
             out.push(Command::LoadWishlist);
         }
     }
@@ -59,11 +71,11 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         badge::count(ui.painter(), badge::large_anchor(*r), asks as u32);
     }
     ui.add_space(16.0);
-    match TABS[tab].0 {
+    match tabs[tab].0 {
         DownloadsTab::Wishlist => nav = super::wishlist::show(ui, state, pages, out),
         DownloadsTab::Active => {
             if d.active.is_empty() {
-                widgets::empty_state(ui, Icon::Download, "Ничего не качается", "", None);
+                widgets::empty_state(ui, Icon::Download, words.nothing_downloading, "", None);
             }
             for j in &d.active {
                 job(ui, j, out, true);
@@ -73,7 +85,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         DownloadsTab::Seeding => nav = seeding(ui, state, pages, out),
         DownloadsTab::History => {
             if d.history.is_empty() {
-                widgets::empty_state(ui, Icon::Check, "История пуста", "", None);
+                widgets::empty_state(ui, Icon::Check, words.history_empty, "", None);
             }
             for j in &d.history {
                 job(ui, j, out, false);
@@ -146,9 +158,10 @@ fn accepted(c: &Confirm, choice: usize) -> Option<usize> {
 fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let d = &state.downloads;
+    let words = nikgob_core::i18n::downloads();
     let cards: Vec<&Confirm> = d.confirm.iter().filter(|c| c.answerable()).collect();
     if cards.is_empty() {
-        widgets::empty_state(ui, Icon::Check, "Всё подтверждено", "", None);
+        widgets::empty_state(ui, Icon::Check, words.all_confirmed, "", None);
         return;
     }
     // A card ticked song by song is never answered from here.
@@ -160,7 +173,10 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     if !recommended.is_empty() {
         if ui
             .add(
-                Button::new(format!("Принять все рекомендованные ({})", recommended.len()))
+                Button::new(nikgob_core::i18n::downloads::fmt_accept_recommended_in(
+                    nikgob_core::i18n::locale(),
+                    recommended.len(),
+                ))
                     .icon(Icon::Check)
                     .style(Style::Tonal)
                     .id_salt("cf-all"),
@@ -226,7 +242,7 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
                             ui.add(egui::Label::new(TypeRole::TitleSmall.style().rich(&o.label, s.on_surface)).wrap());
                             if o.recommended {
                                 ui.add_space(6.0);
-                                ui.label(TypeRole::LabelSmall.emphasized().rich("РЕКОМЕНДУЕМ", s.primary));
+                                ui.label(TypeRole::LabelSmall.emphasized().rich(words.recommended, s.primary));
                             }
                         });
                         ui.add(egui::Label::new(TypeRole::BodySmall.style().rich(&o.detail, s.on_surface_variant)).wrap());
@@ -342,10 +358,11 @@ fn pick_card(ui: &mut Ui, c: &Confirm, pick: &ConfirmPick, out: &mut Vec<Command
             let all = ticked.len() == n;
             let mixed = !ticked.is_empty() && !all;
             // One line: on the checkbox's centre line, as the songs' two are.
+            let select_all = nikgob_core::i18n::downloads().select_all;
             let mut words = |ui: &mut Ui| {
                 let size = vec2(ui.available_width(), crate::components::checkbox::SIZE);
                 ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.label(TypeRole::LabelLarge.style().rich("Выбрать все", s.on_surface));
+                    ui.label(TypeRole::LabelLarge.style().rich(select_all, s.on_surface));
                 });
             };
             if row(ui, (c.id, usize::MAX), all, mixed, false, &mut words) {
@@ -418,12 +435,15 @@ fn seeding(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<
 /// The top card: speeds now and what was given away, summed and split.
 fn share_summary(ui: &mut Ui, sh: &SharingView) {
     let s = Theme::get(ui.ctx()).scheme;
-    let split = |t: u64, k: u64, f: fn(u64) -> String| format!("торренты {} · Soulseek {}", f(t), f(k));
+    let d = nikgob_core::i18n::downloads();
+    let split = |t: u64, k: u64, f: fn(u64) -> String| {
+        nikgob_core::i18n::downloads::fmt_split_in(nikgob_core::i18n::locale(), &f(t), &f(k))
+    };
     let tiles = [
-        ("Отдача", fmt_rate(sh.up_bps()), split(sh.torrent_up_bps, sh.slsk_up_bps, fmt_rate)),
-        ("Загрузка", fmt_rate(sh.down_bps()), split(sh.torrent_down_bps, sh.slsk_down_bps, fmt_rate)),
-        ("Отдано сегодня", fmt_size(sh.today()), split(sh.torrent_today, sh.slsk_today, fmt_size)),
-        ("Отдано всего", fmt_size(sh.total()), split(sh.torrent_total, sh.slsk_total, fmt_size)),
+        (d.upload, fmt_rate(sh.up_bps()), split(sh.torrent_up_bps, sh.slsk_up_bps, fmt_rate)),
+        (d.incoming, fmt_rate(sh.down_bps()), split(sh.torrent_down_bps, sh.slsk_down_bps, fmt_rate)),
+        (d.given_today, fmt_size(sh.today()), split(sh.torrent_today, sh.slsk_today, fmt_size)),
+        (d.given_total, fmt_size(sh.total()), split(sh.torrent_total, sh.slsk_total, fmt_size)),
     ];
     Card::filled().id_salt("share-summary").show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -445,7 +465,7 @@ fn share_summary(ui: &mut Ui, sh: &SharingView) {
         if sh.seeding_disk_bytes > 0 {
             ui.add_space(12.0);
             ui.label(TypeRole::BodyMedium.style().rich(
-                format!("Раздачи занимают на диске {}", fmt_size(sh.seeding_disk_bytes)),
+                nikgob_core::i18n::downloads::fmt_seeding_disk_in(nikgob_core::i18n::locale(), &fmt_size(sh.seeding_disk_bytes)),
                 s.on_surface_variant,
             ));
         }
@@ -484,18 +504,25 @@ fn torrent_share(ui: &mut Ui, state: &ViewState, pages: &mut PageState) {
     let s = Theme::get(ui.ctx()).scheme;
     let d = &state.downloads;
     let p = &state.prefs;
-    section(ui, "Торренты");
+    let words = nikgob_core::i18n::downloads();
+    let loc = nikgob_core::i18n::locale();
+    section(ui, words.torrents);
     if p.no_seed {
-        policy_rows(ui, "seed-off", &[("Раздача выключена", "включить".to_owned(), SettingId::NoSeed)], pages);
+        policy_rows(
+            ui,
+            "seed-off",
+            &[(words.seeding_off, words.enable.to_owned(), SettingId::NoSeed)],
+            pages,
+        );
     } else {
         let limit = u64::from(p.seed_limit_gb) * (1 << 30);
         Card::filled().id_salt("seed-header").show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(TypeRole::TitleMedium.style().rich("Отдано раздачами", s.on_surface));
+                ui.label(TypeRole::TitleMedium.style().rich(words.given_by_torrents, s.on_surface));
                 ui.label(TypeRole::TitleMedium.style().rich(fmt_size(d.seeded_bytes), s.primary));
                 ui.label(TypeRole::BodyMedium.style().rich(
-                    if limit > 0 { format!("из лимита {} ГБ", p.seed_limit_gb) } else { "без лимита".to_owned() },
+                    nikgob_core::i18n::downloads::fmt_of_cap_in(loc, p.seed_limit_gb),
                     s.on_surface_variant,
                 ));
             });
@@ -512,7 +539,7 @@ fn torrent_share(ui: &mut Ui, state: &ViewState, pages: &mut PageState) {
             ui.add_space(8.0);
             if ui
                 .add(
-                    Button::new("Очистить сейчас")
+                    Button::new(words.clean_now)
                         .style(Style::Tonal)
                         .icon(Icon::Delete)
                         .enabled(!d.seeding.is_empty())
@@ -528,10 +555,10 @@ fn torrent_share(ui: &mut Ui, state: &ViewState, pages: &mut PageState) {
             ui,
             "seed-policy",
             &[
-                ("Раздавать до ratio", ratio_target(p.seed_ratio), SettingId::SeedRatio),
-                ("Срок раздачи", format!("{} дн. после скачивания", p.seed_days), SettingId::SeedDays),
-                ("Лимит на все раздачи", if limit > 0 { format!("{} ГБ", p.seed_limit_gb) } else { "без лимита".to_owned() }, SettingId::SeedLimit),
-                ("Скорость отдачи", super::settings::fmt_speed(p.upload_limit_kbps), SettingId::UploadLimit),
+                (words.seed_until_ratio, ratio_target(p.seed_ratio), SettingId::SeedRatio),
+                (words.seed_for, nikgob_core::i18n::downloads::fmt_days_after_download_in(loc, p.seed_days), SettingId::SeedDays),
+                (words.cap_all, nikgob_core::i18n::downloads::fmt_cap_in(loc, p.seed_limit_gb), SettingId::SeedLimit),
+                (words.upload_speed, super::settings::fmt_speed(p.upload_limit_kbps), SettingId::UploadLimit),
             ],
             pages,
         );
@@ -546,25 +573,28 @@ fn torrent_share(ui: &mut Ui, state: &ViewState, pages: &mut PageState) {
 
 /// "до 2.0" / "без лимита" (the ratio slider's own words).
 fn ratio_target(r: f32) -> String {
-    if r < 0.05 { "без лимита".to_owned() } else { format!("{r:.1}") }
+    if r < 0.05 {
+        nikgob_core::i18n::downloads().no_cap.to_owned()
+    } else {
+        format!("{r:.1}")
+    }
 }
 
 /// What one torrent does: speed and peers now, what it gave away against
 /// the ratio it stops at, its size and when it is cleaned up.
 fn seed_line(r: &SeedRow, seed_ratio: f32) -> String {
-    let mut parts = Vec::new();
-    if r.up_bps > 0 {
-        parts.push(format!("отдаёт {}", fmt_rate(r.up_bps)));
-    }
-    parts.push(format!("{} {}", r.peers, plural(u64::from(r.peers), "пир", "пира", "пиров")));
+    let target = (seed_ratio >= 0.05).then(|| format!("{seed_ratio:.1}"));
     let ratio = if r.size_bytes > 0 { r.uploaded_bytes as f64 / r.size_bytes as f64 } else { 0.0 };
-    let target = if seed_ratio < 0.05 { String::new() } else { format!(" из {seed_ratio:.1}") };
-    parts.push(format!("отдано {} · ratio {ratio:.2}{target}", fmt_size(r.uploaded_bytes)));
-    parts.push(fmt_size(r.size_bytes));
-    if let Some(e) = &r.expires {
-        parts.push(e.clone());
-    }
-    parts.join(" · ")
+    nikgob_core::i18n::downloads::fmt_seed_line_in(
+        nikgob_core::i18n::locale(),
+        (r.up_bps > 0).then(|| fmt_rate(r.up_bps)).as_deref(),
+        r.peers,
+        &fmt_size(r.uploaded_bytes),
+        ratio,
+        target.as_deref(),
+        &fmt_size(r.size_bytes),
+        r.expires.as_deref(),
+    )
 }
 
 fn seed_row(r: &SeedRow, seed_ratio: f32) -> ListItem<'static> {
@@ -576,9 +606,15 @@ fn seed_row(r: &SeedRow, seed_ratio: f32) -> ListItem<'static> {
 
 /// «Soulseek»: what is shared, the switch, limit and slots, and the uploads.
 fn slsk_share(ui: &mut Ui, k: &SlskSharingView, pages: &mut PageState, out: &mut Vec<Command>) {
+    let words = nikgob_core::i18n::downloads();
     section(ui, "Soulseek");
     if !k.configured {
-        policy_rows(ui, "slsk-none", &[("Soulseek не подключён", "настроить".to_owned(), SettingId::Soulseek)], pages);
+        policy_rows(
+            ui,
+            "slsk-none",
+            &[(words.not_connected, words.set_up.to_owned(), SettingId::Soulseek)],
+            pages,
+        );
         return;
     }
     // The switch and the slots are drawn inside the rows; what they pick
@@ -587,15 +623,15 @@ fn slsk_share(ui: &mut Ui, k: &SlskSharingView, pages: &mut PageState, out: &mut
     let labels = ["1", "2", "3", "4", "5"];
     let (share, slots, labels) = (&share_on, &slots_picked, &labels);
     let outs = segmented_list(ui, 3, |i| match i {
-        0 => ListItem::new("Раздавать библиотеку").id_salt("share-slsk-on").trailing(move |ui| {
+        0 => ListItem::new(words.share_library).id_salt("share-slsk-on").trailing(move |ui| {
             let mut on = share.get();
             ui.add(Switch::new(&mut on).id_salt("share-slsk-switch"));
             share.set(on);
         }),
-        1 => ListItem::new("Скорость отдачи")
+        1 => ListItem::new(words.upload_speed)
             .trailing_text(super::settings::fmt_speed(k.upload_limit_kbps))
             .id_salt("share-slsk-speed"),
-        _ => ListItem::new("Отдач одновременно").id_salt("share-slsk-slots").trailing(move |ui| {
+        _ => ListItem::new(words.uploads_at_once).id_salt("share-slsk-slots").trailing(move |ui| {
             // Five buttons of 48 and their 2 dp gaps, at the row's end.
             let at = k.upload_slots.saturating_sub(1) as usize;
             ui.allocate_ui_with_layout(vec2(5.0 * 48.0 + 8.0, 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -622,7 +658,7 @@ fn slsk_share(ui: &mut Ui, k: &SlskSharingView, pages: &mut PageState, out: &mut
     }
     ui.add_space(12.0);
     if !k.running {
-        note(ui, "Soulseek не подключён");
+        note(ui, words.not_connected);
         return;
     }
     if let Some(line) = shared_line(k) {
@@ -631,7 +667,10 @@ fn slsk_share(ui: &mut Ui, k: &SlskSharingView, pages: &mut PageState, out: &mut
     }
     let (now, done): (Vec<&UploadRow>, Vec<&UploadRow>) =
         k.uploads.iter().partition(|u| matches!(u.state, UploadRowState::Sending | UploadRowState::Queued));
-    for (title, rows, salt) in [("Отдаётся сейчас", &now, "up-now"), ("Отдано недавно", &done, "up-done")] {
+    for (title, rows, salt) in [
+        (words.uploading_now, &now, "up-now"),
+        (words.uploaded_recently, &done, "up-done"),
+    ] {
         if rows.is_empty() {
             continue;
         }
@@ -650,41 +689,30 @@ fn slsk_share(ui: &mut Ui, k: &SlskSharingView, pages: &mut PageState, out: &mut
 /// (nothing while the list is still being made), and where when another
 /// computer shares them.
 fn shared_line(k: &SlskSharingView) -> Option<String> {
-    let files = (k.files > 0).then(|| {
-        format!(
-            "{} {} в {} {}",
-            k.files,
-            plural(u64::from(k.files), "файл", "файла", "файлов"),
-            k.folders,
-            if k.folders % 10 == 1 && k.folders % 100 != 11 { "папке" } else { "папках" },
-        )
-    });
-    match (k.remote, files) {
-        (true, Some(files)) => Some(format!("nikgob-slsk на другом компьютере · {files}")),
-        (true, None) => Some("nikgob-slsk на другом компьютере".to_owned()),
-        (false, files) => files,
-    }
+    nikgob_core::i18n::downloads::fmt_shared_line_in(nikgob_core::i18n::locale(), k.files, k.folders, k.remote)
 }
 
 /// Who takes the file and how far it is.
 fn upload_line(u: &UploadRow) -> String {
-    match u.state {
-        UploadRowState::Queued => format!("{} · в очереди · {}", u.user, fmt_size(u.size)),
-        UploadRowState::Sending => format!(
-            "{} · {} из {} · {}",
-            u.user,
-            fmt_size(u.sent),
-            fmt_size(u.size),
-            fmt_rate(u.bytes_per_sec)
-        ),
-        UploadRowState::Done => format!("{} · {} · {}", u.user, fmt_size(u.size), fmt_rate(u.bytes_per_sec)),
-        UploadRowState::Failed => format!("{} · прервано на {} из {}", u.user, fmt_size(u.sent), fmt_size(u.size)),
-    }
+    let state = match u.state {
+        UploadRowState::Queued => nikgob_core::i18n::downloads::UploadState::Queued,
+        UploadRowState::Sending => nikgob_core::i18n::downloads::UploadState::Sending,
+        UploadRowState::Done => nikgob_core::i18n::downloads::UploadState::Done,
+        UploadRowState::Failed => nikgob_core::i18n::downloads::UploadState::Failed,
+    };
+    nikgob_core::i18n::downloads::fmt_upload_line_in(
+        nikgob_core::i18n::locale(),
+        &u.user,
+        state,
+        &fmt_size(u.sent),
+        &fmt_size(u.size),
+        &fmt_rate(u.bytes_per_sec),
+    )
 }
 
 /// Bytes per second as the page says it ("0 Б/с", "512 КБ/с", "1.2 МБ/с").
 fn fmt_rate(bps: u64) -> String {
-    format!("{}/с", fmt_size(bps))
+    nikgob_core::i18n::status::fmt_rate_in(nikgob_core::i18n::locale(), &fmt_size(bps))
 }
 
 fn job(ui: &mut Ui, j: &Job, out: &mut Vec<Command>, active: bool) {
@@ -723,9 +751,10 @@ fn job(ui: &mut Ui, j: &Job, out: &mut Vec<Command>, active: bool) {
             }
         });
         if active && j.controllable {
+            let words = nikgob_core::i18n::downloads();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add(IconButton::new(Icon::Close).size(Size::S).tooltip("Отменить").id_salt(("job-x", j.id)))
+                    .add(IconButton::new(Icon::Close).size(Size::S).tooltip(words.cancel_job).id_salt(("job-x", j.id)))
                     .clicked()
                 {
                     out.push(Command::CancelJob(j.id));
@@ -737,7 +766,7 @@ fn job(ui: &mut Ui, j: &Job, out: &mut Vec<Command>, active: bool) {
                                 .selected_icon(Icon::PlayArrow)
                                 .selected(j.paused)
                                 .size(Size::S)
-                                .tooltip("Пауза")
+                                .tooltip(words.pause_job)
                                 .id_salt(("job-p", j.id)),
                         )
                         .clicked()

@@ -126,7 +126,7 @@ impl Worker {
             Ok(b) => b,
             Err(e) => {
                 log::warn!("{}: {e}", path.display());
-                self.toast_err("Не получилось прочитать .torrent", None);
+                self.toast_err(nikgob_core::i18n::errors_in(self.locale()).could_not_read_torrent, None);
                 return;
             }
         };
@@ -148,7 +148,7 @@ impl Worker {
             Err(e) => {
                 log::warn!("{}: {e}", staging.display());
                 give_back(&staging, &path);
-                self.toast_err("Не получилось прочитать .torrent", None);
+                self.toast_err(nikgob_core::i18n::errors_in(self.locale()).could_not_read_torrent, None);
                 return;
             }
         };

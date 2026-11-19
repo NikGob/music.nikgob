@@ -43,16 +43,28 @@ enum Filter {
 }
 
 impl Filter {
-    const CHIPS: [(Self, &'static str); 8] = [
-        (Self::All, "Все"),
-        (Self::Waiting, "Ждут"),
-        (Self::Searching, "Ищу"),
-        (Self::Downloading, "Качаются"),
-        (Self::Confirm, "Проверить"),
-        (Self::NoTorrent, "Не нашлось"),
-        (Self::Done, "Готово"),
-        (Self::Dismissed, "Не качать"),
-    ];
+    /// How many chips there are, whatever their words.
+    const COUNT: usize = 8;
+
+    /// The chips in `loc`'s words, in the order they are drawn.
+    fn chips_in(loc: nikgob_core::i18n::Locale) -> [(Self, &'static str); Self::COUNT] {
+        let s = nikgob_core::i18n::downloads_in(loc);
+        [
+            (Self::All, s.chip_all),
+            (Self::Waiting, s.chip_waiting),
+            (Self::Searching, s.chip_searching),
+            (Self::Downloading, s.chip_downloading),
+            (Self::Confirm, s.chip_confirm),
+            (Self::NoTorrent, s.chip_not_found),
+            (Self::Done, s.chip_done),
+            (Self::Dismissed, s.chip_dismissed),
+        ]
+    }
+
+    /// The chips in the active locale.
+    fn chips() -> [(Self, &'static str); Self::COUNT] {
+        Self::chips_in(nikgob_core::i18n::locale())
+    }
 
     /// Without a download source nothing searches: what is queued waits
     /// with the rest («Ждут»), and «Ищу» stays away.
@@ -76,13 +88,13 @@ impl Filter {
 
 /// How many items each chip takes, counted once over the items: the chips
 /// and the buttons say the same numbers.
-struct Counts([usize; Filter::CHIPS.len()]);
+struct Counts([usize; Filter::COUNT]);
 
 impl Counts {
     fn of(items: &[WishlistRow], torrents: bool) -> Self {
-        let mut n = [0; Filter::CHIPS.len()];
+        let mut n = [0; Filter::COUNT];
         for r in items {
-            for (i, (f, _)) in Filter::CHIPS.iter().enumerate() {
+            for (i, (f, _)) in Filter::chips().iter().enumerate() {
                 n[i] += usize::from(f.takes(r.status, torrents));
             }
         }
@@ -90,7 +102,7 @@ impl Counts {
     }
 
     fn get(&self, f: Filter) -> usize {
-        Filter::CHIPS.iter().position(|(c, _)| *c == f).map_or(0, |i| self.0[i])
+        Filter::chips().iter().position(|(c, _)| *c == f).map_or(0, |i| self.0[i])
     }
 }
 
@@ -104,14 +116,16 @@ fn status_text(r: &WishlistRow) -> Option<String> {
     if let Some(u) = &r.upgrade {
         return Some(u.clone());
     }
+    let d = nikgob_core::i18n::downloads();
     match r.status {
         // Waiting in a peer's queue or paused: the bar does not say it.
         St::Downloading => {
             let t = r.transfer.unwrap_or_default();
-            matches!(t.phase, TransferPhase::Queued(_) | TransferPhase::Paused).then(|| t.status(r.source.as_deref()))
+            matches!(t.phase, TransferPhase::Queued(_) | TransferPhase::Paused)
+                .then(|| t.status_in(nikgob_core::i18n::locale(), r.source.as_deref()))
         }
-        St::NoTorrent | St::Failed if !r.has_copy => Some("не нашёл".into()),
-        St::Done if r.missing > 0 => Some(format!("без файла {} тр.", r.missing)),
+        St::NoTorrent | St::Failed if !r.has_copy => Some(d.not_found.to_owned()),
+        St::Done if r.missing > 0 => Some(nikgob_core::i18n::downloads::fmt_without_file_in(nikgob_core::i18n::locale(), r.missing)),
         _ => None,
     }
 }
@@ -139,6 +153,7 @@ impl Line<'_> {
 
 pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
+    let d = nikgob_core::i18n::downloads();
     let w = &state.downloads.wishlist;
     let torrents = w.can_search;
     if !w.loaded {
@@ -146,13 +161,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         return None;
     }
     if w.items.is_empty() {
-        widgets::empty_state(
-            ui,
-            Icon::Download,
-            "Пока ничего",
-            "",
-            None,
-        );
+        widgets::empty_state(ui, Icon::Download, d.nothing_yet, "", None);
         return None;
     }
 
@@ -161,9 +170,9 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         Card::filled().id_salt("wish-no-torrents").show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.label(TypeRole::TitleSmall.style().rich("Все источники выключены", s.on_surface));
+                ui.label(TypeRole::TitleSmall.style().rich(d.all_sources_off, s.on_surface));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(Button::new("Откуда качать").icon(Icon::Settings).style(Style::Tonal).id_salt("wish-setup")).clicked() {
+                    if ui.add(Button::new(d.where_from).icon(Icon::Settings).style(Style::Tonal).id_salt("wish-setup")).clicked() {
                         pages.open_setting(super::SettingId::DownloadSource(nikgob_view::SourceKey::Torrents));
                     }
                 });
@@ -189,7 +198,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     let artist_view = by_artist(ui.ctx());
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-        for (chip, label) in Filter::CHIPS {
+        for (chip, label) in Filter::chips() {
             let n = counts.get(chip);
             if n == 0 && chip != Filter::All {
                 continue;
@@ -208,7 +217,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             if grouped
                 && let (Some(i), _) =
-                    connected(ui, Id::new("wish-group"), &["По альбомам", "По исполнителям"], usize::from(artist_view), &[])
+                    connected(ui, Id::new("wish-group"), &[d.by_album, d.by_artist], usize::from(artist_view), &[])
             {
                 ui.ctx().data_mut(|d| d.insert_temp(Id::new("wish-by-artist"), i == 1));
             }
@@ -217,7 +226,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
                 if waiting > 0
                     && ui
                         .add(
-                            Button::new(format!("Скачать все ({waiting})"))
+                            Button::new(nikgob_core::i18n::downloads::fmt_download_all_in(nikgob_core::i18n::locale(), waiting))
                                 .icon(Icon::Download)
                                 .style(Style::Filled)
                                 .id_salt("wish-all"),
@@ -229,7 +238,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
                 if missed > 0
                     && ui
                         .add(
-                            Button::new(format!("Искать снова ({missed})"))
+                            Button::new(nikgob_core::i18n::downloads::fmt_search_again_in(nikgob_core::i18n::locale(), missed))
                                 .icon(Icon::Refresh)
                                 .style(if waiting > 0 { Style::Tonal } else { Style::Filled })
                                 .id_salt("wish-retry-all"),
@@ -312,9 +321,11 @@ static LOOSE: WishlistGroup = WishlistGroup {
 /// torrents can fetch them), «Скачать N»; ⋮: the whole group, or none of it.
 fn group_head(ui: &mut Ui, g: &WishlistGroup, waiting: u32, open: &[WishlistId], artist_view: bool, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
+    let d = nikgob_core::i18n::downloads();
+    let more_word = nikgob_core::i18n::common().more;
     let salt = (&g.title, &g.subtitle, open.len());
     ui.allocate_ui_with_layout(vec2(ui.available_width(), 56.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        let title = if g.title.is_empty() { "Отдельные треки" } else { g.title.as_str() };
+        let title = if g.title.is_empty() { d.loose_tracks } else { g.title.as_str() };
         ui.label(TypeRole::TitleMedium.style().rich(title, s.on_surface));
         if !g.subtitle.is_empty() {
             ui.label(TypeRole::BodyMedium.style().rich(format!("· {}", g.subtitle), s.on_surface_variant));
@@ -323,18 +334,19 @@ fn group_head(ui: &mut Ui, g: &WishlistGroup, waiting: u32, open: &[WishlistId],
             ui.spacing_mut().item_spacing.x = 8.0;
             // The rows' side padding: their ⋮ and this one in one column.
             ui.add_space(16.0);
-            let more = ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("wish-group-more", salt)));
+            let more = ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip(more_word).id_salt(("wish-group-more", salt)));
             let select = || match (artist_view, g.release, g.artist) {
                 (false, Some(r), _) => WishlistSelect::Album(r),
                 (true, _, Some(a)) => WishlistSelect::Artist(a),
                 _ => WishlistSelect::Items(open.to_vec()),
             };
+            let download_all = nikgob_core::i18n::downloads::fmt_download_all_in(nikgob_core::i18n::locale(), waiting as usize);
             // Nothing waiting: nothing to download from here.
             let mut menu = Menu::new(("wish-group-menu", salt)).align_right(true);
             if waiting > 0 {
-                menu = menu.item(MenuItem::new(format!("Скачать все ({waiting})")).icon(Icon::Download)).divider();
+                menu = menu.item(MenuItem::new(download_all.clone()).icon(Icon::Download)).divider();
             }
-            let picked = menu.item(MenuItem::new("Не качать ничего отсюда").icon(Icon::Block)).attach(&more);
+            let picked = menu.item(MenuItem::new(d.dismiss_group).icon(Icon::Block)).attach(&more);
             match picked.map(|k| if waiting > 0 { k } else { k + 1 }) {
                 Some(0) => out.push(Command::WishlistDownload(select())),
                 Some(1) => out.push(Command::WishlistDismiss(open.to_vec())),
@@ -344,7 +356,7 @@ fn group_head(ui: &mut Ui, g: &WishlistGroup, waiting: u32, open: &[WishlistId],
             if waiting >= 2
                 && ui
                     .add(
-                        Button::new(format!("Скачать все ({waiting})"))
+                        Button::new(download_all)
                             .icon(Icon::Download)
                             .style(Style::Tonal)
                             .size(Size::S)
@@ -371,14 +383,16 @@ enum Under {
 /// plays it.
 fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut PageState, out: &mut Vec<Command>) {
     let id = r.id;
+    let d = nikgob_core::i18n::downloads();
+    let more_word = nikgob_core::i18n::common().more;
     let album = r.album.as_deref().filter(|a| !a.is_empty());
     let what = match (under, r.scope, album) {
-        (Under::Album, WishlistScope::Album, _) => "весь альбом".to_owned(),
+        (Under::Album, WishlistScope::Album, _) => d.whole_album.to_owned(),
         (Under::Album, ..) => String::new(),
-        (Under::Artist, WishlistScope::Album, _) => "альбом".to_owned(),
+        (Under::Artist, WishlistScope::Album, _) => d.album.to_owned(),
         (Under::Artist, _, Some(a)) => a.to_owned(),
         (Under::Artist, _, None) => String::new(),
-        (Under::Nothing, WishlistScope::Album, _) => format!("альбом · {}", r.artist),
+        (Under::Nothing, WishlistScope::Album, _) => format!("{} · {}", d.album, r.artist),
         (Under::Nothing, _, Some(a)) => format!("{} · {a}", r.artist),
         (Under::Nothing, _, None) => r.artist.clone(),
     };
@@ -403,11 +417,11 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 if r.status != St::Dismissed {
-                    more = Some(ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("wish-more", id))));
+                    more = Some(ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip(more_word).id_salt(("wish-more", id))));
                 }
                 match r.status {
                     St::Waiting if torrents => {
-                        if ui.add(Button::new("Скачать").style(Style::Tonal).size(Size::S).id_salt(("wish-dl", id))).clicked() {
+                        if ui.add(Button::new(d.download).style(Style::Tonal).size(Size::S).id_salt(("wish-dl", id))).clicked() {
                             out.push(Command::WishlistDownload(WishlistSelect::Items(vec![id])));
                         }
                     }
@@ -415,7 +429,7 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
                         save_button(ui, id, out);
                     }
                     St::Confirm => {
-                        if ui.add(Button::new("Проверить").style(Style::Tonal).size(Size::S).id_salt(("wish-confirm", id))).clicked() {
+                        if ui.add(Button::new(d.check).style(Style::Tonal).size(Size::S).id_salt(("wish-confirm", id))).clicked() {
                             pages.downloads_tab = super::downloads::tab_index(nikgob_view::DownloadsTab::Confirm);
                         }
                     }
@@ -428,20 +442,20 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
                         let can_save = r.can_save_from_youtube && !r.has_copy;
                         let save = !torrents && can_save;
                         let (main, other) = if save {
-                            ("Сохранить с YouTube", MenuItem::new("Искать снова").icon(Icon::Refresh))
+                            (d.save_from_youtube, MenuItem::new(d.search_again).icon(Icon::Refresh))
                         } else {
-                            ("Искать снова", MenuItem::new("Сохранить с YouTube").icon(Icon::Download).enabled(can_save))
+                            (d.search_again, MenuItem::new(d.save_from_youtube).icon(Icon::Download).enabled(can_save))
                         };
                         let o = SplitButton::new(("wish-split", id), main)
                             .size(Size::S)
                             .style(Style::Tonal)
-                            .item(MenuItem::new("Свой .torrent…").icon(Icon::AttachFile))
-                            .item(MenuItem::new("Magnet-ссылка…").icon(Icon::Link))
-                            .item(MenuItem::new("Свой файл…").icon(Icon::UploadFile))
-                            .item(MenuItem::new("Папка с альбомом…").icon(Icon::Folder))
+                            .item(MenuItem::new(d.own_torrent).icon(Icon::AttachFile))
+                            .item(MenuItem::new(d.magnet_link).icon(Icon::Link))
+                            .item(MenuItem::new(d.own_file).icon(Icon::UploadFile))
+                            .item(MenuItem::new(d.album_folder).icon(Icon::Folder))
                             .item(other)
-                            .item(MenuItem::new("Не качать").icon(Icon::Block))
-                            .trigger_tooltip("Другие способы")
+                            .item(MenuItem::new(d.dont_download).icon(Icon::Block))
+                            .trigger_tooltip(d.other_ways)
                             .show(ui);
                         let (on_main, on_other) = if save {
                             (Command::WishlistSaveFromYoutube(id), Command::WishlistRetry(id))
@@ -457,7 +471,7 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
                         }
                     }
                     St::Dismissed => {
-                        let back = ui.add(Button::new("Вернуть").style(Style::Text).size(Size::S).id_salt(("wish-restore", id)));
+                        let back = ui.add(Button::new(d.restore).style(Style::Text).size(Size::S).id_salt(("wish-restore", id)));
                         if back.clicked() {
                             out.push(Command::WishlistRestore(vec![id]));
                         }
@@ -473,10 +487,10 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
             (Some(t), _) if r.scope == WishlistScope::Track => out.push(Command::PlayTracks {
                 tracks: vec![t],
                 start: 0,
-                context: "«Хочу скачать»".into(),
+                context: d.play_context.into(),
             }),
             (_, Some(rel)) => out.push(Command::PlayRelease { id: rel, start: None, shuffle: false }),
-            (Some(t), None) => out.push(Command::PlayTracks { tracks: vec![t], start: 0, context: "«Хочу скачать»".into() }),
+            (Some(t), None) => out.push(Command::PlayTracks { tracks: vec![t], start: 0, context: d.play_context.into() }),
             _ => {}
         }
     }
@@ -533,26 +547,27 @@ enum WishAct {
 fn wish_rows(r: &WishlistRow) -> Vec<widgets::Row<WishAct>> {
     use WishAct as A;
     use widgets::Row;
+    let d = nikgob_core::i18n::downloads();
     let mut rows = Vec::new();
     if matches!(r.status, St::Waiting | St::NoTorrent | St::Failed) {
-        rows.push(Row::Item(A::Download, MenuItem::new("Скачать").icon(Icon::Download)));
+        rows.push(Row::Item(A::Download, MenuItem::new(d.download).icon(Icon::Download)));
     }
     if r.status != St::Downloading {
-        rows.push(Row::Item(A::Retry, MenuItem::new("Искать снова").icon(Icon::Refresh)));
+        rows.push(Row::Item(A::Retry, MenuItem::new(d.search_again).icon(Icon::Refresh)));
     }
     if r.scope == WishlistScope::Track && r.release.is_some() {
-        rows.push(Row::Item(A::Album, MenuItem::new("Скачать альбом").icon(Icon::Album)));
+        rows.push(Row::Item(A::Album, MenuItem::new(d.download_album).icon(Icon::Album)));
     }
     rows.push(Row::Divider);
     if r.can_save_from_youtube {
-        rows.push(Row::Item(A::Youtube, MenuItem::new("Сохранить с YouTube").icon(Icon::Download)));
+        rows.push(Row::Item(A::Youtube, MenuItem::new(d.save_from_youtube).icon(Icon::Download)));
     }
-    rows.push(Row::Item(A::Torrent, MenuItem::new("Свой .torrent…").icon(Icon::AttachFile)));
-    rows.push(Row::Item(A::Magnet, MenuItem::new("Magnet-ссылка…").icon(Icon::Link)));
-    rows.push(Row::Item(A::File, MenuItem::new("Свой файл…").icon(Icon::UploadFile)));
-    rows.push(Row::Item(A::Folder, MenuItem::new("Папка с альбомом…").icon(Icon::Folder)));
+    rows.push(Row::Item(A::Torrent, MenuItem::new(d.own_torrent).icon(Icon::AttachFile)));
+    rows.push(Row::Item(A::Magnet, MenuItem::new(d.magnet_link).icon(Icon::Link)));
+    rows.push(Row::Item(A::File, MenuItem::new(d.own_file).icon(Icon::UploadFile)));
+    rows.push(Row::Item(A::Folder, MenuItem::new(d.album_folder).icon(Icon::Folder)));
     rows.push(Row::Divider);
-    rows.push(Row::Item(A::Dismiss, MenuItem::new("Не качать").icon(Icon::Block)));
+    rows.push(Row::Item(A::Dismiss, MenuItem::new(d.dont_download).icon(Icon::Block)));
     rows
 }
 
@@ -560,24 +575,25 @@ fn wish_rows(r: &WishlistRow) -> Vec<widgets::Row<WishAct>> {
 /// dismiss (the split button's menu maps onto these from 0).
 fn attach_pick(i: usize, r: &WishlistRow, pages: &mut PageState, out: &mut Vec<Command>) {
     let id = r.id;
+    let d = nikgob_core::i18n::downloads();
     match i {
         3 => super::dialogs::file(
-            |d| d.set_title("Свой .torrent для этого трека").add_filter("Торрент", &["torrent"]),
+            |dlg| dlg.set_title(d.torrent_dialog_title).add_filter(d.torrent_filter, &["torrent"]),
             move |f| Command::WishlistAttach { item: id, what: WishlistAttach::TorrentFile(f) },
             out,
         ),
         4 => pages.open_ask(Ask::WishMagnet(id)),
         5 => super::dialogs::files(
-            |d| {
-                d.set_title("Файл этого трека")
-                    .add_filter("Музыка", &["flac", "wav", "alac", "aiff", "mp3", "m4a", "ogg", "opus"])
+            |dlg| {
+                dlg.set_title(d.track_file_dialog_title)
+                    .add_filter(d.music_filter, &["flac", "wav", "alac", "aiff", "mp3", "m4a", "ogg", "opus"])
             },
             move |files| Command::WishlistAttach { item: id, what: WishlistAttach::Files(files) },
             out,
         ),
         6 => super::dialogs::folder(
-            |d| d.set_title("Папка с альбомом"),
-            move |d| Command::WishlistAttach { item: id, what: WishlistAttach::Folder(d) },
+            |dlg| dlg.set_title(d.album_folder_dialog_title),
+            move |dir| Command::WishlistAttach { item: id, what: WishlistAttach::Folder(dir) },
             out,
         ),
         7 => out.push(Command::WishlistRetry(id)),
@@ -588,9 +604,10 @@ fn attach_pick(i: usize, r: &WishlistRow, pages: &mut PageState, out: &mut Vec<C
 
 /// «Сохранить с YouTube» while nothing else can download it.
 fn save_button(ui: &mut Ui, id: WishlistId, out: &mut Vec<Command>) {
+    let d = nikgob_core::i18n::downloads();
     if ui
-        .add(Button::new("Сохранить с YouTube").style(Style::Tonal).size(Size::S).id_salt(("wish-yt", id)))
-        .on_hover_text("Аудио как есть (Opus ~160 кбит/с, качество пониже); найденное потом заменит его")
+        .add(Button::new(d.save_from_youtube).style(Style::Tonal).size(Size::S).id_salt(("wish-yt", id)))
+        .on_hover_text(d.save_from_youtube_hint)
         .clicked()
     {
         out.push(Command::WishlistSaveFromYoutube(id));

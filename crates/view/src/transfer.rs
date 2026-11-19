@@ -2,7 +2,19 @@
 //! its row, «Хочу скачать» the line of the item it is for. Both read the one
 //! [`Transfer`], so the percent, the bytes and the queue place never differ.
 
+use nikgob_core::i18n::{Locale, locale};
+use nikgob_core::i18n::status::{fmt_amount_in, fmt_paused_in, fmt_queued_in, fmt_rate_in, fmt_size_in};
+
 use crate::{Job, size_ru};
+
+/// A size as these lines say it: the Russian words exactly as before in
+/// Russian, the locale's units otherwise.
+fn size_in(loc: Locale, bytes: u64) -> String {
+    match loc {
+        Locale::Ru => size_ru(bytes),
+        Locale::En => fmt_size_in(loc, bytes),
+    }
+}
 
 /// Where a running download is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -57,56 +69,76 @@ impl Transfer {
 
     /// «1,2 МБ/с» while bytes come.
     pub fn rate(&self) -> Option<String> {
-        (self.phase == TransferPhase::Going && self.bps > 0).then(|| format!("{}/с", size_ru(self.bps)))
+        self.rate_in(locale())
+    }
+
+    /// [`Self::rate`] in `loc`.
+    pub fn rate_in(&self, loc: Locale) -> Option<String> {
+        (self.phase == TransferPhase::Going && self.bps > 0).then(|| fmt_rate_in(loc, &size_in(loc, self.bps)))
     }
 
     /// How long the rest takes at this speed («51 с», «3 мин»).
     pub fn eta(&self) -> Option<String> {
+        self.eta_in(locale())
+    }
+
+    /// [`Self::eta`] in `loc`.
+    pub fn eta_in(&self, loc: Locale) -> Option<String> {
         if self.phase != TransferPhase::Going || self.bps == 0 {
             return None;
         }
         let left = self.total?.saturating_sub(self.done);
-        (left > 0).then(|| eta_ru(left.div_ceil(self.bps)))
+        (left > 0).then(|| eta_in(loc, left.div_ceil(self.bps)))
     }
 
     /// The bytes and the percent: «12,3 МБ из 33,1 МБ · 37%».
-    fn amount(&self) -> String {
-        match (self.total.filter(|t| *t > 0), self.percent()) {
-            (Some(t), Some(p)) => format!("{} из {} · {p}%", size_ru(self.done), size_ru(t)),
-            _ => size_ru(self.done),
-        }
+    fn amount_in(&self, loc: Locale) -> String {
+        let total = self.total.filter(|t| *t > 0).map(|t| size_in(loc, t));
+        fmt_amount_in(loc, &size_in(loc, self.done), total.as_deref(), self.percent())
     }
 
     /// The supporting line of its row in «Активные»; `from`: who gives it
     /// (a peer, a site), when that is not its title already.
     pub fn line(&self, from: Option<&str>) -> String {
+        self.line_in(locale(), from)
+    }
+
+    /// [`Self::line`] in `loc`.
+    pub fn line_in(&self, loc: Locale, from: Option<&str>) -> String {
+        let s = nikgob_core::i18n::status_in(loc);
         let with = |words: String| match from {
             Some(f) if !f.is_empty() => format!("{f} · {words}"),
             _ => words,
         };
         match self.phase {
-            TransferPhase::Starting => with("качается".into()),
-            TransferPhase::Connecting => with("соединяюсь".into()),
-            TransferPhase::Queued(place) => queued(from, place),
-            TransferPhase::Going => with(self.amount()),
-            TransferPhase::Paused => with(format!("на паузе · {}", self.amount())),
-            TransferPhase::Importing => with("добавляю в библиотеку".into()),
+            TransferPhase::Starting => with(s.downloading.to_owned()),
+            TransferPhase::Connecting => with(s.connecting.to_owned()),
+            TransferPhase::Queued(place) => fmt_queued_in(loc, from, place),
+            TransferPhase::Going => with(self.amount_in(loc)),
+            TransferPhase::Paused => with(fmt_paused_in(loc, &self.amount_in(loc))),
+            TransferPhase::Importing => with(s.importing.to_owned()),
         }
     }
 
     /// The words of its item in «Хочу скачать»: «качается · mugilaw ·
     /// 37%», «в очереди у mugilaw · 12-й».
     pub fn status(&self, from: Option<&str>) -> String {
+        self.status_in(locale(), from)
+    }
+
+    /// [`Self::status`] in `loc`.
+    pub fn status_in(&self, loc: Locale, from: Option<&str>) -> String {
+        let s = nikgob_core::i18n::status_in(loc);
         let from = from.filter(|f| !f.is_empty());
         match self.phase {
-            TransferPhase::Queued(place) => queued(from, place),
-            TransferPhase::Importing => "добавляю в библиотеку".into(),
+            TransferPhase::Queued(place) => fmt_queued_in(loc, from, place),
+            TransferPhase::Importing => s.importing.to_owned(),
             TransferPhase::Paused => match self.percent() {
-                Some(p) => format!("на паузе · {p}%"),
-                None => "на паузе".into(),
+                Some(p) => format!("{} · {p}%", s.paused),
+                None => s.paused.to_owned(),
             },
             TransferPhase::Starting | TransferPhase::Connecting | TransferPhase::Going => {
-                let mut parts = vec!["качается".to_owned()];
+                let mut parts = vec![s.downloading.to_owned()];
                 parts.extend(from.map(str::to_owned));
                 parts.extend(self.percent().map(|p| format!("{p}%")));
                 parts.join(" · ")
@@ -118,18 +150,23 @@ impl Transfer {
     /// it («Soulseek» and the peer). `controllable`: ✕ cancels it;
     /// `pausable`: it can be paused too.
     pub fn job(&self, id: u64, title: String, via: Option<&str>, from: Option<&str>, controllable: bool, pausable: bool) -> Job {
+        self.job_in(locale(), id, title, via, from, controllable, pausable)
+    }
+
+    /// [`Self::job`] in `loc`.
+    pub fn job_in(&self, loc: Locale, id: u64, title: String, via: Option<&str>, from: Option<&str>, controllable: bool, pausable: bool) -> Job {
         let waiting = matches!(self.phase, TransferPhase::Queued(_));
         let subtitle = match via.filter(|v| !v.is_empty()) {
-            Some(v) => format!("{v} · {}", self.line(from)),
-            None => self.line(from),
+            Some(v) => format!("{v} · {}", self.line_in(loc, from)),
+            None => self.line_in(loc, from),
         };
         Job {
             id,
             title,
             subtitle,
             progress: if waiting { None } else { self.fraction() },
-            rate: self.rate(),
-            eta: self.eta(),
+            rate: self.rate_in(loc),
+            eta: self.eta_in(loc),
             paused: self.phase == TransferPhase::Paused,
             queued: waiting,
             controllable,
@@ -140,27 +177,14 @@ impl Transfer {
     }
 }
 
-/// «в очереди у mugilaw · 12-й».
-fn queued(from: Option<&str>, place: Option<u32>) -> String {
-    let mut s = match from {
-        Some(f) if !f.is_empty() => format!("в очереди у {f}"),
-        _ => "в очереди".to_owned(),
-    };
-    if let Some(n) = place.filter(|n| *n > 0) {
-        s.push_str(&format!(" · {n}-й"));
-    }
-    s
+/// A time left: «51 с», «3 мин», «1 ч 5 мин».
+pub fn eta_in(loc: Locale, secs: u64) -> String {
+    nikgob_core::i18n::status::eta_in(loc, secs)
 }
 
-/// A time left: «51 с», «3 мин», «1 ч 5 мин».
+/// A time left in Russian (callers that have no locale at hand).
 pub fn eta_ru(secs: u64) -> String {
-    if secs >= 3600 {
-        format!("{} ч {} мин", secs / 3600, secs % 3600 / 60)
-    } else if secs >= 60 {
-        format!("{} мин", secs / 60)
-    } else {
-        format!("{secs} с")
-    }
+    eta_in(Locale::Ru, secs)
 }
 
 #[cfg(test)]
@@ -227,5 +251,23 @@ mod tests {
         assert_eq!(s.job(1, "x".into(), None, None, true, false).progress, None);
         let c = Transfer { phase: TransferPhase::Connecting, ..s };
         assert_eq!(c.line(Some("mugilaw")), "mugilaw · соединяюсь");
+    }
+
+    /// The same numbers in the other locale: the words are the only change.
+    #[test]
+    fn the_lines_say_it_in_english_too() {
+        let t = going(37 * MB, 100 * MB, MB);
+        assert_eq!(t.line_in(Locale::En, Some("mugilaw")), "mugilaw · 37 MB of 100 MB · 37%");
+        assert_eq!(t.status_in(Locale::En, Some("mugilaw")), "downloading · mugilaw · 37%");
+        let queued = Transfer { phase: TransferPhase::Queued(Some(12)), done: 0, total: Some(30 * MB), bps: 0 };
+        assert_eq!(queued.line_in(Locale::En, Some("rotted")), "queued at rotted · #12");
+        let paused = Transfer { phase: TransferPhase::Paused, ..t };
+        assert_eq!(paused.status_in(Locale::En, None), "paused · 37%");
+        assert_eq!(paused.rate_in(Locale::En), None, "a paused one comes at no speed");
+        assert_eq!(eta_in(Locale::En, 3_900), "1 hr 5 min");
+        let job = t.job_in(Locale::En, 1, "x".into(), Some("Soulseek"), Some("rotted"), true, false);
+        assert_eq!(job.subtitle, "Soulseek · rotted · 37 MB of 100 MB · 37%");
+        assert_eq!(job.rate.as_deref(), Some("1.0 MB/s"));
+        assert_eq!(job.eta.as_deref(), Some("1 min"));
     }
 }

@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use nikgob_core::i18n::{Locale, status_in};
 use nikgob_core::model::{
     Master, ReleaseId, SourceId, SourceOrigin, Track, TrackId, WishlistId, WishlistItem, WishlistOrigin, WishlistScope,
     WishlistStatus, quality_score, score,
@@ -176,19 +177,24 @@ pub(crate) fn replace_targets(plan: &[PlanRow], release: ReleaseId, item: Wishli
 
 /// The «Подтверди» card of a copy that waits: every track it replaces the
 /// file of and with what; nothing to choose, «Заменить» or not.
-pub(crate) fn album_card(id: u64, title: String, plan: &[PlanRow]) -> v::Confirm {
+pub(crate) fn album_card(id: u64, title: String, plan: &[PlanRow], loc: Locale) -> v::Confirm {
+    let strings = status_in(loc);
     v::Confirm {
         yes_no: true,
         id,
         title,
-        origin: "Качество лучше · альбом".into(),
-        question: "Заменить файлы этих треков?".into(),
+        origin: strings.better_album.into(),
+        question: strings.replace_tracks_question.into(),
         options: plan
             .iter()
-            .map(|r| v::ConfirmOption { label: r.title.clone(), detail: format!("{} вместо {}", r.to, r.have), recommended: false })
+            .map(|r| v::ConfirmOption {
+                label: r.title.clone(),
+                detail: nikgob_core::i18n::status::fmt_instead_of_in(loc, &r.to, &r.have),
+                recommended: false,
+            })
             .collect(),
-        skip_label: "Оставить как есть".into(),
-        accept_label: "Заменить".into(),
+        skip_label: strings.keep_as_is.into(),
+        accept_label: strings.replace.into(),
         pick: None,
     }
 }
@@ -226,7 +232,7 @@ impl Worker {
                     self.upgrade_drop(i.id);
                 }
             }
-            self.toast_info(format!("Лучше не нашёл: {name}"), None);
+            self.toast_info(nikgob_core::i18n::ErrorStrings::fmt_better_not_found_in(self.locale(), &name), None);
             return;
         }
         // Something of the album on its way or waiting in «Подтверди».
@@ -240,11 +246,17 @@ impl Worker {
             return;
         }
         if self.import.is_none() {
-            self.toast_err("Импорт недоступен", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).import_unavailable, None);
             return;
         }
         if !self.can_download() {
-            self.toast_open(v::ToastKind::Error, "Нужен источник скачивания", "Настроить", v::Link::Setting(v::SettingLink::Torrents));
+            let loc = self.locale();
+            self.toast_open(
+                v::ToastKind::Error,
+                nikgob_core::i18n::errors_in(loc).need_download_source,
+                nikgob_core::i18n::downloads_in(loc).set_up,
+                v::Link::Setting(v::SettingLink::Torrents),
+            );
             return;
         }
         // An offer must beat its worst file at least; each track then takes
@@ -281,7 +293,13 @@ impl Worker {
         self.put_item(&item);
         log::info!("upgrade: the user asks for a better copy of {name}: {} of its files can get one (worst {floor})", can.len());
         let wishlist = v::Link::Route(v::Route::Downloads(v::DownloadsTab::Wishlist));
-        self.toast_open(v::ToastKind::Working, format!("Ищу качество лучше: «{}»", r.title), "Открыть", wishlist);
+        let loc = self.locale();
+        self.toast_open(
+            v::ToastKind::Working,
+            nikgob_core::i18n::ErrorStrings::fmt_searching_better_in(loc, &r.title),
+            nikgob_core::i18n::common_in(loc).open,
+            wishlist,
+        );
         self.streaming.wish.upgrade_runs.push(Instant::now());
         self.wish_search(item);
         self.publish_wishlist();
@@ -393,10 +411,11 @@ impl Worker {
             .collect();
         let plan = plan_of(&slots, &files);
         let title = self.item_title(id);
+        let loc = self.locale();
         if plan.is_empty() {
             log::info!("upgrade: nothing of the {} files that came for {title} is better than the album's", files.len());
             self.album_files_go(id, &origin);
-            self.wish_line(id, title, "Скачанное не лучше прежних файлов — оставил их".into(), None);
+            self.wish_line(id, title, nikgob_core::i18n::status::fmt_nothing_better_in(loc), None);
             if matches!(self.wish_next_candidate(id), Next::NotFound) {
                 self.upgrade_none(id, true);
             }
@@ -411,8 +430,12 @@ impl Worker {
             i.status = WishlistStatus::Confirm;
             i.next_try_at = None;
         });
-        let what = crate::streams::plural(n, "трека", "треков", "треков");
-        self.wish_line(id, title, format!("Нашёл качество лучше для {n} {what} · подтверди замену в «Подтверди»"), None);
+        let what = nikgob_core::i18n::status::fmt_better_found_in(
+            loc,
+            n as u64,
+            nikgob_core::i18n::downloads_in(loc).tab_confirm,
+        );
+        self.wish_line(id, title, what, None);
         self.publish_wishlist();
     }
 
@@ -423,7 +446,7 @@ impl Worker {
             Some(r) => format!("{} — {}", r.title, r.artist_credit.display()),
             None => item.title.clone().unwrap_or_default(),
         };
-        Some(album_card(id, title, &st.plan))
+        Some(album_card(id, title, &st.plan, self.locale()))
     }
 
     /// The answer of the card of `id`, when it is a copy of an album that
@@ -451,7 +474,7 @@ impl Worker {
         self.set_item(id, |i| {
             i.status = WishlistStatus::Dismissed;
             i.next_try_at = None;
-            i.note = Some("Оставил прежние файлы".into());
+            i.note = Some(nikgob_core::i18n::status::WishNote::KeptFiles.code().to_owned());
         });
         self.wish_line_drop(id);
     }
@@ -465,7 +488,7 @@ impl Worker {
         let plan: Vec<PlanRow> = st.plan.into_iter().filter(|r| r.path.exists()).collect();
         if plan.is_empty() {
             log::warn!("upgrade: the files of the copy for {} are gone, it looks again", self.item_title(id));
-            self.toast_err("Скачанные файлы пропали — поищу снова", None);
+            self.toast_err(nikgob_core::i18n::errors_in(self.locale()).files_gone, None);
             self.wish_retry(id);
             return;
         }
@@ -486,7 +509,8 @@ impl Worker {
             return;
         }
         let targets = replace_targets(&rows, st.release, id, self.streaming.wish.offer_keys.get(&id).cloned());
-        let title = format!("Качество лучше: {}", self.item_title(id));
+        let loc = self.locale();
+        let title = nikgob_core::i18n::status::fmt_better_import_title_in(loc, &self.item_title(id));
         let files: Vec<PathBuf> = rows.iter().map(|r| r.path.clone()).collect();
         if self.import_for(files, title, st.origin, targets) {
             self.streaming.wish.album.replacing.insert(id, Replacing { release: st.release, before });
@@ -526,11 +550,12 @@ impl Worker {
         if item.status != WishlistStatus::Done {
             self.upgrade_done(item);
         }
-        let what = crate::streams::plural(n, "файл", "файла", "файлов");
+        let loc = self.locale();
+        let what = nikgob_core::i18n::plural_forms(loc, n as u64, &status_in(loc).files_plural);
         let undo = self.undo_action(Command::UndoBetterAlbum(rep.release));
         self.push_toast(
             v::ToastKind::Success,
-            format!("«{album}»: заменил {n} {what} · прежние в Корзине"),
+            nikgob_core::i18n::ErrorStrings::fmt_album_replaced_in(loc, &album, n, what),
             Some(undo),
             None,
             true,
@@ -571,21 +596,24 @@ impl Worker {
     /// said, and its item is turned down, not looked for again by itself.
     pub(super) fn album_restored(&mut self, release: ReleaseId, done: usize, failed: usize, left: Vec<Replacement>) {
         log::info!("upgrade: {done} files of {release} are back, {failed} not");
-        let retry = (!left.is_empty()).then(|| ("Повторить".to_owned(), Command::UndoBetterAlbum(release)));
+        let loc = self.locale();
+        let retry = (!left.is_empty()).then(|| {
+            (nikgob_core::i18n::common_in(loc).retry.to_owned(), Command::UndoBetterAlbum(release))
+        });
         if !left.is_empty() {
             self.streaming.wish.album.undo.insert(release, left);
         }
         if failed == 0 {
-            self.toast_ok(format!("Вернул прежние файлы: {done}"), None);
+            self.toast_ok(nikgob_core::i18n::ErrorStrings::fmt_files_back_in(loc, done), None);
         } else {
-            self.toast_err(format!("Вернул прежние файлы: {done}, не получилось: {failed}"), retry);
+            self.toast_err(nikgob_core::i18n::ErrorStrings::fmt_files_back_partly_in(loc, done, failed), retry);
         }
         for i in self.lib.wishlist_for_release(release).unwrap_or_default() {
             if i.origin == WishlistOrigin::Upgrade && i.scope == WishlistScope::Album && done > 0 {
                 self.set_item(i.id, |i| {
                     i.status = WishlistStatus::Dismissed;
                     i.next_try_at = None;
-                    i.note = Some("Вернул прежние файлы".into());
+                    i.note = Some(nikgob_core::i18n::status::WishNote::FilesBack.code().to_owned());
                 });
             }
         }
@@ -774,11 +802,14 @@ mod tests {
             have: "MP3 128".into(),
             to: "FLAC".into(),
         }];
-        let card = album_card(7, "Сахарный — SugaRiddle".into(), &plan);
+        let card = album_card(7, "Сахарный — SugaRiddle".into(), &plan, Locale::Ru);
         assert!(card.yes_no && card.pick.is_none());
         assert_eq!(card.options[0].label, "1. Интро");
         assert_eq!(card.options[0].detail, "FLAC вместо MP3 128");
         assert!(!card.options[0].recommended, "never accepted with the recommended ones");
         assert_eq!((card.accept_label.as_str(), card.skip_label.as_str()), ("Заменить", "Оставить как есть"));
+        let en = album_card(7, "x".into(), &plan, Locale::En);
+        assert_eq!(en.options[0].detail, "FLAC instead of MP3 128");
+        assert_eq!((en.accept_label.as_str(), en.skip_label.as_str()), ("Replace", "Keep as is"));
     }
 }

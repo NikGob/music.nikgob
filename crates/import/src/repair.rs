@@ -434,7 +434,7 @@ impl Importer {
             let Some(r) = wished_release(lib, &item)?.map(|r| r.id) else { continue };
             let (have, all) = release_files(lib, r)?;
             if all > 0 && have == all && touched.iter().any(|t| lib.get_track(*t).ok().flatten().and_then(|t| t.release_id) == Some(r)) {
-                lib.set_wishlist_status(item.id, WishlistStatus::Done, Some("Скачано"))?;
+                lib.set_wishlist_status(item.id, WishlistStatus::Done, Some(nikgob_core::i18n::status::NOTE_DONE))?;
                 report.wishlist_done.push(item.title.clone().unwrap_or_default());
             }
         }
