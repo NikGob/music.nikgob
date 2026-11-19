@@ -1082,7 +1082,7 @@ fn fmt_no_better_in(loc: Locale, q: &QualityWords) -> String {
             }
             (Locale::Ru, false) => {
                 let from = kbps.map_or_else(|| "сжатого".to_owned(), |k| format!("MP3 {k}"));
-                format!("скачанный {name}, возможно, из {from} — оставил прежний файл")
+                format!("скачанный {name}, возможно из {from} — оставил прежний файл")
             }
             (Locale::En, false) => {
                 let from = kbps.map_or_else(|| "lossy".to_owned(), |k| format!("MP3 {k}"));
@@ -2093,7 +2093,7 @@ mod tests {
         );
         assert_eq!(
             fmt_upgrade_job_words_in(Locale::Ru, 0, 1, 0, 0, Some(&flac(unsure))),
-            "скачанный FLAC, возможно, из MP3 320 — оставил прежний файл"
+            "скачанный FLAC, возможно из MP3 320 — оставил прежний файл"
         );
         assert_eq!(
             fmt_upgrade_job_words_in(Locale::Ru, 0, 1, 0, 0, Some(&flac(lossy))),

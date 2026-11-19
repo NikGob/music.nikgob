@@ -334,7 +334,21 @@ fn import_summary_in(text: &str, loc: Locale) -> Option<StoredLine> {
 /// What an import done for a better copy came to («заменено 3 · не лучше
 /// прежних 1 · не из этого альбома 2»).
 fn upgrade_summary_in(text: &str, loc: Locale) -> Option<StoredLine> {
-    if text == fmt_upgrade_job_words_in(loc, 0, 0, 0, 0, None) {
+    let nothing = fmt_upgrade_job_words_in(loc, 0, 0, 0, 0, None);
+    if let Some(rest) = text.strip_prefix(nothing.as_str()).and_then(|rest| rest.strip_prefix(" · ")) {
+        // «ничего не пришло · отправлено на подтверждение 4»: no part came,
+        // and only the parked count follows the words that say so.
+        let pending = number(rest, &fmt_parked_in(loc, NUM))?;
+        return Some(StoredLine::UpgradeSummary {
+            imported: 0,
+            duplicates: 0,
+            left_out: 0,
+            failed: 0,
+            pending,
+            dup: None,
+        });
+    }
+    if text == nothing {
         return Some(StoredLine::UpgradeSummary {
             imported: 0,
             duplicates: 0,
@@ -393,8 +407,11 @@ fn upgrade_summary_in(text: &str, loc: Locale) -> Option<StoredLine> {
 /// no better really is.
 fn dup_in(text: &str, imported: usize, loc: Locale) -> Option<(usize, Option<QualityWords>)> {
     if imported > 0 {
-        // «не лучше прежних 2» names no quality.
-        let n = (1..=99).find(|n| fmt_upgrade_job_words_in(loc, imported, *n, 0, 0, None) == text)?;
+        // «не лучше прежних 2» names no quality: the segment is that part
+        // alone, while the words before it name the replaced files.
+        let sample = fmt_upgrade_job_words_in(loc, 1, NUM, 0, 0, None);
+        let (_, part) = sample.split_once(" · ")?;
+        let n = number(text, part)?;
         return Some((n, None));
     }
     if let Some(n) = (2..=99).find(|n| fmt_upgrade_job_words_in(loc, 0, *n, 0, 0, None) == text) {
@@ -646,8 +663,8 @@ fn search_again_in(text: &str, loc: Locale) -> Option<StoredLine> {
 
 /// «в 21:40» or «через 5 мин».
 fn at_words(text: &str, loc: Locale) -> Option<AtWords> {
-    if is_hm(text) {
-        return Some(AtWords { hm: Some(text.to_owned()), mins: 0 });
+    if let Some(hm) = one(text, &fmt_at_time_in(loc, Some(MARK), 0)) {
+        return is_hm(&hm).then_some(AtWords { hm: Some(hm), mins: 0 });
     }
     let mins = number(text, &fmt_at_time_in(loc, None, NUM as u64))?;
     Some(AtWords { hm: None, mins: mins as u64 })
@@ -1340,6 +1357,7 @@ mod tests {
             "скачанное не лучше прежнего (2) — оставил прежние файлы",
             "скачанное не из этого альбома — ничего не добавил",
             "ничего не пришло",
+            "ничего не пришло · отправлено на подтверждение 4",
             "Скачанный FLAC оказался из MP3 ~128 — оставил прежний файл · дальше — Qobuz",
             "Скачанный файл не лучше прежнего — оставил прежний · есть другие варианты — в «Подтверди»",
             "перенесено 3 · проверено BLAKE3 → D:\\flac",

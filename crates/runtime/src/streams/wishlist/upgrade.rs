@@ -1125,7 +1125,7 @@ mod tests {
         );
         let mp3 = Some(QualityWords::Label { codec: Codec::Mp3, bitrate_kbps: Some(320), check: None });
         assert_eq!(w(plain(mp3)), "скачанный MP3 320 не лучше прежнего — оставил прежний файл");
-        assert_eq!(w(plain(dup(unsure))), "скачанный FLAC, возможно, из MP3 320 — оставил прежний файл");
+        assert_eq!(w(plain(dup(unsure))), "скачанный FLAC, возможно из MP3 320 — оставил прежний файл");
         let summary = |imported, duplicates, left_out| StoredLine::UpgradeSummary {
             imported,
             duplicates,
