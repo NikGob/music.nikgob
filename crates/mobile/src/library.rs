@@ -10,6 +10,7 @@
 use egui::{Context, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use nikgob_md3e::components::{BottomSheet, Button, ConnectedGroup, FilterChip, IconButton, Size, Style, TextInputDialog, TextInputResult};
 use nikgob_md3e::{Icon, Theme, TypeRole};
+use nikgob_core::i18n::{Locale, common, locale, mobile, mobile_in};
 use nikgob_view::{Command, LIKED_PLAYLIST, LibraryTab, ReleaseSort, Route, TrackSort, ViewState};
 
 use crate::parts::{self, PageOut, Picture};
@@ -19,28 +20,43 @@ use crate::{PageFrame, text};
 const TRACK_SORTS: [TrackSort; 5] = [TrackSort::Artist, TrackSort::Title, TrackSort::Album, TrackSort::Added, TrackSort::Duration];
 const RELEASE_SORTS: [ReleaseSort; 4] = [ReleaseSort::Artist, ReleaseSort::Title, ReleaseSort::Year, ReleaseSort::Added];
 
-fn track_sort_label(s: TrackSort) -> &'static str {
+/// The sort a track list offers, in `loc`.
+fn track_sort_label_in(loc: Locale, s: TrackSort) -> &'static str {
+    let m = mobile_in(loc);
     match s {
-        TrackSort::Artist => "По исполнителю",
-        TrackSort::Title => "По названию",
-        TrackSort::Album => "По альбому",
-        TrackSort::Added => "Недавно добавленные",
-        TrackSort::Duration => "По длительности",
+        TrackSort::Artist => m.sort_by_artist,
+        TrackSort::Title => m.sort_by_title,
+        TrackSort::Album => m.sort_by_album,
+        TrackSort::Added => m.sort_recently_added,
+        TrackSort::Duration => m.sort_by_duration,
     }
 }
 
-fn release_sort_label(s: ReleaseSort) -> &'static str {
+/// The sort an album list offers, in `loc`.
+fn release_sort_label_in(loc: Locale, s: ReleaseSort) -> &'static str {
+    let m = mobile_in(loc);
     match s {
-        ReleaseSort::Artist => "По исполнителю",
-        ReleaseSort::Title => "По названию",
-        ReleaseSort::Year => "По году",
-        ReleaseSort::Added => "Недавно добавленные",
+        ReleaseSort::Artist => m.sort_by_artist,
+        ReleaseSort::Title => m.sort_by_title,
+        ReleaseSort::Year => m.sort_by_year,
+        ReleaseSort::Added => m.sort_recently_added,
     }
 }
 
 /// The chips, in their order.
-const CHIPS: [(LibraryTab, &str); 4] =
-    [(LibraryTab::Playlists, "Плейлисты"), (LibraryTab::Albums, "Альбомы"), (LibraryTab::Artists, "Исполнители"), (LibraryTab::Tracks, "Треки")];
+const CHIP_TABS: [LibraryTab; 4] = [LibraryTab::Playlists, LibraryTab::Albums, LibraryTab::Artists, LibraryTab::Tracks];
+
+/// A chip's label in `loc`.
+const fn chip_label_in(loc: Locale, tab: LibraryTab) -> &'static str {
+    let m = mobile_in(loc);
+    match tab {
+        LibraryTab::Playlists => m.chip_playlists,
+        LibraryTab::Albums => m.chip_albums,
+        LibraryTab::Artists => m.chip_artists,
+        LibraryTab::Tracks => m.chip_tracks,
+        _ => "",
+    }
+}
 
 #[derive(Default)]
 pub struct Library {
@@ -61,7 +77,7 @@ impl Library {
 
     /// A route asked for this chip (`All`: none).
     pub fn set_tab(&mut self, tab: LibraryTab) {
-        self.chip = CHIPS.iter().any(|(t, _)| *t == tab).then_some(tab);
+        self.chip = CHIP_TABS.contains(&tab).then_some(tab);
     }
 
     pub fn show(&mut self, ui: &mut Ui, frame: PageFrame, state: &ViewState, out: &mut Vec<Command>) -> PageOut {
@@ -111,17 +127,17 @@ impl Library {
         let mut left = ui.new_child(UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("lib-tools"));
         match self.chip {
             Some(LibraryTab::Albums) => {
-                if left.add(Button::new(release_sort_label(lib.release_sort)).icon(Icon::Sort).style(Style::Tonal).size(Size::S).id_salt("lib-sort")).clicked() {
+                if left.add(Button::new(release_sort_label_in(locale(), lib.release_sort)).icon(Icon::Sort).style(Style::Tonal).size(Size::S).id_salt("lib-sort")).clicked() {
                     self.sorting = true;
                 }
             }
             Some(LibraryTab::Tracks) => {
-                if left.add(Button::new(track_sort_label(lib.track_sort)).icon(Icon::Sort).style(Style::Tonal).size(Size::S).id_salt("lib-sort")).clicked() {
+                if left.add(Button::new(track_sort_label_in(locale(), lib.track_sort)).icon(Icon::Sort).style(Style::Tonal).size(Size::S).id_salt("lib-sort")).clicked() {
                     self.sorting = true;
                 }
             }
             Some(LibraryTab::Playlists) => {
-                if left.add(Button::new("Новый плейлист").icon(Icon::Add).style(Style::Tonal).size(Size::S).id_salt("lib-new-playlist")).clicked() {
+                if left.add(Button::new(mobile().new_playlist).icon(Icon::Add).style(Style::Tonal).size(Size::S).id_salt("lib-new-playlist")).clicked() {
                     self.name.clear();
                     self.naming = true;
                 }
@@ -133,7 +149,8 @@ impl Library {
             let w = 2.0 * 40.0 + 2.0 + 8.0;
             let r = Rect::from_min_max(pos2(row.right() - w, row.top()), row.max);
             let mut rui = ui.new_child(UiBuilder::new().max_rect(r).layout(egui::Layout::right_to_left(egui::Align::Center)).id_salt("lib-layouts"));
-            let picked = ConnectedGroup::new("lib-layout", &["Сетка", "Список"]).icons(&[Icon::GridView, Icon::ViewList]).size(Size::S).show(&mut rui, usize::from(self.list));
+            let m = mobile();
+            let picked = ConnectedGroup::new("lib-layout", &[m.layout_grid, m.layout_list]).icons(&[Icon::GridView, Icon::ViewList]).size(Size::S).show(&mut rui, usize::from(self.list));
             if let Some(i) = picked {
                 self.list = i == 1;
             }
@@ -155,7 +172,8 @@ impl Library {
                     if self.chip.is_some() && ui.add(IconButton::new(Icon::Close).size(nikgob_md3e::components::Size::Xs).id_salt("lib-chip-clear")).clicked() {
                         self.chip = None;
                     }
-                    for (tab, label) in CHIPS {
+                    for tab in CHIP_TABS {
+                        let label = chip_label_in(locale(), tab);
                         let on = self.chip == Some(tab);
                         if ui.add(FilterChip::new(label, on).id_salt(("lib-chip", tab as u8))).clicked() {
                             self.chip = if on { None } else { Some(tab) };
@@ -174,7 +192,7 @@ impl Library {
         self.playlist_items(ui, state, page);
         let recent = if state.library.recently_added.is_empty() { &state.library.releases } else { &state.library.recently_added };
         if !recent.is_empty() {
-            parts::section_head(ui, "Альбомы");
+            parts::section_head(ui, mobile().chip_albums);
             let shown = &recent[..recent.len().min(6)];
             self.album_cards(ui, shown, page, false);
         }
@@ -300,10 +318,12 @@ impl Library {
     fn sheets(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
         if self.naming {
             let mut open = true;
-            let r = TextInputDialog::new("lib-new-playlist", "Новый плейлист", "Название")
+            let m = mobile();
+            let c = common();
+            let r = TextInputDialog::new("lib-new-playlist", m.new_playlist, m.name_placeholder)
                 .icon(Icon::PlaylistAdd)
-                .buttons("Создать", "Отмена")
-                .validate(|t| t.trim().is_empty().then(|| "Введи название".to_owned()))
+                .buttons(m.create, c.cancel)
+                .validate(|t| t.trim().is_empty().then(|| m.enter_name.to_owned()))
                 .show(ctx, &mut open, &mut self.name);
             if matches!(r, Some(TextInputResult::Confirmed)) {
                 out.push(Command::CreatePlaylist(self.name.trim().to_owned()));
@@ -313,13 +333,14 @@ impl Library {
             }
         }
         let tracks = self.chip == Some(LibraryTab::Tracks);
+        let loc = locale();
         let options: Vec<(&str, bool, Command)> = if tracks {
             TRACK_SORTS
                 .into_iter()
-                .map(|s| (track_sort_label(s), state.library.track_sort == s, Command::LoadTracks { offset: 0, limit: 200, sort: s }))
+                .map(|s| (track_sort_label_in(loc, s), state.library.track_sort == s, Command::LoadTracks { offset: 0, limit: 200, sort: s }))
                 .collect()
         } else {
-            RELEASE_SORTS.into_iter().map(|s| (release_sort_label(s), state.library.release_sort == s, Command::SortReleases(s))).collect()
+            RELEASE_SORTS.into_iter().map(|s| (release_sort_label_in(loc, s), state.library.release_sort == s, Command::SortReleases(s))).collect()
         };
         let screen = ctx.content_rect();
         let mut picked = None;

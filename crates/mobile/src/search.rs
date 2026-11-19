@@ -8,6 +8,7 @@
 
 use egui::{Id, Rect, Ui, UiBuilder, pos2, vec2};
 use nikgob_md3e::components::{SearchBar, anim};
+use nikgob_core::i18n::{common, mobile};
 use nikgob_view::{
     Command, Route, SearchAlbum, SearchAnswer, SearchArtist, SearchPlaylist, SearchTrack, SearchView, StreamPage, TopResult, ViewState,
 };
@@ -97,7 +98,7 @@ impl Search {
         let bar = Rect::from_min_size(pos2(rect.left() + 16.0, rect.top() + frame.top + 8.0), vec2(rect.width() - 32.0, 56.0));
         let mut bui = ui.new_child(UiBuilder::new().max_rect(bar).id_salt("phone-search-bar"));
         let before = self.query.clone();
-        let o = SearchBar::new("phone-search").placeholder("Поиск").back(true).shortcut(false).width(bar.width()).show(&mut bui, &mut self.query);
+        let o = SearchBar::new("phone-search").placeholder(common().search).back(true).shortcut(false).width(bar.width()).show(&mut bui, &mut self.query);
         if std::mem::take(&mut self.focus) {
             o.response.request_focus();
         }
@@ -151,7 +152,7 @@ impl Search {
             }
             let picks: Vec<nikgob_view::SearchPick> = a.tracks.iter().map(SearchTrack::pick).collect();
             if let Some(top) = &a.top {
-                parts::section_head(ui, "Лучший результат");
+                parts::section_head(ui, mobile().section_top_result);
                 match top {
                     TopResult::Track(t) => {
                         let (uri, sub) = track_face(t);
@@ -174,7 +175,7 @@ impl Search {
                 }
             }
             if !a.tracks.is_empty() {
-                parts::section_head(ui, "Треки");
+                parts::section_head(ui, mobile().chip_tracks);
                 let here = Route::Home;
                 rows::list(ui, "search-tracks", a.tracks.len(), rows::ROW_H, |ui, i, r| match &a.tracks[i] {
                     SearchTrack::Library(t) => {
@@ -202,7 +203,7 @@ impl Search {
                 });
             }
             if !a.albums.is_empty() {
-                parts::section_head(ui, "Альбомы");
+                parts::section_head(ui, mobile().chip_albums);
                 parts::grid2(ui, "search-al", a.albums.len().min(9), |ui, i, r| {
                     let al = &a.albums[i];
                     let (uri, title, sub) = album_face(al);
@@ -212,7 +213,7 @@ impl Search {
                 });
             }
             if !a.artists.is_empty() {
-                parts::section_head(ui, "Исполнители");
+                parts::section_head(ui, mobile().chip_artists);
                 parts::grid2(ui, "search-ar", a.artists.len().min(9), |ui, i, r| {
                     let ar = &a.artists[i];
                     let (uri, name) = artist_face(ar);
@@ -222,7 +223,7 @@ impl Search {
                 });
             }
             if !a.playlists.is_empty() {
-                parts::section_head(ui, "Плейлисты");
+                parts::section_head(ui, mobile().chip_playlists);
                 for (i, p) in a.playlists.iter().enumerate() {
                     match p {
                         SearchPlaylist::Library(c) => {

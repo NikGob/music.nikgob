@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use egui::{Align, Color32, Galley, Pos2, Ui, text::TextWrapping};
+use nikgob_core::i18n::{Locale, locale, mobile::fmt_total_in, tracks_count_in};
 use nikgob_md3e::TypeStyle;
 
 /// `text` on one line at most `max_w` wide, cut with «…».
@@ -44,27 +45,24 @@ pub fn duration(d: Duration) -> String {
     if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
 }
 
-/// «52 мин», «1 ч 12 мин».
-pub fn total(d: Duration) -> String {
-    let m = (d.as_secs() + 30) / 60;
-    if m >= 60 { format!("{} ч {} мин", m / 60, m % 60) } else { format!("{m} мин") }
+/// «52 мин», «1 ч 12 мин» in `loc` ("52 min", "1 hr 12 min").
+pub fn total_in(loc: Locale, d: Duration) -> String {
+    fmt_total_in(loc, d)
 }
 
-/// The Russian plural of `n`: `one` (1, 21…), `few` (2–4, 22…), `many`.
-pub fn plural<'a>(n: u64, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
-    let (n10, n100) = (n % 10, n % 100);
-    if n10 == 1 && n100 != 11 {
-        one
-    } else if (2..=4).contains(&n10) && !(12..=14).contains(&n100) {
-        few
-    } else {
-        many
-    }
+/// «52 мин», «1 ч 12 мин».
+pub fn total(d: Duration) -> String {
+    total_in(locale(), d)
+}
+
+/// «14 треков» in `loc` ("14 tracks").
+pub fn tracks_in(loc: Locale, n: u64) -> String {
+    tracks_count_in(loc, n)
 }
 
 /// «14 треков».
 pub fn tracks(n: u64) -> String {
-    format!("{n} {}", plural(n, "трек", "трека", "треков"))
+    tracks_in(locale(), n)
 }
 
 /// The first letters of up to two words, for an avatar without a photo.

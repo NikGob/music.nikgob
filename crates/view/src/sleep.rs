@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 use crate::{PlayerView, Route, heard_time};
 
+use nikgob_core::i18n::{Locale, locale, view::fmt_sleep_left_in};
+
 /// A choice of «Таймер сна».
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SleepChoice {
@@ -89,15 +91,15 @@ pub fn sleep_key_step(left: Option<Duration>) -> SleepChoice {
         .map_or(SleepChoice::Off, |m| SleepChoice::Minutes(*m))
 }
 
-/// What the timer's chip says is left: whole minutes rounded up, the
-/// seconds of the last minute.
+/// What the timer's chip says is left in `loc`: whole minutes rounded up,
+/// the seconds of the last minute.
+pub fn sleep_left_label_in(loc: Locale, left: Duration) -> String {
+    fmt_sleep_left_in(loc, left)
+}
+
+/// What the timer's chip says is left in the active process locale.
 pub fn sleep_left_label(left: Duration) -> String {
-    let secs = left.as_secs();
-    if secs < 60 {
-        format!("{secs} с")
-    } else {
-        format!("{} мин", secs.div_ceil(60))
-    }
+    sleep_left_label_in(locale(), left)
 }
 
 #[cfg(test)]

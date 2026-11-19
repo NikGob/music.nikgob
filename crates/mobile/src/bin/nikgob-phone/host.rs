@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
+use nikgob_core::i18n::mobile_in;
 use nikgob_core::streaming::{FakeService, Service, StreamService};
 use nikgob_runtime::{NullPlayback, Playback, Runtime, RuntimeConfig, RuntimeOptions, StreamSchedule};
 use nikgob_view::{MeshKind, Prefs};
@@ -126,6 +127,8 @@ impl Host {
             }
         };
         let import = import_setup(&paths, &prefs, &settings, opts.demo);
+        // The device name's language, taken before `prefs` moves into the runtime.
+        let phone_loc = prefs.resolved_locale();
         let runtime = Runtime::start_with(
             RuntimeConfig {
                 library: library.clone(),
@@ -166,7 +169,7 @@ impl Host {
         let mesh = if mesh_on {
             let ctx = nikgob_mesh::MeshContext {
                 data_dir: paths.data.clone(),
-                device_name: opts.name.clone().unwrap_or_else(|| "Телефон".to_owned()),
+                device_name: opts.name.clone().unwrap_or_else(|| mobile_in(phone_loc).phone_device_name.to_owned()),
                 kind: MeshKind::Phone,
                 runtime: runtime.handle(),
                 api: api.as_ref().map(nikgob_api::ApiHandle::local),

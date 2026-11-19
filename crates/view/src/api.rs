@@ -142,23 +142,35 @@ impl ApiNewToken {
     }
 }
 
-/// «Управление», «Полный», «Только чтение».
-pub fn preset_label(p: ApiPreset) -> &'static str {
+/// «Управление», «Полный», «Только чтение» in `loc`.
+pub const fn preset_label_in(p: ApiPreset, loc: nikgob_core::i18n::Locale) -> &'static str {
+    let v = nikgob_core::i18n::view_in(loc);
     match p {
-        ApiPreset::Control => "Управление",
-        ApiPreset::Full => "Полный",
-        ApiPreset::Read => "Только чтение",
+        ApiPreset::Control => v.api_preset_control,
+        ApiPreset::Full => v.api_preset_full,
+        ApiPreset::Read => v.api_preset_read,
     }
 }
 
-/// «Я», «Ассистент», «Агент», «Гость».
-pub fn actor_label(a: ApiActor) -> &'static str {
+/// The preset's name in the active process locale.
+pub fn preset_label(p: ApiPreset) -> &'static str {
+    preset_label_in(p, nikgob_core::i18n::locale())
+}
+
+/// «Я», «Ассистент», «Агент», «Гость» in `loc`.
+pub const fn actor_label_in(a: ApiActor, loc: nikgob_core::i18n::Locale) -> &'static str {
+    let v = nikgob_core::i18n::view_in(loc);
     match a {
-        ApiActor::Owner => "Я",
-        ApiActor::Assistant => "Ассистент",
-        ApiActor::Agent => "Агент",
-        ApiActor::Guest => "Гость",
+        ApiActor::Owner => v.api_actor_owner,
+        ApiActor::Assistant => v.api_actor_assistant,
+        ApiActor::Agent => v.api_actor_agent,
+        ApiActor::Guest => v.api_actor_guest,
     }
+}
+
+/// The actor's name in the active process locale.
+pub fn actor_label(a: ApiActor) -> &'static str {
+    actor_label_in(a, nikgob_core::i18n::locale())
 }
 
 /// Where the runtime answers an API request that waits for work of its

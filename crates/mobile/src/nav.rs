@@ -5,6 +5,7 @@
 //! of stacking. Поиск has no tab: the search bar at the top of Главная and
 //! Библиотека opens it over the destination (Metrolist's).
 
+use nikgob_core::i18n::{Locale, locale, nav_in};
 use nikgob_view::{Command, LibraryTab, Route};
 
 use nikgob_md3e::Icon;
@@ -28,12 +29,18 @@ impl Tab {
         }
     }
 
-    pub const fn label(self) -> &'static str {
+    pub const fn label_in(self, loc: Locale) -> &'static str {
+        let n = nav_in(loc);
         match self {
-            Self::Home => "Главная",
-            Self::Library => "Библиотека",
-            Self::Settings => "Настройки",
+            Self::Home => n.home,
+            Self::Library => n.library,
+            Self::Settings => n.settings,
         }
+    }
+
+    /// The destination's name in the active process locale.
+    pub fn label(self) -> &'static str {
+        self.label_in(locale())
     }
 
     pub const fn icon(self) -> Icon {

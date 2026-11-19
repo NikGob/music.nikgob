@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use nikgob_core::i18n::{Locale, MixTitle, MoodKind, WorldMixKind, locale};
+use nikgob_core::i18n::{Locale, MixTitle, MoodKind, WorldMixKind, locale, view_in};
 
 use crate::{ArtistId, Cover, QueueOrigin, RadioOrigin, RadioTitle, RemoteId, TrackId};
 
@@ -50,8 +50,8 @@ impl Mood {
     }
 
     /// The card's title.
-    pub const fn title(self) -> &'static str {
-        self.kind().title_in(Locale::Ru)
+    pub fn title(self) -> &'static str {
+        self.title_in(locale())
     }
 }
 
@@ -154,8 +154,8 @@ impl WorldMix {
     }
 
     /// Its name on the world's page (the world's own is the page's title).
-    pub const fn title(self) -> &'static str {
-        self.kind().title_in(Locale::Ru)
+    pub fn title(self) -> &'static str {
+        self.title_in(locale())
     }
 }
 
@@ -486,13 +486,19 @@ pub enum WaveNovelty {
 impl WaveNovelty {
     pub const ALL: [Self; 4] = [Self::Balance, Self::More, Self::OnlyNew, Self::Familiar];
 
-    pub const fn title(self) -> &'static str {
+    pub const fn title_in(self, loc: Locale) -> &'static str {
+        let v = view_in(loc);
         match self {
-            Self::Balance => "Баланс",
-            Self::More => "Больше нового",
-            Self::OnlyNew => "Только новое",
-            Self::Familiar => "Знакомое",
+            Self::Balance => v.wave_balance,
+            Self::More => v.wave_more,
+            Self::OnlyNew => v.wave_only_new,
+            Self::Familiar => v.wave_familiar,
         }
+    }
+
+    /// The choice's name in the active process locale.
+    pub fn title(self) -> &'static str {
+        self.title_in(locale())
     }
 }
 
@@ -515,14 +521,20 @@ pub enum WaveCharacter {
 impl WaveCharacter {
     pub const ALL: [Self; 5] = [Self::Any, Self::Lively, Self::Calm, Self::Dark, Self::Background];
 
-    pub const fn title(self) -> &'static str {
+    pub const fn title_in(self, loc: Locale) -> &'static str {
+        let v = view_in(loc);
         match self {
-            Self::Any => "Любой",
-            Self::Lively => "Бодрое",
-            Self::Calm => "Спокойное",
-            Self::Dark => "Мрачное",
-            Self::Background => "Фон",
+            Self::Any => v.wave_any,
+            Self::Lively => v.wave_lively,
+            Self::Calm => v.wave_calm,
+            Self::Dark => v.wave_dark,
+            Self::Background => v.wave_background,
         }
+    }
+
+    /// The choice's name in the active process locale.
+    pub fn title(self) -> &'static str {
+        self.title_in(locale())
     }
 }
 
