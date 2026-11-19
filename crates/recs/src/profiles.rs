@@ -44,6 +44,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use nikgob_core::i18n::home_recs::{
+    ProfileKind, SungLang, fmt_artists_more_in, fmt_artists_pair_in, fmt_lang_songs_in, loudness_word_in,
+};
 use nikgob_core::i18n::Locale;
 use nikgob_core::model::{ArtistId, TrackId, UnixMs};
 use serde::{Deserialize, Serialize};
@@ -560,55 +563,44 @@ pub enum Loudness {
 impl Loudness {
     /// Localized loudness word appended to a profile kind (`"потише"` / `"quieter"`).
     pub const fn word_in(self, loc: Locale) -> &'static str {
-        match (loc, self) {
-            (Locale::Ru, Self::Quiet) => "потише",
-            (Locale::Ru, Self::Loud) => "погромче",
-            (Locale::En, Self::Quiet) => "quieter",
-            (Locale::En, Self::Loud) => "louder",
-        }
+        loudness_word_in(loc, self == Self::Quiet)
     }
 }
 
 impl Kind {
     /// Localized name of `self` in `loc`.
     pub fn title_in(self, loc: Locale) -> String {
-        match (loc, self) {
-            (Locale::Ru, Self::Instrumental) => "Без слов".into(),
-            (Locale::Ru, Self::InstrumentalSoundtracks) => "Саундтреки без слов".into(),
-            (Locale::Ru, Self::Sung(l)) => lang_adjective_in(l, Locale::Ru).map_or_else(|| "Песни".into(), |a| format!("{a} песни")),
-            (Locale::Ru, Self::Songs) => "Песни".into(),
-            (Locale::Ru, Self::Soundtracks) => "Саундтреки".into(),
-            (Locale::Ru, Self::Calm) => "Спокойное".into(),
-            (Locale::Ru, Self::Lively) => "Бодрое".into(),
-            (Locale::En, Self::Instrumental) => "Instrumental".into(),
-            (Locale::En, Self::InstrumentalSoundtracks) => "Instrumental Soundtracks".into(),
-            (Locale::En, Self::Sung(l)) => lang_adjective_in(l, Locale::En).map_or_else(|| "Songs".into(), |a| format!("{a} Songs")),
-            (Locale::En, Self::Songs) => "Songs".into(),
-            (Locale::En, Self::Soundtracks) => "Soundtracks".into(),
-            (Locale::En, Self::Calm) => "Calm".into(),
-            (Locale::En, Self::Lively) => "Upbeat".into(),
-        }
+        let kind = match self {
+            Self::Instrumental => ProfileKind::Instrumental,
+            Self::InstrumentalSoundtracks => ProfileKind::InstrumentalSoundtracks,
+            Self::Songs => ProfileKind::Songs,
+            Self::Soundtracks => ProfileKind::Soundtracks,
+            Self::Calm => ProfileKind::Calm,
+            Self::Lively => ProfileKind::Lively,
+            Self::Sung(l) => match lang_adjective_in(l, loc) {
+                Some(adjective) => return fmt_lang_songs_in(loc, adjective),
+                None => ProfileKind::Songs,
+            },
+        };
+        kind.title_in(loc).to_owned()
     }
 }
 
 /// The adjective of a language's songs in `loc`, when the language has one.
 pub const fn lang_adjective_in(l: Lang, loc: Locale) -> Option<&'static str> {
-    match (loc, l) {
-        (Locale::Ru, Lang::Russian) => Some("Русские"),
-        (Locale::Ru, Lang::Japanese) => Some("Японские"),
-        (Locale::Ru, Lang::Korean) => Some("Корейские"),
-        (Locale::Ru, Lang::English) => Some("Английские"),
-        (Locale::Ru, Lang::Spanish) => Some("Испанские"),
-        (Locale::Ru, Lang::French) => Some("Французские"),
-        (Locale::Ru, Lang::German) => Some("Немецкие"),
-        (Locale::En, Lang::Russian) => Some("Russian"),
-        (Locale::En, Lang::Japanese) => Some("Japanese"),
-        (Locale::En, Lang::Korean) => Some("Korean"),
-        (Locale::En, Lang::English) => Some("English"),
-        (Locale::En, Lang::Spanish) => Some("Spanish"),
-        (Locale::En, Lang::French) => Some("French"),
-        (Locale::En, Lang::German) => Some("German"),
-        (_, Lang::Other) => None,
+    let lang = match l {
+        Lang::Russian => Some(SungLang::Russian),
+        Lang::Japanese => Some(SungLang::Japanese),
+        Lang::Korean => Some(SungLang::Korean),
+        Lang::English => Some(SungLang::English),
+        Lang::Spanish => Some(SungLang::Spanish),
+        Lang::French => Some(SungLang::French),
+        Lang::German => Some(SungLang::German),
+        Lang::Other => None,
+    };
+    match lang {
+        Some(lang) => Some(lang.adjective_in(loc)),
+        None => None,
     }
 }
 
@@ -1107,12 +1099,10 @@ impl Profiles {
     pub fn name_in(&self, j: usize, style: NameStyle, loc: Locale, artist: &dyn Fn(ArtistId) -> Option<String>) -> (String, String) {
         let names: Vec<String> = self.list[j].stats.artists.iter().filter_map(|a| artist(*a)).collect();
         if style == NameStyle::Artists && !names.is_empty() {
-            let title = match (loc, names.len()) {
-                (_, 1) => names[0].clone(),
-                (Locale::Ru, 2) => format!("{} и {}", names[0], names[1]),
-                (Locale::Ru, _) => format!("{}, {} и другие", names[0], names[1]),
-                (Locale::En, 2) => format!("{} & {}", names[0], names[1]),
-                (Locale::En, _) => format!("{}, {} & more", names[0], names[1]),
+            let title = match names.len() {
+                1 => names[0].clone(),
+                2 => fmt_artists_pair_in(loc, &names[0], &names[1]),
+                _ => fmt_artists_more_in(loc, &names[0], &names[1]),
             };
             return (title, names.iter().skip(2).take(3).cloned().collect::<Vec<_>>().join(", "));
         }

@@ -25,7 +25,7 @@
 //!
 //! Pure: the runtime brings the tags, the names and the years.
 
-use nikgob_core::i18n::{Locale, genre_family_title_in};
+use nikgob_core::i18n::{Locale, MixTitle, genre_family_title_in};
 
 use crate::profiles::{Kind, Loudness};
 
@@ -226,40 +226,17 @@ pub fn genre(m: &Makeup) -> Vec<u8> {
 
 /// «Микс 90-х», «Микс 2010-х» / «90s Mix», «2010s Mix».
 pub fn era_title_in(decade: i32, loc: Locale) -> String {
-    match loc {
-        Locale::Ru => {
-            if (1900..2000).contains(&decade) {
-                format!("Микс {}-х", decade % 100)
-            } else {
-                format!("Микс {decade}-х")
-            }
-        }
-        Locale::En => {
-            if (1900..2000).contains(&decade) {
-                format!("{}s Mix", decade % 100)
-            } else {
-                format!("{decade}s Mix")
-            }
-        }
-    }
+    MixTitle::Era(decade).title_in(loc).into_owned()
 }
 
 /// «Микс: ZUTOMAYO» / «ZUTOMAYO Mix».
 pub fn artist_title_in(name: &str, loc: Locale) -> String {
-    match loc {
-        Locale::Ru => format!("Микс: {name}"),
-        Locale::En => format!("{name} Mix"),
-    }
+    MixTitle::Artist(name.to_owned()).title_in(loc).into_owned()
 }
 
 /// «Спокойный микс» / «Бодрый микс» / «Calm Mix» / «Upbeat Mix».
-pub const fn energy_title_in(calm: bool, loc: Locale) -> &'static str {
-    match (loc, calm) {
-        (Locale::Ru, true) => "Спокойный микс",
-        (Locale::Ru, false) => "Бодрый микс",
-        (Locale::En, true) => "Calm Mix",
-        (Locale::En, false) => "Upbeat Mix",
-    }
+pub fn energy_title_in(calm: bool, loc: Locale) -> String {
+    MixTitle::Energy { calm }.title_in(loc).into_owned()
 }
 
 /// The decade that names `m` ([`ERA_SHARE`]); `common` is the decade most
@@ -299,7 +276,7 @@ impl MixName {
             Self::Genre(id) => family_title_in(*id, loc).unwrap_or_default().to_owned(),
             Self::Artist(name) | Self::Song(name) => artist_title_in(name, loc),
             Self::Era(decade) => era_title_in(*decade, loc),
-            Self::Energy { calm } => energy_title_in(*calm, loc).to_owned(),
+            Self::Energy { calm } => energy_title_in(*calm, loc),
             Self::Kind { kind, loudness } => match loudness {
                 Some(loud) => format!("{}, {}", kind.title_in(loc), loud.word_in(loc)),
                 None => kind.title_in(loc),

@@ -19,6 +19,10 @@
 //!   (energy × brightness × steadiness, 2–3 per cell), picked by the day
 //!   and the part, so a name holds for its part of the day.
 
+use nikgob_core::i18n::home_recs::{
+    DAYLIST_ADJECTIVES_EN as ADJECTIVES_EN, DAYLIST_ADJECTIVES_RU as ADJECTIVES, DayGender as Gender,
+    agree_ru as agree, daylist_name_in, weekday_en, weekday_genitive_ru as weekday_genitive,
+};
 use nikgob_core::i18n::Locale;
 use nikgob_core::model::TrackId;
 
@@ -130,107 +134,15 @@ impl Recs<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Gender {
-    Masculine,
-    Neuter,
-    Feminine,
-}
-
-/// The noun of a part of the day and its gender.
-const fn noun(part: DayPart) -> (&'static str, Gender) {
-    match part {
-        DayPart::Morning => ("утро", Gender::Neuter),
-        DayPart::Day => ("день", Gender::Masculine),
-        DayPart::Evening => ("вечер", Gender::Masculine),
-        DayPart::Night => ("ночь", Gender::Feminine),
-    }
-}
-
 /// The weekday of a local day number (1970-01-01 was a Thursday), in the
 /// genitive: «понедельника» … «воскресенья».
 pub fn weekday_genitive(day: i64) -> &'static str {
-    const NAMES: [&str; 7] = ["понедельника", "вторника", "среды", "четверга", "пятницы", "субботы", "воскресенья"];
-    NAMES[(day + 3).rem_euclid(7) as usize]
+    weekday_genitive_ru(day)
 }
 
-/// Adjectives (masculine) by the cell of the axes: index
-/// `energy ≥ 0` × 4 + `brightness ≥ 0` × 2 + `steadiness ≥ 0`.
-const ADJECTIVES: [&[&str]; 8] = [
-    // Quiet, dark, restless.
-    &["Мрачный", "Туманный", "Сумрачный"],
-    // Quiet, dark, steady.
-    &["Тягучий", "Тихий", "Глубокий"],
-    // Quiet, bright, restless.
-    &["Мечтательный", "Воздушный", "Лёгкий"],
-    // Quiet, bright, steady.
-    &["Ясный", "Нежный", "Тёплый"],
-    // Loud, dark, restless.
-    &["Бурный", "Мятежный", "Колючий"],
-    // Loud, dark, steady.
-    &["Напористый", "Хлёсткий", "Упрямый"],
-    // Loud, bright, restless.
-    &["Яркий", "Озорной", "Пёстрый"],
-    // Loud, bright, steady.
-    &["Бодрый", "Солнечный", "Звонкий"],
-];
-
-/// English adjectives by the cell of the axes (same 8-cell grid as [`ADJECTIVES`]).
-const ADJECTIVES_EN: [&[&str]; 8] = [
-    // Quiet, dark, restless.
-    &["Gloomy", "Misty", "Dusky"],
-    // Quiet, dark, steady.
-    &["Mellow", "Quiet", "Deep"],
-    // Quiet, bright, restless.
-    &["Dreamy", "Airy", "Light"],
-    // Quiet, bright, steady.
-    &["Serene", "Gentle", "Warm"],
-    // Loud, dark, restless.
-    &["Stormy", "Rebellious", "Edgy"],
-    // Loud, dark, steady.
-    &["Driven", "Punchy", "Fierce"],
-    // Loud, bright, restless.
-    &["Vibrant", "Playful", "Vivid"],
-    // Loud, bright, steady.
-    &["Upbeat", "Sunny", "Crisp"],
-];
-
-const fn part_en(part: DayPart) -> &'static str {
-    match part {
-        DayPart::Morning => "Morning",
-        DayPart::Day => "Afternoon",
-        DayPart::Evening => "Evening",
-        DayPart::Night => "Night",
-    }
-}
-
-fn weekday_en(day: i64) -> &'static str {
-    const NAMES: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-    NAMES[(day + 3).rem_euclid(7) as usize]
-}
-
+/// The cell of the axes: `energy ≥ 0` × 4 + `brightness ≥ 0` × 2 + `steadiness ≥ 0`.
 fn cell(a: Axes) -> usize {
     usize::from(a.energy >= 0.0) * 4 + usize::from(a.brightness >= 0.0) * 2 + usize::from(a.steadiness >= 0.0)
-}
-
-/// A masculine adjective («-ый», «-ой», «-ий») in `gender`.
-fn agree(masculine: &str, gender: Gender) -> String {
-    if gender == Gender::Masculine {
-        return masculine.to_owned();
-    }
-    let mut chars: Vec<char> = masculine.chars().collect();
-    let ending: String = chars.split_off(chars.len().saturating_sub(2)).into_iter().collect();
-    let stem: String = chars.iter().collect();
-    let last = chars.last().copied().unwrap_or(' ');
-    let (neuter, feminine) = match ending.as_str() {
-        "ий" if "жчшщ".contains(last) => ("ее", "ая"),
-        "ий" if "гкх".contains(last) => ("ое", "ая"),
-        // A soft stem («синий»).
-        "ий" => ("ее", "яя"),
-        _ => ("ое", "ая"),
-    };
-    let ending = if gender == Gender::Neuter { neuter } else { feminine };
-    format!("{stem}{ending}")
 }
 
 /// The daylist's name in `loc` («Тягучий вечер четверга» / «Mellow Thursday Evening»).
@@ -239,13 +151,7 @@ fn agree(masculine: &str, gender: Gender) -> String {
 pub fn daylist_title_in(loc: Locale, centre: Axes, part: DayPart, day: i64) -> String {
     let idx = cell(centre);
     let pick = Rng::derive(day as u64, 0xDA7 + part.index() as u64).below(ADJECTIVES[idx].len());
-    match loc {
-        Locale::Ru => {
-            let (noun, gender) = noun(part);
-            format!("{} {noun} {}", agree(ADJECTIVES[idx][pick], gender), weekday_genitive(day))
-        }
-        Locale::En => format!("{} {} {}", ADJECTIVES_EN[idx][pick], weekday_en(day), part_en(part)),
-    }
+    daylist_name_in(loc, idx, pick, part.index() as u8, day)
 }
 
 #[cfg(test)]

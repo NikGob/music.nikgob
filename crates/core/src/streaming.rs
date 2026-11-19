@@ -773,9 +773,14 @@ pub fn interrupted_read() -> std::io::Error {
 }
 
 /// "Opus ~160 кбит/с": a codec and its bitrate, `approx` for a variable
-/// one (the UI's units are Russian, as in the settings' Opus bitrate).
+/// one, in the active process locale (the settings' own unit).
 pub fn quality_label(codec: &str, kbps: u32, approx: bool) -> String {
-    format!("{codec} {}{kbps} кбит/с", if approx { "~" } else { "" })
+    quality_label_in(crate::i18n::locale(), codec, kbps, approx)
+}
+
+/// [`quality_label`] in `loc`.
+pub fn quality_label_in(loc: crate::i18n::Locale, codec: &str, kbps: u32, approx: bool) -> String {
+    format!("{codec} {}{kbps} {}", if approx { "~" } else { "" }, crate::i18n::common_in(loc).kbps)
 }
 
 /// Where [`StreamService::search_in_parts`] hands the results it already

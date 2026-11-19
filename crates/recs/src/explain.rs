@@ -24,7 +24,12 @@
 //! first pick of a radio and the new ones are explained (the runtime's
 //! choice).
 
-use nikgob_core::i18n::{Locale, PerLocale, PluralForms, plural_forms};
+use nikgob_core::i18n::home_recs::{
+    fmt_moment_in, fmt_new_found_in, fmt_new_suggested_in, fmt_on_repeat_in, fmt_world_best_in,
+    fmt_world_road_in, fmt_world_unheard_near_in, follows_often_pair, listened_together_pair,
+    next_on_album_pair, similar_sound_pair, world_unheard_none_in,
+};
+use nikgob_core::i18n::{Locale, PerLocale};
 use nikgob_core::model::TrackId;
 
 use crate::index::euclid;
@@ -43,51 +48,19 @@ pub const KIND_SHARE: f32 = 0.8;
 /// Completes a moment needs for its part of the day.
 const WHEN_MIN: u32 = 8;
 
-/// «вечером», «после полуночи» / «in the evening», «at night»…
-pub const fn when_in(part: DayPart, loc: Locale) -> &'static str {
-    match (loc, part) {
-        (Locale::Ru, DayPart::Morning) => "утром",
-        (Locale::Ru, DayPart::Day) => "днём",
-        (Locale::Ru, DayPart::Evening) => "вечером",
-        (Locale::Ru, DayPart::Night) => "ночью",
-        (Locale::En, DayPart::Morning) => "in the morning",
-        (Locale::En, DayPart::Day) => "during the day",
-        (Locale::En, DayPart::Evening) => "in the evening",
-        (Locale::En, DayPart::Night) => "at night",
-    }
-}
-
 /// «Новое: нашлось по Ghost Avenue в YouTube Music» / «New: found via Ghost Avenue on YouTube Music».
 pub fn new_found(seed: &str, service: &str, loc: Locale) -> String {
-    match loc {
-        Locale::Ru => format!("Новое: нашлось по {seed} в {service}"),
-        Locale::En => format!("New: found via {seed} on {service}"),
-    }
+    fmt_new_found_in(loc, seed, service)
 }
 
 /// A new song the service itself suggests: «Новое: советует Deezer» / «New: suggested by Deezer».
 pub fn suggested(service: &str, loc: Locale) -> String {
-    match loc {
-        Locale::Ru => format!("Новое: советует {service}"),
-        Locale::En => format!("New: suggested by {service}"),
-    }
+    fmt_new_suggested_in(loc, service)
 }
 
 /// «Ты включал это 12 раз за неделю» / «You played this 12 times this week»; none under two.
 pub fn on_repeat(starts: u32, loc: Locale) -> Option<String> {
-    if starts < 2 {
-        return None;
-    }
-    Some(match loc {
-        Locale::Ru => {
-            let unit = plural_forms(loc, u64::from(starts), &PluralForms { one: "раз", few: "раза", many: "раз" });
-            format!("Ты включал это {starts} {unit} за неделю")
-        }
-        Locale::En => {
-            let unit = plural_forms(loc, u64::from(starts), &PluralForms { one: "time", few: "times", many: "times" });
-            format!("You played this {starts} {unit} this week")
-        }
-    })
+    (starts >= 2).then(|| fmt_on_repeat_in(loc, starts))
 }
 
 impl Recs<'_> {
@@ -137,21 +110,7 @@ impl Recs<'_> {
         if part.is_none() && !instrumental {
             return None;
         }
-        let mut line = match loc {
-            Locale::Ru => "Из того, что ты дослушиваешь".to_owned(),
-            Locale::En => "Tracks you finish listening to".to_owned(),
-        };
-        if let Some(p) = part {
-            line.push(' ');
-            line.push_str(when_in(p, loc));
-        }
-        if instrumental {
-            match loc {
-                Locale::Ru => line.push_str(", — без слов"),
-                Locale::En => line.push_str(" — instrumental"),
-            }
-        }
-        Some(line)
+        Some(fmt_moment_in(loc, part.map(|p| p.index() as u8), instrumental))
     }
 
     /// Why a mix of the world `world` (its name); `title` names a track
@@ -162,10 +121,7 @@ impl Recs<'_> {
             WorldMixKind::Best => {
                 // Of a history, not the albums' first tracks standing in.
                 let heard = mix.tracks.iter().filter(|&&i| m.tracks[i].completes > 0).count();
-                (heard * 2 >= mix.tracks.len() && heard > 0).then(|| match loc {
-                    Locale::Ru => format!("Что ты дослушивал чаще всего в {world}"),
-                    Locale::En => format!("What you finished most in {world}"),
-                })
+                (heard * 2 >= mix.tracks.len() && heard > 0).then(|| fmt_world_best_in(loc, world))
             }
             WorldMixKind::Unheard => {
                 let near = mix.near.and_then(|n| {
@@ -173,17 +129,12 @@ impl Recs<'_> {
                     let b = m.embedded_at(n)?;
                     (euclid(a, b) <= m.scale()).then_some(n)
                 });
-                Some(match (loc, near.and_then(title)) {
-                    (Locale::Ru, Some(t)) => format!("Ты не слышал; по звуку ближе всего к {t}"),
-                    (Locale::Ru, None) => "Ты не слышал ничего из этого".to_owned(),
-                    (Locale::En, Some(t)) => format!("Unheard; closest in sound to {t}"),
-                    (Locale::En, None) => "None of these heard yet".to_owned(),
+                Some(match near.and_then(title) {
+                    Some(t) => fmt_world_unheard_near_in(loc, &t),
+                    None => world_unheard_none_in(loc).to_owned(),
                 })
             }
-            WorldMixKind::Road => Some(match loc {
-                Locale::Ru => format!("Звучит как твой {world}, но из других миров"),
-                Locale::En => format!("Sounds like your {world}, from other worlds"),
-            }),
+            WorldMixKind::Road => Some(fmt_world_road_in(loc, world)),
             WorldMixKind::Calm | WorldMixKind::Moving => None,
         }
     }
@@ -193,32 +144,17 @@ impl Recs<'_> {
     pub fn why_pick_pair(&self, p: &Pick, before: Option<TrackId>, title: &dyn Fn(TrackId) -> Option<String>) -> Option<PerLocale<String>> {
         let crate::Item::Track(id) = &p.item else { return None };
         Some(match p.reason {
-            Reason::NextOnAlbum => PerLocale {
-                ru: "Следующий на альбоме".to_owned(),
-                en: "Next on album".to_owned(),
-            },
+            Reason::NextOnAlbum => next_on_album_pair(),
             Reason::FollowsOften(t) => {
                 let name = title(t)?;
-                PerLocale {
-                    ru: format!("После {name}: часто идёт следом"),
-                    en: format!("Often follows {name}"),
-                }
+                follows_often_pair(&name)
             }
             Reason::ListenedTogether(t) => {
                 let name = title(t)?;
-                PerLocale {
-                    ru: format!("Часто слушают вместе с {name}"),
-                    en: format!("Often played with {name}"),
-                }
+                listened_together_pair(&name)
             }
-            Reason::SimilarTo(t) => self.near(*id, Some(t)).then(|| PerLocale {
-                ru: "Похоже по звуку".to_owned(),
-                en: "Similar sound".to_owned(),
-            })?,
-            Reason::SoundsLikeSeed => self.near(*id, before).then(|| PerLocale {
-                ru: "Похоже по звуку".to_owned(),
-                en: "Similar sound".to_owned(),
-            })?,
+            Reason::SimilarTo(t) => self.near(*id, Some(t)).then(similar_sound_pair)?,
+            Reason::SoundsLikeSeed => self.near(*id, before).then(similar_sound_pair)?,
             _ => return None,
         })
     }

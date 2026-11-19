@@ -215,7 +215,7 @@ pub fn install_script(host: &str, key: &str, version: &str, builds: &[LinuxBuild
 set -eu
 ticket="${{1:-}}"
 if [ -z "$ticket" ]; then
-  echo "nikgobd: нет приглашения (sh nikgobd-install.sh <приглашение>)" >&2; exit 1
+  echo "nikgobd: no ticket given (sh nikgobd-install.sh <ticket>)" >&2; exit 1
 fi
 base='http://{host}'
 key='{key}'
@@ -226,14 +226,14 @@ case "$(uname -m)" in
   *) arch="$(uname -m)" ;;
 esac
 case "$arch" in
-{sums}  *) echo "Нет сборки для $arch" >&2; exit 1 ;;
+{sums}  *) echo "No build for $arch" >&2; exit 1 ;;
 esac
 name="nikgobd-$version-linux-$arch"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-curl -fsSL -o "$tmp/$name.tar.gz" "$base/install/$name.tar.gz?k=$key" || {{ echo "nikgobd: сборка не скачалась" >&2; exit 1; }}
+curl -fsSL -o "$tmp/$name.tar.gz" "$base/install/$name.tar.gz?k=$key" || {{ echo "nikgobd: the build did not download" >&2; exit 1; }}
 if ! echo "$sum  $tmp/$name.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
-  echo "nikgobd: сборка не совпала с той, что на компьютере" >&2; exit 1
+  echo "nikgobd: the build does not match its checksum" >&2; exit 1
 fi
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
 bin="$HOME/.local/bin"
@@ -251,9 +251,9 @@ install -m 644 "$tmp/$name/nikgobd.service" "$conf/systemd/user/nikgobd.service"
 "$bin/nikgobd" pair "$ticket"
 systemctl --user daemon-reload
 systemctl --user enable --now nikgobd >/dev/null
-echo "nikgobd $version установлен и привязан"
+echo "nikgobd $version installed and paired"
 if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)" != yes ]; then
-  echo "чтобы он работал без входа в систему: sudo loginctl enable-linger $(id -un)"
+  echo "to keep it running without a login session: sudo loginctl enable-linger $(id -un)"
 fi
 "#
     )
@@ -345,7 +345,7 @@ mod tests {
         assert!(s.contains(&format!("key='{key}'")));
         assert!(s.contains(&format!("  aarch64) sum='{}' ;;\n", "ab".repeat(32))));
         assert!(!s.contains("  x86_64) sum="), "no build, not offered");
-        assert!(s.contains("*) echo \"Нет сборки для $arch\" >&2; exit 1 ;;"));
+        assert!(s.contains("*) echo \"No build for $arch\" >&2; exit 1 ;;"));
         assert!(s.contains("\"$base/install/$name.tar.gz?k=$key\""));
         assert!(s.contains("echo \"$sum  $tmp/$name.tar.gz\" | sha256sum -c -"));
         assert!(s.find("sha256sum").unwrap() < s.find("tar -xzf").unwrap(), "checked before unpacked");

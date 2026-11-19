@@ -79,20 +79,14 @@ impl SourceKey {
         }
     }
 
-    /// The name the UI shows.
+    /// The name the UI shows in `loc`.
+    pub fn display_name_in(self, loc: crate::i18n::Locale) -> &'static str {
+        crate::i18n::backend::source_display_name_in(loc, self)
+    }
+
+    /// The name the UI shows in the active process locale.
     pub fn display_name(self) -> &'static str {
-        match self {
-            Self::Torrents => "Торренты",
-            Self::Khinsider => "khinsider",
-            Self::Soulseek => "Soulseek",
-            Self::Qobuz => "Qobuz",
-            Self::Tidal => "Tidal",
-            Self::Squidify => "Squidify",
-            Self::Archive => "Internet Archive",
-            Self::Bandcamp => "Bandcamp",
-            Self::Soundcloud => "SoundCloud",
-            Self::Dogmazic => "Dogmazic",
-        }
+        self.display_name_in(crate::i18n::locale())
     }
 
     /// A free service of someone else's account (a public instance): the
@@ -267,39 +261,36 @@ impl Offer {
         self.format.as_ref().is_some_and(Format::lossless)
     }
 
-    /// "FLAC 24/96 · 312 МБ · 14 сид. · RuTracker".
-    pub fn detail(&self) -> String {
+    /// "FLAC 24/96 · 312 МБ · 14 сид. · RuTracker" in `loc`.
+    pub fn detail_in(&self, loc: crate::i18n::Locale) -> String {
         let mut parts = Vec::new();
         if let Some(f) = &self.format {
             parts.push(f.label());
         }
         if let Some(b) = self.size_bytes {
-            parts.push(human_bytes(b));
+            parts.push(crate::i18n::backend::human_bytes_in(loc, b));
         }
         if let Some(s) = self.seeders {
-            parts.push(format!("{s} сид."));
+            parts.push(crate::i18n::backend::fmt_seeders_in(loc, s));
         }
         let provider = if self.provider.is_empty() {
-            self.source.display_name().to_owned()
+            self.source.display_name_in(loc).to_owned()
         } else {
             self.provider.clone()
         };
         parts.push(provider);
         parts.join(" · ")
     }
+
+    /// "FLAC 24/96 · 312 МБ · 14 сид. · RuTracker" in the active process locale.
+    pub fn detail(&self) -> String {
+        self.detail_in(crate::i18n::locale())
+    }
 }
 
-/// "312 МБ", "1.4 ГБ".
+/// "312 МБ", "1.4 ГБ" in the active process locale.
 pub fn human_bytes(b: u64) -> String {
-    const MB: f64 = 1024.0 * 1024.0;
-    let mb = b as f64 / MB;
-    if mb >= 1024.0 {
-        format!("{:.1} ГБ", mb / 1024.0)
-    } else if mb >= 10.0 {
-        format!("{mb:.0} МБ")
-    } else {
-        format!("{mb:.1} МБ")
-    }
+    crate::i18n::backend::human_bytes_in(crate::i18n::locale(), b)
 }
 
 /// What a fetch brought.

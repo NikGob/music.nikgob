@@ -17,6 +17,8 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use nikgob_core::i18n::backend::SoloistArchiveFault;
+use nikgob_core::i18n::{Locale, backend as i18n_backend};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -38,20 +40,45 @@ pub const PENDING: &str = "pending.json";
 
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
-    #[error("Spotify не выпускает Soloist для этой системы")]
+    #[error("Spotify does not publish Soloist for this system")]
     Unsupported,
-    #[error("не скачалось: {0}")]
+    /// The bytes left Spotify's CDN on the way (a redirect away).
+    #[error("download failed: the download left Spotify's server")]
+    Redirected,
+    #[error("download failed: {0}")]
     Network(String),
-    #[error("архив Soloist не тот: {0}")]
-    Archive(String),
-    #[error("Soloist не запускается на этом компьютере")]
+    /// The unpacking library said this about the archive, verbatim.
+    #[error("the Soloist archive is wrong: {0}")]
+    ArchiveText(String),
+    #[error("the Soloist archive is wrong: {0}")]
+    Archive(i18n_backend::SoloistArchiveFault),
+    #[error("Soloist will not run on this computer")]
     WontRun,
-    #[error("у Spotify пока только просроченная сборка Soloist")]
+    #[error("Spotify has only an expired Soloist build for now")]
     Expired,
-    #[error("у сборки Soloist нет подписи Spotify: {0}")]
-    Signature(String),
+    #[error("the Soloist build has no Spotify signature: {0}")]
+    Signature(i18n_backend::SoloistSignatureFault),
     #[error("{0}")]
     Io(#[from] std::io::Error),
+}
+
+impl InstallError {
+    /// The message the settings show for a failed download, in `loc` (first
+    /// letter upper-case; the caller capitalises as before).
+    pub fn message_in(&self, loc: Locale) -> String {
+        let s = i18n_backend::backend_in(loc);
+        match self {
+            Self::Unsupported => s.soloist_unsupported.to_owned(),
+            Self::Redirected => s.soloist_redirected.to_owned(),
+            Self::Network(detail) => i18n_backend::fmt_soloist_network_in(loc, detail),
+            Self::ArchiveText(detail) => i18n_backend::fmt_soloist_archive_text_in(loc, detail),
+            Self::Archive(fault) => i18n_backend::fmt_soloist_archive_in(loc, *fault),
+            Self::WontRun => s.soloist_wont_run.to_owned(),
+            Self::Expired => s.soloist_only_expired.to_owned(),
+            Self::Signature(fault) => i18n_backend::fmt_soloist_signature_in(loc, fault),
+            Self::Io(e) => e.to_string(),
+        }
+    }
 }
 
 /// The archive of this platform on the CDN.
@@ -221,18 +248,18 @@ pub async fn download(
         .map_err(net)?;
     // Redirects are followed; the bytes must still come from Spotify's CDN.
     if response.url().scheme() != "https" || response.url().host_str() != Some(CDN) {
-        return Err(InstallError::Network("загрузка ушла с сервера Spotify".into()));
+        return Err(InstallError::Redirected);
     }
     let total = response.content_length();
     if total.is_some_and(|t| t > ARCHIVE_LIMIT) {
-        return Err(InstallError::Archive("слишком большой".into()));
+        return Err(InstallError::Archive(SoloistArchiveFault::TooLarge));
     }
     let mut bytes = Vec::with_capacity(total.unwrap_or(0) as usize);
     progress(0, total);
     let mut shown = std::time::Instant::now();
     while let Some(chunk) = response.chunk().await.map_err(net)? {
         if bytes.len() as u64 + chunk.len() as u64 > ARCHIVE_LIMIT {
-            return Err(InstallError::Archive("слишком большой".into()));
+            return Err(InstallError::Archive(SoloistArchiveFault::TooLarge));
         }
         bytes.extend_from_slice(&chunk);
         if shown.elapsed() >= Duration::from_millis(200) {
@@ -248,7 +275,7 @@ pub async fn download(
     let unpack_to = stage.clone();
     let unpacked = tokio::task::spawn_blocking(move || unpack(&bytes, zipped, &unpack_to))
         .await
-        .map_err(|e| InstallError::Archive(e.to_string()))?;
+        .map_err(|e| InstallError::ArchiveText(e.to_string()))?;
     let result = match unpacked {
         Ok(()) => adopt(root, &stage).await,
         Err(e) => Err(e),
@@ -273,7 +300,7 @@ async fn adopt(root: &Path, stage: &Path) -> Result<Build, InstallError> {
         let path = exe.clone();
         tokio::task::spawn_blocking(move || signature::check(&path))
             .await
-            .map_err(|e| InstallError::Signature(e.to_string()))?
+            .map_err(|e| InstallError::Io(std::io::Error::other(e)))?
             .map_err(InstallError::Signature)?;
     }
     let text = version_of(&exe).await.ok_or(InstallError::WontRun)?;
@@ -334,14 +361,13 @@ pub async fn version_of(exe: &Path) -> Option<String> {
 }
 
 /// An archive entry worth keeping: the executable and Spotify's notices, by
-/// their bare names; anything with a path that climbs out is refused.
-fn wanted(path: &Path) -> Result<Option<&'static str>, InstallError> {
+/// their bare names; anything with a path that climbs out is refused.fn wanted(path: &Path) -> Result<Option<&'static str>, InstallError> {
     if !path.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir)) {
-        return Err(InstallError::Archive("путь вне папки".into()));
+        return Err(InstallError::Archive(SoloistArchiveFault::PathOutside));
     }
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     if name.contains('\\') || name.contains(':') {
-        return Err(InstallError::Archive("путь вне папки".into()));
+        return Err(InstallError::Archive(SoloistArchiveFault::PathOutside));
     }
     Ok([EXE, "THIRD_PARTY_LICENSES.txt", "CHANGELOG.md", "LICENSE.txt"]
         .into_iter()
@@ -355,7 +381,7 @@ fn unpack(bytes: &[u8], zipped: bool, dest: &Path) -> Result<(), InstallError> {
     let mut save = |name: &'static str, size: u64, reader: &mut dyn Read| -> Result<(), InstallError> {
         total += size;
         if total > UNPACKED_LIMIT || seen.contains(&name) {
-            return Err(InstallError::Archive("размер или повтор".into()));
+            return Err(InstallError::Archive(SoloistArchiveFault::SizeOrRepeat));
         }
         seen.push(name);
         let mut file = std::fs::OpenOptions::new()
@@ -364,24 +390,24 @@ fn unpack(bytes: &[u8], zipped: bool, dest: &Path) -> Result<(), InstallError> {
             .open(dest.join(name))?;
         let written = std::io::copy(&mut reader.take(size + 1), &mut file)?;
         if written != size {
-            return Err(InstallError::Archive("обрезан".into()));
+            return Err(InstallError::Archive(SoloistArchiveFault::Truncated));
         }
         file.sync_all()?;
         Ok(())
     };
     if zipped {
         let mut archive =
-            zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| InstallError::Archive(e.to_string()))?;
+            zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| InstallError::ArchiveText(e.to_string()))?;
         if archive.len() > MAX_ENTRIES {
-            return Err(InstallError::Archive("слишком много файлов".into()));
+            return Err(InstallError::Archive(SoloistArchiveFault::TooManyFiles));
         }
         for i in 0..archive.len() {
-            let mut entry = archive.by_index(i).map_err(|e| InstallError::Archive(e.to_string()))?;
+            let mut entry = archive.by_index(i).map_err(|e| InstallError::ArchiveText(e.to_string()))?;
             if entry.is_symlink() {
-                return Err(InstallError::Archive("ссылка в архиве".into()));
+                return Err(InstallError::Archive(SoloistArchiveFault::Symlink));
             }
             let Some(path) = entry.enclosed_name() else {
-                return Err(InstallError::Archive("путь вне папки".into()));
+                return Err(InstallError::Archive(SoloistArchiveFault::PathOutside));
             };
             if entry.is_file()
                 && let Some(name) = wanted(&path)?
@@ -397,12 +423,12 @@ fn unpack(bytes: &[u8], zipped: bool, dest: &Path) -> Result<(), InstallError> {
             let mut archive = tar::Archive::new(decoded);
             for (i, entry) in archive.entries()?.enumerate() {
                 if i >= MAX_ENTRIES {
-                    return Err(InstallError::Archive("слишком много файлов".into()));
+                    return Err(InstallError::Archive(SoloistArchiveFault::TooManyFiles));
                 }
                 let mut entry = entry?;
                 let kind = entry.header().entry_type();
                 if !(kind.is_file() || kind.is_dir()) {
-                    return Err(InstallError::Archive("ссылка в архиве".into()));
+                    return Err(InstallError::Archive(SoloistArchiveFault::Symlink));
                 }
                 let path = entry.path()?.into_owned();
                 if kind.is_file()
@@ -417,7 +443,7 @@ fn unpack(bytes: &[u8], zipped: bool, dest: &Path) -> Result<(), InstallError> {
         return Err(InstallError::Unsupported);
     }
     if !seen.contains(&EXE) {
-        return Err(InstallError::Archive("нет программы".into()));
+        return Err(InstallError::Archive(SoloistArchiveFault::NoExe));
     }
     #[cfg(unix)]
     {
@@ -479,14 +505,14 @@ mod signature {
         data.dwStateAction = WTD_STATEACTION_CLOSE;
         unsafe { WinVerifyTrust(HWND::default(), &raw mut action, (&raw mut data).cast()) };
         if status != 0 {
-            return Err(format!("подпись не прошла проверку (0x{:08x})", status as u32));
+            return Err(nikgob_core::i18n::backend::SoloistSignatureFault::Failed(status as u32));
         }
         match signer {
             Some((name, org)) if super::spotify_signer(&name) || org.as_deref().is_some_and(super::spotify_signer) => {
                 Ok(())
             }
-            Some((name, _)) => Err(format!("подписано «{name}»")),
-            None => Err("подписавший не известен".into()),
+            Some((name, _)) => Err(nikgob_core::i18n::backend::SoloistSignatureFault::SignedBy(name)),
+            None => Err(nikgob_core::i18n::backend::SoloistSignatureFault::Unknown),
         }
     }
 
