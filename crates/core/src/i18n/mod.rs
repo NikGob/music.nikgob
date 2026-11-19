@@ -38,15 +38,47 @@ macro_rules! locale_table {
     };
 }
 
+pub mod activity;
+pub mod backend;
 pub mod common;
+pub mod detail;
+pub mod downloads;
 pub mod errors;
+pub mod first_run;
 pub mod home_recs;
+pub mod library;
 pub mod lyrics;
+pub mod menus;
+pub mod mesh;
+pub mod mobile;
 pub mod nav;
+pub mod pages;
 pub mod player;
+pub mod screens;
+pub mod search;
 pub mod settings;
+pub mod settings_tabs;
+pub mod status;
+pub mod streams_ui;
+pub mod view;
 
 pub use common::{CommonStrings, common, common_in, fmt_total, fmt_total_in, hours_minutes, hours_minutes_in, tracks_count, tracks_count_in};
+pub use settings_tabs::{SettingsTabsStrings, settings_tabs, settings_tabs_in};
+pub use first_run::{FirstRunStrings, first_run, first_run_in};
+pub use menus::{MenusStrings, menus, menus_in};
+pub use library::{LibraryStrings, library, library_in};
+pub use detail::{DetailStrings, detail, detail_in};
+pub use search::{SearchStrings, search, search_in};
+pub use pages::{PagesStrings, pages, pages_in};
+pub use downloads::{DownloadsStrings, downloads, downloads_in};
+pub use status::{StatusStrings, status, status_in};
+pub use streams_ui::{StreamsUiStrings, streams_ui, streams_ui_in};
+pub use mesh::{MeshStrings, mesh, mesh_in};
+pub use screens::{ScreensStrings, screens, screens_in};
+pub use view::{ViewStrings, view, view_in};
+pub use mobile::{MobileStrings, mobile, mobile_in};
+pub use activity::{ActivityStrings, activity, activity_in};
+pub use backend::{BackendStrings, backend, backend_in};
 pub use errors::{ErrorStrings, errors, errors_in};
 pub use home_recs::{
     BackgroundVariant, HomeRecsStrings, MixTitle, MoodKind, SideMixFlavor, TileStatic, WorldMixKind,
