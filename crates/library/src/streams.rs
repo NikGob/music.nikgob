@@ -364,6 +364,9 @@ fn release_for(
         None => {
             let mut r = Release::new(album.title.clone(), credit);
             r.year = album.year;
+            // The service's own word for it (a search hit says a single
+            // from an album); a listing that does not tell keeps Album.
+            r.release_type = album.release_type.unwrap_or_default();
             upsert_release_in(conn, &r)?.id
         }
     };
@@ -926,6 +929,7 @@ impl Library {
                 title: album.title.clone(),
                 artists: album.artists.clone(),
                 year: album.year,
+                release_type: Some(album.release_type),
             };
             for (i, t) in album.tracks.iter().enumerate() {
                 let mut t = t.clone();

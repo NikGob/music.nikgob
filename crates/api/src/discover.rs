@@ -363,7 +363,8 @@ pub struct DiscographyAnswer {
     pub artist: String,
     /// When the services were asked (unix ms).
     pub looked_up_ms: Option<i64>,
-    /// Newer than a day (an hour when a service failed).
+    /// Younger than an hour: the page shows it without asking the services
+    /// again.
     pub fresh: bool,
     /// Still being looked up: what is shown may be older.
     pub pending: bool,
@@ -378,7 +379,7 @@ pub struct DiscographyAnswer {
     get,
     path = "/v1/discover/artists/{id}/discography",
     tag = "discover",
-    params(("id" = String, Path, description = "the library artist's id"), ("refresh" = Option<bool>, Query, description = "Ask the services again if the details are stale")),
+    params(("id" = String, Path, description = "the library artist's id"), ("refresh" = Option<bool>, Query, description = "Ask the services again even when the kept answer is fresh")),
     responses((status = 200, body = DiscographyAnswer), (status = 404, body = crate::error::ErrorBody), (status = 503, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
@@ -396,9 +397,8 @@ pub async fn discography(
         Ok((a.name, nikgob_runtime::kept_discography(&lib, artist)))
     })
     .await?;
-    // Fresh: as kept. Kept but old: as kept unless asked to look again.
-    let fresh = kept.as_ref().is_some_and(|k| k.fresh);
-    if fresh || (kept.is_some() && !refresh) {
+    // Kept: as kept, unless asked to look again.
+    if kept.is_some() && !refresh {
         let lib = sh.lib.clone();
         return blocking(move || Ok(discography_answer(artist, &name, kept.as_ref(), false, &lib))).await.map(Json);
     }

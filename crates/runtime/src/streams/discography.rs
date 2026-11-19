@@ -24,9 +24,10 @@
 //!   YouTube Music.
 //! * Order: albums, then singles and EPs, then compilations, the rest last;
 //!   newest first in each group.
-//! * Each service is asked at most once a day per artist ([`TTL_MS`], kept
-//!   in the library's cache; an hour when a service failed): Spotify's
-//!   public quota is shared by every user.
+//! * The kept answer is shown at once, and the services are asked again in
+//!   the background when it is an hour old ([`REFRESH_MS`]); one older than
+//!   a day ([`TTL_MS`]) or one a service failed to give is looked up first.
+//!   Spotify's public quota is shared by every user.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -41,8 +42,11 @@ use crate::Worker;
 
 /// How long a looked-up discography is good for…
 pub(crate) const TTL_MS: UnixMs = 24 * 3600 * 1000;
-/// …and one that some service failed to give (not logged in yet, no
-/// network).
+/// …how old it may be before the services are asked again in the
+/// background (a new release shows on the next look)…
+pub(crate) const REFRESH_MS: UnixMs = 3600 * 1000;
+/// …and how long one lasts that some service failed to give (not logged in
+/// yet, no network).
 const PARTIAL_TTL_MS: UnixMs = 3600 * 1000;
 /// Hits of the right name whose albums are looked at.
 const CANDIDATES: usize = 3;
@@ -225,7 +229,7 @@ async fn lookup(
 pub struct KeptDiscography {
     /// When it was looked up (unix ms).
     pub at: UnixMs,
-    /// It is fresh enough to show without a new lookup.
+    /// Younger than [`REFRESH_MS`]: shown without asking again.
     pub fresh: bool,
     /// Why the services gave nothing, when they did not.
     pub error: Option<String>,
@@ -237,7 +241,7 @@ pub fn kept_discography(lib: &nikgob_library::Library, artist: ArtistId) -> Opti
     let (at, json) = lib.cache_get(&cache_key(artist)).ok().flatten()?;
     let c: Cached = serde_json::from_str(&json).ok()?;
     let now = nikgob_library::now_ms();
-    let fresh = now - at < if c.partial { PARTIAL_TTL_MS } else { TTL_MS };
+    let fresh = now - at < REFRESH_MS;
     let name = lib.get_artist(artist).ok().flatten().map(|a| a.name).unwrap_or_default();
     let keys = crate::artist_names::credit_keys(lib, artist, &name);
     let albums: Vec<StreamAlbum> = c.albums.iter().filter(|a| credited(a, &keys)).cloned().collect();
@@ -251,8 +255,9 @@ pub fn kept_discography(lib: &nikgob_library::Library, artist: ArtistId) -> Opti
 
 impl Worker {
     /// Fills [`v::ArtistDetail::discography`] for the open artist: from the
-    /// cache when it is fresh (and, when `retry`, not a failure), else from
-    /// the services.
+    /// cache when it is younger than [`REFRESH_MS`] (and not `retry`), else
+    /// asked of the services while the kept list (or the spinner) stays on
+    /// the page.
     pub(crate) fn load_discography(&mut self, artist: ArtistId, retry: bool) {
         let spotify = self
             .service(Service::Spotify)
@@ -271,24 +276,34 @@ impl Worker {
             .ok()
             .flatten()
             .and_then(|(at, json)| Some((at, serde_json::from_str::<Cached>(&json).ok()?)))
-            .filter(|(at, c)| now - at < if c.partial { PARTIAL_TTL_MS } else { TTL_MS })
-            .map(|(_, c)| c);
-        if let Some(c) = cached
-            && !(retry && c.error.is_some())
+            .filter(|(at, c)| now - at < if c.partial { PARTIAL_TTL_MS } else { TTL_MS });
+        let stale = cached.as_ref().is_some_and(|(at, _)| now - at >= REFRESH_MS);
+        if let Some((_, c)) = &cached
+            && !stale
+            && !retry
         {
-            let view = self.discography_view(artist, &c.albums, c.error);
+            let view = self.discography_view(artist, &c.albums, c.error.clone());
             self.publish_discography(artist, view);
             return;
         }
         if !self.streaming.disco.loading.insert(artist) {
-            self.publish_discography(artist, v::DiscographyView { loading: true, ..Default::default() });
+            let view = self.kept_or_loading(artist, cached.as_ref());
+            self.publish_discography(artist, view);
             return;
         }
         let Some(a) = self.lib.get_artist(artist).ok().flatten() else {
             self.streaming.disco.loading.remove(&artist);
             return;
         };
-        self.publish_discography(artist, v::DiscographyView { loading: true, ..Default::default() });
+        let view = self.kept_or_loading(artist, cached.as_ref());
+        self.publish_discography(artist, view);
+        let known = self.lib.external_ids(EntityKind::Artist, *artist.as_uuid()).unwrap_or_default();
+        // A service's own cache would answer with what it gave last time.
+        for remote in &known {
+            if let Some(svc) = self.service(remote.service) {
+                svc.forget(EntityKind::Artist, &remote.id);
+            }
+        }
         let ours: Vec<String> = self
             .lib
             .releases_of_artist(artist)
@@ -296,10 +311,6 @@ impl Worker {
             .iter()
             .map(|r| album_key(&r.release.title))
             .collect();
-        let known = self
-            .lib
-            .external_ids(EntityKind::Artist, *artist.as_uuid())
-            .unwrap_or_default();
         let keys = crate::artist_names::credit_keys(&self.lib, artist, &a.name);
         let name = a.name;
         self.streaming.spawn(async move {
@@ -341,13 +352,36 @@ impl Worker {
         }
         let error = (!ok && !errors.is_empty()).then(|| errors.join("; "));
         let partial = !errors.is_empty();
-        let cached = Cached { albums, error, partial };
+        let mut cached = Cached { albums, error, partial };
+        if !ok
+            && partial
+            && let Some(kept) = self.kept_cache(artist).filter(|k| k.error.is_none())
+        {
+            // A refresh that failed keeps the list the page has (asked
+            // again in an hour), not an error over it.
+            cached = Cached { albums: kept.albums, error: None, partial: true };
+        }
         if let Ok(json) = serde_json::to_string(&cached) {
             // A failure is kept too (no hammering), but `retry` skips it.
             let _ = self.lib.cache_put(&cache_key(artist), nikgob_library::now_ms(), &json);
         }
         let view = self.discography_view(artist, &cached.albums, cached.error);
         self.publish_discography(artist, view);
+    }
+
+    /// The last answer the library kept for `artist`, whatever its age.
+    fn kept_cache(&self, artist: ArtistId) -> Option<Cached> {
+        let (_, json) = self.lib.cache_get(&cache_key(artist)).ok().flatten()?;
+        serde_json::from_str(&json).ok()
+    }
+
+    /// What the page shows while the services are asked: the kept list
+    /// when there is one, else the spinner.
+    fn kept_or_loading(&self, artist: ArtistId, cached: Option<&(UnixMs, Cached)>) -> v::DiscographyView {
+        match cached {
+            Some((_, c)) => self.discography_view(artist, &c.albums, c.error.clone()),
+            None => v::DiscographyView { loading: true, ..Default::default() },
+        }
     }
 
     fn discography_view(&self, artist: ArtistId, albums: &[StreamAlbum], error: Option<String>) -> v::DiscographyView {

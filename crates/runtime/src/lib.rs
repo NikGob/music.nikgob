@@ -3809,7 +3809,8 @@ impl Worker {
             s.artist = Some(detail);
         });
         self.kick_photos(Some(id));
-        // "Нет в библиотеке": from the cache, or looked up once a day.
+        // "Нет в библиотеке": from the cache, looked up again when it is an
+        // hour old.
         self.load_discography(id, false);
     }
 

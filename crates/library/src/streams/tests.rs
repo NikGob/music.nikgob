@@ -1,4 +1,4 @@
-use nikgob_core::model::{Codec, SourceKind, WishlistItem, WishlistStatus, score};
+use nikgob_core::model::{Codec, ReleaseType, SourceKind, WishlistItem, WishlistStatus, score};
 use nikgob_core::streaming::FakeService;
 
 use super::same::Song;
@@ -1879,6 +1879,7 @@ fn a_song_on_two_albums_is_found_on_the_stream_album_first() {
         title: "Mushoku Tensei II OST 1 Special Edition".into(),
         artists: Vec::new(),
         year: None,
+        release_type: None,
     });
     assert_eq!(lib.track_for_stream(&t).unwrap(), Some(b));
     t.album = None;
@@ -2111,6 +2112,44 @@ fn a_radios_release_the_user_touched_is_never_taken() {
         assert_eq!(lib.get_track(smile).unwrap().unwrap().release_id, Some(radios), "{what}");
         assert_eq!(lib.release_by_remote(&album.id).unwrap(), Some(radios), "{what}: its id stays");
     }
+}
+
+/// A stream track of the Spotify album `title` of kind `kind` — as a search
+/// hit names the album it plays from — under the id `id` in the service.
+fn stream_album_track(id: &str, title: &str, kind: ReleaseType) -> StreamTrack {
+    let mut t = sp(0);
+    t.id = RemoteId::new(Service::Spotify, id);
+    t.title = title.into();
+    let mut album = t.album.clone().unwrap();
+    album.id = Some(RemoteId::new(Service::Spotify, format!("{id}-album")));
+    album.title = title.into();
+    album.release_type = Some(kind);
+    t.album = Some(album);
+    t
+}
+
+/// The release an upserted stream track lands on.
+fn release_of_stream(lib: &Library, t: &StreamTrack) -> Release {
+    let id = lib.upsert_stream_track(t).unwrap();
+    let release = lib.get_track(id).unwrap().unwrap().release_id.unwrap();
+    lib.get_release(release).unwrap().unwrap()
+}
+
+/// A single played from search makes a single, not an album; a release the
+/// library already has keeps the kind it has.
+#[test]
+fn a_stream_album_keeps_the_kind_the_service_says() {
+    let lib = lib();
+    let release = release_of_stream(&lib, &stream_album_track("sp-single", "Отдельный сингл", ReleaseType::Single));
+    assert_eq!(release.release_type, ReleaseType::Single);
+
+    // The library knows a release of the title already: it is not rewritten.
+    let kept = lib
+        .upsert_release(&Release::new("Уже есть", ArtistCredit::single("Кино", None)))
+        .unwrap();
+    let release = release_of_stream(&lib, &stream_album_track("sp-kept", "Уже есть", ReleaseType::Single));
+    assert_eq!(release.id, kept.id);
+    assert_eq!(release.release_type, ReleaseType::Album);
 }
 
 /// The tracklist misses of the older matching go once: found marks and

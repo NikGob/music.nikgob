@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn topic_channel_kept() {
         let mut topic = yt("Gurenge", "LiSA - Topic", TrackKind::Song, 239);
-        topic.album = Some(AlbumRef { id: None, title: "LEO-NiNE".into(), artists: Vec::new(), year: None });
+        topic.album = Some(AlbumRef { id: None, title: "LEO-NiNE".into(), artists: Vec::new(), year: None, release_type: None });
         let kept = [
             topic,
             yt("Kick Back", "Kenshi Yonezu", TrackKind::Song, 193),
