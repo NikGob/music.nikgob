@@ -10,6 +10,7 @@ use nikgob_view::{
     ArtistCard, Command, LibraryTab, PlaylistCard, ReleaseCard, ReleaseSort, ReleaseType, Route, TrackRow,
     TrackSort, ViewState,
 };
+use nikgob_core::i18n;
 
 use super::{PageState, shelf, widgets};
 use crate::{
@@ -22,22 +23,28 @@ use crate::{
     tokens::{shape, state as state_layer},
 };
 
-const TABS: [(LibraryTab, &str); 7] = [
-    (LibraryTab::All, "Всё"),
-    (LibraryTab::Playlists, "Плейлисты"),
-    (LibraryTab::Albums, "Альбомы"),
-    (LibraryTab::Artists, "Исполнители"),
-    (LibraryTab::Tracks, "Треки"),
-    (LibraryTab::Downloaded, "Скачано"),
-    (LibraryTab::Trash, "Корзина"),
-];
+fn tab_list() -> [(LibraryTab, &'static str); 7] {
+    let s = i18n::library();
+    [
+        (LibraryTab::All, s.tab_all),
+        (LibraryTab::Playlists, s.tab_playlists),
+        (LibraryTab::Albums, s.tab_albums),
+        (LibraryTab::Artists, s.tab_artists),
+        (LibraryTab::Tracks, s.tab_tracks),
+        (LibraryTab::Downloaded, s.tab_downloaded),
+        (LibraryTab::Trash, s.tab_trash),
+    ]
+}
 
-const SORTS: [(ReleaseSort, &str); 4] = [
-    (ReleaseSort::Artist, "По исполнителю"),
-    (ReleaseSort::Title, "По названию"),
-    (ReleaseSort::Year, "По году"),
-    (ReleaseSort::Added, "Недавно добавленные"),
-];
+fn sorts() -> [(ReleaseSort, &'static str); 4] {
+    let s = i18n::library();
+    [
+        (ReleaseSort::Artist, s.sort_artist),
+        (ReleaseSort::Title, s.sort_title),
+        (ReleaseSort::Year, s.sort_year),
+        (ReleaseSort::Added, s.sort_added),
+    ]
+}
 
 /// The «Любимые» chip of «Альбомы» (after «Всё», «Альбомы», «Синглы», «EP»).
 const LIKED_FILTER: usize = 4;
@@ -88,9 +95,9 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         if widgets::empty_state(
             ui,
             Icon::LibraryMusic,
-            "Здесь пока пусто",
-            "Лайкни трек в поиске — он появится здесь. Свои файлы: папка Inbox или «Добавить».",
-            Some("Добавить папку"),
+            i18n::library().empty_title,
+            i18n::library().empty_body,
+            Some(i18n::pages().add_folder),
         ) {
             super::dialogs::folder(|d| d, Command::ImportFolder, out);
         }
@@ -130,7 +137,7 @@ fn header(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
     let lib = &state.library;
     let row = vec2(ui.available_width(), 48.0);
     ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(Align::Center), |ui| {
-        ui.label(TypeRole::HeadlineMedium.style().rich("Библиотека", s.on_surface));
+        ui.label(TypeRole::HeadlineMedium.style().rich(i18n::nav().library, s.on_surface));
         if matches!(tab, LibraryTab::Trash | LibraryTab::Downloaded) {
             return;
         }
@@ -148,7 +155,7 @@ fn header(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
                 // The group lays out left to right inside this right-to-left row.
                 let picked = ui
                     .allocate_ui_with_layout(vec2(82.0, 40.0), egui::Layout::left_to_right(Align::Center), |ui| {
-                        ConnectedGroup::new("lib-view", &["Сетка", "Список"])
+                    ConnectedGroup::new("lib-view", &[i18n::library().view_grid, i18n::library().view_list])
                             .icons(&[Icon::GridView, Icon::ViewList])
                             .show(ui, usize::from(is_list))
                     })
@@ -163,20 +170,20 @@ fn header(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
 }
 
 fn sort_button(ui: &mut Ui, cur: ReleaseSort, narrow: bool, out: &mut Vec<Command>) {
-    let label = SORTS.iter().find(|s| s.0 == cur).map_or("Сортировка", |s| s.1);
+    let label = sorts().iter().find(|s| s.0 == cur).map_or(i18n::library().sort, |s| s.1);
     let resp = if narrow {
-        ui.add(IconButton::new(Icon::Sort).tooltip(format!("Сортировка: {}", label.to_lowercase())).id_salt("lib-sort"))
+        ui.add(IconButton::new(Icon::Sort).tooltip(i18n::library::fmt_sort_tooltip(label)).id_salt("lib-sort"))
     } else {
         ui.add(crate::components::Button::new(label).icon(Icon::Sort).style(Style::Text).id_salt("lib-sort"))
     };
     let mut menu = Menu::new("lib-sort-menu").align_right(true);
-    for (sort, label) in SORTS {
+    for (sort, label) in sorts() {
         menu = menu.item(MenuItem::new(label).selected(cur == sort));
     }
     if let Some(i) = menu.attach(&resp)
-        && SORTS[i].0 != cur
+        && sorts()[i].0 != cur
     {
-        out.push(Command::SortReleases(SORTS[i].0));
+        out.push(Command::SortReleases(sorts()[i].0));
     }
 }
 
@@ -189,9 +196,9 @@ fn only_downloaded(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
             .style(Style::Filled)
             .selected(on)
             .tooltip(if on {
-                "Только скачанное: стрим скрыт. Нажми, чтобы показать всё"
+                i18n::library().only_downloaded_on
             } else {
-                "Только скачанное: скрыть то, что играет из сервисов"
+                i18n::library().only_downloaded_off
             })
             .id_salt("lib-only-downloaded"),
     );
@@ -203,24 +210,24 @@ fn only_downloaded(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
 /// What the filter looks through on each tab (the bar's placeholder).
 pub(super) fn filter_hint(tab: LibraryTab) -> &'static str {
     match tab {
-        LibraryTab::Playlists => "Найти плейлист",
-        LibraryTab::Albums => "Найти альбом или исполнителя",
-        LibraryTab::Artists => "Найти исполнителя",
-        LibraryTab::Tracks => "Найти трек, альбом, исполнителя",
-        LibraryTab::All | LibraryTab::Downloaded | LibraryTab::Trash => "Найти в библиотеке",
+        LibraryTab::Playlists => i18n::library().hint_playlists,
+        LibraryTab::Albums => i18n::library().hint_albums,
+        LibraryTab::Artists => i18n::library().hint_artists,
+        LibraryTab::Tracks => i18n::library().hint_tracks,
+        LibraryTab::All | LibraryTab::Downloaded | LibraryTab::Trash => i18n::library().hint_default,
     }
 }
 
 fn tabs(ui: &mut Ui, pages: &mut PageState, track_sort: TrackSort, out: &mut Vec<Command>) {
-    let labels: Vec<&str> = TABS.iter().map(|t| t.1).collect();
-    let idx = TABS.iter().position(|t| t.0 == pages.library_tab).unwrap_or(0);
+    let labels: Vec<&str> = tab_list().iter().map(|t| t.1).collect();
+    let idx = tab_list().iter().position(|t| t.0 == pages.library_tab).unwrap_or(0);
     let picked = ui
         .allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(Align::Center), |ui| {
             ConnectedGroup::new("lib-tabs", &labels).show(ui, idx)
         })
         .inner;
     if let Some(i) = picked {
-        open_tab(pages, TABS[i].0, track_sort, out);
+        open_tab(pages, tab_list()[i].0, track_sort, out);
     }
 }
 
@@ -248,20 +255,17 @@ fn count_line(ui: &mut Ui, text: &str, add: impl FnOnce(&mut Ui)) {
     ui.add_space(8.0);
 }
 
-fn count(n: usize, one: &str, few: &str, many: &str) -> String {
-    format!("{n} {}", common::plural(n as u64, one, few, many))
-}
 
 /// «Ничего не найдено» for the filter, with «Сбросить» (also the chips).
 fn no_results(ui: &mut Ui, pages: &mut PageState) {
     // The title and what to do next, no line under it.
     let q = pages.library_filter.trim().to_owned();
     if q.is_empty() {
-        if widgets::empty_state(ui, Icon::Search, "Ничего не найдено", "", Some("Сбросить")) {
+        if widgets::empty_state(ui, Icon::Search, i18n::library().no_results, "", Some(i18n::common().reset)) {
             pages.release_filter = 0;
             pages.release_source = 0;
         }
-    } else if widgets::empty_state(ui, Icon::Search, "Ничего не найдено", "", Some("Искать везде")) {
+    } else if widgets::empty_state(ui, Icon::Search, i18n::library().no_results, "", Some(i18n::library().search_everywhere)) {
         pages.search_everywhere = Some(q);
     }
 }
@@ -292,7 +296,7 @@ fn overview(
         }
         match section {
             shelf::Overview::Playlists => {
-                if widgets::section_header(ui, "Плейлисты", true) {
+                if widgets::section_header(ui, i18n::library().tab_playlists, true) {
                     open_tab(pages, LibraryTab::Playlists, lib.track_sort, out);
                 }
                 // «Новый плейлист» first, then every playlist (and liked
@@ -304,7 +308,7 @@ fn overview(
                 });
             }
             shelf::Overview::LikedAlbums => {
-                if widgets::section_header(ui, "Любимые альбомы", true) {
+                if widgets::section_header(ui, i18n::nav().liked_albums, true) {
                     pages.release_filter = LIKED_FILTER;
                     open_tab(pages, LibraryTab::Albums, lib.track_sort, out);
                 }
@@ -313,7 +317,7 @@ fn overview(
                 });
             }
             shelf::Overview::RecentlyAdded => {
-                if widgets::section_header(ui, "Недавно добавлено", true) {
+                if widgets::section_header(ui, i18n::library().recently_added, true) {
                     // The whole list in the same order.
                     if lib.release_sort != ReleaseSort::Added {
                         out.push(Command::SortReleases(ReleaseSort::Added));
@@ -328,7 +332,7 @@ fn overview(
             }
             shelf::Overview::OftenPlayed => {
                 // A top of its own: no tab holds this order.
-                widgets::section_header(ui, "Часто слушаешь", false);
+                widgets::section_header(ui, i18n::library().often_played, false);
                 widgets::card_row(ui, "lib-often", |ui| {
                     for r in &lib.often_played {
                         nav = widgets::release_card(ui, r, widgets::CARD_W, "often", out).or(nav.take());
@@ -338,16 +342,16 @@ fn overview(
             shelf::Overview::Albums => {
                 let total = lib.releases.len();
                 let shown = shelf::overview_albums(total, if is_list { 4 } else { cols });
-                let all = format!("Все {total}");
+                let all = i18n::library::fmt_all_count(total);
                 let action = (shown < total).then_some((all.as_str(), Icon::ArrowForward));
-                if widgets::section_header_with(ui, "Альбомы", action) {
+                if widgets::section_header_with(ui, i18n::library().tab_albums, action) {
                     open_tab(pages, LibraryTab::Albums, lib.track_sort, out);
                 }
                 let first: Vec<&ReleaseCard> = lib.releases.iter().take(shown).collect();
                 nav = release_items(ui, &first, is_list, "ov", out).or(nav);
             }
             shelf::Overview::Artists => {
-                if widgets::section_header(ui, "Исполнители", true) {
+                if widgets::section_header(ui, i18n::library().tab_artists, true) {
                     open_tab(pages, LibraryTab::Artists, lib.track_sort, out);
                 }
                 widgets::card_row_virtual(ui, "lib-artists", lib.artists.len(), AVATAR, |ui, i| {
@@ -377,17 +381,17 @@ fn found(
     let nothing = playlists.is_empty() && releases.is_empty() && artists.is_empty();
     if !nothing {
         if !artists.is_empty() {
-            widgets::section_header(ui, &format!("Исполнители · {}", artists.len()), false);
+            widgets::section_header(ui, &format!("{} · {}", i18n::library().tab_artists, artists.len()), false);
             nav = artist_items(ui, &artists, is_list, out).or(nav);
             ui.add_space(widgets::SECTION_GAP);
         }
         if !releases.is_empty() {
-            widgets::section_header(ui, &format!("Альбомы · {}", releases.len()), false);
+            widgets::section_header(ui, &format!("{} · {}", i18n::library().tab_albums, releases.len()), false);
             nav = release_items(ui, &releases, is_list, "found", out).or(nav);
             ui.add_space(widgets::SECTION_GAP);
         }
         if !playlists.is_empty() {
-            widgets::section_header(ui, &format!("Плейлисты · {}", playlists.len()), false);
+            widgets::section_header(ui, &format!("{} · {}", i18n::library().tab_playlists, playlists.len()), false);
             let items: Vec<ShelfItem<'_>> = playlists.iter().map(|p| ShelfItem::Playlist(p)).collect();
             nav = playlist_items(ui, &items, pages, is_list, out).or(nav);
             ui.add_space(widgets::SECTION_GAP);
@@ -407,7 +411,7 @@ fn found(
             ui.spacing_mut().item_spacing.x = 8.0;
             let open = ui
                 .add(
-                    crate::components::Button::new("Искать среди треков")
+                    crate::components::Button::new(i18n::library().search_tracks)
                         .icon(Icon::MusicNote)
                         .style(Style::Tonal)
                         .id_salt("lib-found-tracks"),
@@ -416,7 +420,7 @@ fn found(
             let all = !nothing
                 && ui
                     .add(
-                        crate::components::Button::new("Искать везде")
+                        crate::components::Button::new(i18n::library().search_everywhere)
                             .icon(Icon::Search)
                             .style(Style::Tonal)
                             .id_salt("lib-found-all"),
@@ -449,15 +453,16 @@ fn playlists_tab(
         return None;
     }
     let albums = shown.iter().filter(|i| matches!(i, ShelfItem::Album(_))).count();
-    let mut line = count(shown.len() - albums, "плейлист", "плейлиста", "плейлистов");
+    let lib = i18n::library();
+    let mut line = i18n::pages::fmt_count((shown.len() - albums) as u64, &lib.playlists);
     if albums > 0 {
-        line = format!("{line} · {}", count(albums, "альбом", "альбома", "альбомов"));
+        line = format!("{line} · {}", i18n::pages::fmt_count(albums as u64, &lib.albums));
     }
     count_line(ui, &line, |_| {});
     // «Новый плейлист» first, unless the list is filtered.
     if words.is_empty() {
         if is_list {
-            if ListItem::new("Новый плейлист")
+            if ListItem::new(i18n::library().new_playlist)
                 .leading_icon(Icon::PlaylistAdd)
                 .id_salt("new-playlist-row")
                 .show(ui)
@@ -545,7 +550,8 @@ fn album_chips(ui: &mut Ui, state: &ViewState, pages: &mut PageState, n: usize, 
     }
     ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        let kinds = ["Всё", "Альбомы", "Синглы", "EP", "Любимые"];
+        let l = i18n::library();
+        let kinds = [l.tab_all, l.tab_albums, l.chip_singles, "EP", l.chip_liked];
         for (idx, label) in kinds.iter().enumerate().take(if liked { kinds.len() } else { LIKED_FILTER }) {
             if ui.add(FilterChip::new(*label, pages.release_filter == idx).id_salt(("rel-filter", idx))).clicked() {
                 pages.release_filter = idx;
@@ -554,11 +560,11 @@ fn album_chips(ui: &mut Ui, state: &ViewState, pages: &mut PageState, n: usize, 
         // Where the albums play from: files, or only a service (no use
         // while «только скачанное» hides the stream anyway).
         if !state.prefs.library_only_downloaded {
-            const SOURCES: [&str; 3] = ["Все источники", "Скачанные", "Стрим"];
+            let sources = [i18n::library().source_all, i18n::library().source_downloaded, i18n::library().source_stream];
             let cur = pages.release_source.min(2);
-            let chip = ui.add(FilterChip::new(SOURCES[cur], cur != 0).trailing_icon(Icon::ExpandMore).id_salt("rel-source"));
+            let chip = ui.add(FilterChip::new(sources[cur], cur != 0).trailing_icon(Icon::ExpandMore).id_salt("rel-source"));
             let mut menu = Menu::new("rel-source-menu");
-            for (i, l) in SOURCES.iter().enumerate() {
+            for (i, l) in sources.iter().enumerate() {
                 menu = menu.item(MenuItem::new(*l).selected(i == cur));
             }
             if let Some(i) = menu.attach(&chip) {
@@ -566,7 +572,7 @@ fn album_chips(ui: &mut Ui, state: &ViewState, pages: &mut PageState, n: usize, 
             }
         }
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-            ui.label(TypeRole::LabelLarge.style().rich(count(n, "альбом", "альбома", "альбомов"), s.on_surface_variant));
+            ui.label(TypeRole::LabelLarge.style().rich(i18n::pages::fmt_count(n as u64, &i18n::library().albums), s.on_surface_variant));
         });
     });
     ui.add_space(8.0);
@@ -595,13 +601,13 @@ fn artists_tab(
     let shown: Vec<&ArtistCard> = state.library.artists.iter().filter(|a| shelf::artist_matches(words, a)).collect();
     if shown.is_empty() {
         if words.is_empty() {
-            widgets::empty_state(ui, Icon::Person, "Исполнителей пока нет", "", None);
+            widgets::empty_state(ui, Icon::Person, i18n::library().artists_empty, "", None);
         } else {
             no_results(ui, pages);
         }
         return None;
     }
-    count_line(ui, &count(shown.len(), "исполнитель", "исполнителя", "исполнителей"), |_| {});
+    count_line(ui, &i18n::pages::fmt_count(shown.len() as u64, &i18n::common().artists), |_| {});
     artist_items(ui, &shown, is_list, out)
 }
 
@@ -612,14 +618,14 @@ fn new_playlist_card(ui: &mut Ui, pages: &mut PageState, w: f32) {
         .clickable(true)
         .width(w)
         .min_height(w + 56.0)
-        .label("Новый плейлист")
+        .label(i18n::library().new_playlist)
         .id_salt(("new-playlist-card", w as u32))
         .show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(w * 0.3);
                 Icon::Add.widget(false, s.primary, 40.0).ui(ui);
                 ui.add_space(8.0);
-                ui.label(TypeRole::TitleSmall.style().rich("Новый плейлист", s.on_surface));
+                ui.label(TypeRole::TitleSmall.style().rich(i18n::library().new_playlist, s.on_surface));
             });
         });
     if o.response.clicked() {
@@ -770,7 +776,7 @@ fn release_row(ui: &mut Ui, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<R
             if wide {
                 meta_cell(ui, 88.0, |ui| {
                     if tracks > 0 {
-                        ui.label(TypeRole::BodyMedium.style().rich(count(tracks as usize, "трек", "трека", "треков"), s.on_surface_variant));
+                        ui.label(TypeRole::BodyMedium.style().rich(i18n::tracks_count(u64::from(tracks)), s.on_surface_variant));
                     }
                 });
             }
@@ -795,7 +801,7 @@ fn release_row(ui: &mut Ui, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<R
 
 /// List view: a playlist row.
 fn playlist_row(ui: &mut Ui, p: &PlaylistCard, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
-    let mut line = count(p.track_count as usize, "трек", "трека", "треков");
+    let mut line = i18n::tracks_count(u64::from(p.track_count));
     if let Some(service) = p.service {
         line = format!("{} · {line}", service.display_name());
     }
@@ -845,11 +851,11 @@ fn downloaded(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut V
     let days = &state.library.downloaded;
     let loaded: usize = days.iter().map(|d| d.tracks.len()).sum();
     if loaded == 0 {
-        widgets::empty_state(ui, Icon::DownloadDone, "Пока ничего", "", None);
+        widgets::empty_state(ui, Icon::DownloadDone, i18n::library().downloaded_empty, "", None);
         return None;
     }
     let total = state.library.downloaded_total.max(loaded);
-    count_line(ui, &count(total, "трек", "трека", "треков"), |_| {});
+    count_line(ui, &i18n::tracks_count(total as u64), |_| {});
     let step_key = ui.id().with("downloaded-row-step");
     let mut step = ui.ctx().data(|d| d.get_temp::<f32>(step_key)).unwrap_or(72.0 + ui.spacing().item_spacing.y);
     let clip = ui.clip_rect();
@@ -913,7 +919,7 @@ fn downloaded(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut V
         ui.add_space(8.0);
         let more = ui
             .vertical_centered(|ui| {
-                ui.add(crate::components::Button::new("Показать ещё").style(Style::Tonal).id_salt("downloaded-more"))
+                ui.add(crate::components::Button::new(i18n::library().show_more).style(Style::Tonal).id_salt("downloaded-more"))
                     .clicked()
             })
             .inner;
@@ -929,23 +935,23 @@ fn downloaded(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut V
 fn trash(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     let items = &state.library.trash;
     let n = items.len();
-    count_line(ui, &format!("{} в корзине", count(n, "трек", "трека", "треков")), |ui| {
+    count_line(ui, &i18n::library::fmt_in_trash(&i18n::tracks_count(n as u64)), |ui| {
         if n == 0 {
             return;
         }
         if ui
-            .add(crate::components::Button::new("Очистить корзину").icon(Icon::Delete).style(Style::Tonal).id_salt("trash-empty"))
+            .add(crate::components::Button::new(i18n::library().empty_trash).icon(Icon::Delete).style(Style::Tonal).id_salt("trash-empty"))
             .clicked()
         {
             pages.confirm_empty_trash = true;
         }
-        if ui.add(crate::components::Button::new("Восстановить всё").style(Style::Text).id_salt("trash-restore-all")).clicked() {
+        if ui.add(crate::components::Button::new(i18n::library().restore_all).style(Style::Text).id_salt("trash-restore-all")).clicked() {
             out.push(Command::RestoreTracks(items.iter().map(|i| i.track.id).collect()));
         }
     });
     ui.add_space(8.0);
     if items.is_empty() {
-        widgets::empty_state(ui, Icon::Delete, "Корзина пуста", "", None);
+        widgets::empty_state(ui, Icon::Delete, i18n::library().trash_empty, "", None);
         return None;
     }
     for (i, item) in items.iter().enumerate() {
@@ -954,7 +960,7 @@ fn trash(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Co
         if let Some(a) = &t.album {
             line = format!("{line} · {a}");
         }
-        line = format!("{line} · удалено {} · осталось {} дн.", item.deleted, item.days_left);
+        line = format!("{line} · {}", i18n::library::fmt_trash_line(&item.deleted, item.days_left));
         let (mut restore, mut purge) = (false, false);
         let o = ListItem::new(&t.title)
             .supporting(line)
@@ -962,10 +968,10 @@ fn trash(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Co
             .trailing(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     purge = ui
-                        .add(IconButton::new(Icon::Delete).size(Size::S).tooltip("Удалить навсегда").id_salt(("trash-purge", i)))
+                        .add(IconButton::new(Icon::Delete).size(Size::S).tooltip(i18n::menus().purge_forever).id_salt(("trash-purge", i)))
                         .clicked();
                     restore = ui
-                        .add(crate::components::Button::new("Восстановить").size(Size::S).style(Style::Tonal).id_salt(("trash-restore", i)))
+                        .add(crate::components::Button::new(i18n::library().restore).size(Size::S).style(Style::Tonal).id_salt(("trash-restore", i)))
                         .clicked();
                 });
             })
@@ -978,9 +984,9 @@ fn trash(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Co
             pages.confirm_purge = Some((super::Doomed::Tracks(vec![t.id]), format!("«{}»", t.title)));
         }
         let picked = Menu::new(("trash-menu", t.id))
-            .item(MenuItem::new("Восстановить"))
+            .item(MenuItem::new(i18n::library().restore))
             .divider()
-            .item(MenuItem::new("Удалить навсегда").icon(Icon::Delete))
+            .item(MenuItem::new(i18n::menus().purge_forever).icon(Icon::Delete))
             .context_menu(&o.response);
         match picked {
             Some(0) => out.push(Command::RestoreTracks(vec![t.id])),
@@ -1094,12 +1100,12 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         return None;
     }
     let summary = match hits {
-        Some(_) => format!("Нашлось: {}", count(total, "трек", "трека", "треков")),
-        None => count(total, "трек", "трека", "треков"),
+        Some(_) => i18n::library::fmt_found(&i18n::tracks_count(total as u64)),
+        None => i18n::tracks_count(total as u64),
     };
     count_line(ui, &summary, |_| {});
     if total == 0 {
-        widgets::empty_state(ui, Icon::MusicNote, "Треков пока нет", "", None);
+        widgets::empty_state(ui, Icon::MusicNote, i18n::library().tracks_empty, "", None);
         return None;
     }
 
@@ -1211,7 +1217,7 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         let tw = cols.title.1 - tx;
         let g = line(ui.painter(), &t.title, TypeRole::BodyLarge.style(), fg, tw);
         ui.painter().galley(pos2(tx, cy - 22.0), g, fg);
-        let artist = if t.clip { format!("{} · клип", t.artist) } else { t.artist.clone() };
+        let artist = if t.clip { format!("{} · {}", t.artist, i18n::pages().clip) } else { t.artist.clone() };
         let g = line(ui.painter(), &artist, TypeRole::BodyMedium.style(), variant, tw);
         // Each artist is a link to its page.
         let (links, routes) = crate::screens::artist_links::library_spans(&t.artists, &artist);
@@ -1240,11 +1246,11 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         // Качество; a track without a file plays from a service: "стрим".
         if let Some((x0, x1)) = cols.quality {
             let stream = match (t.has_local, t.source) {
-                (false, Some(nikgob_view::SourceKind::Spotify)) => Some("стрим · Spotify"),
-                (false, Some(nikgob_view::SourceKind::Youtube)) => Some("стрим · YouTube"),
+                (false, Some(nikgob_view::SourceKind::Spotify)) => Some(format!("{} · Spotify", i18n::pages().stream)),
+                (false, Some(nikgob_view::SourceKind::Youtube)) => Some(format!("{} · YouTube", i18n::pages().stream)),
                 _ => None,
             };
-            if let Some(m) = stream {
+            if let Some(m) = stream.as_deref() {
                 let g = plain(ui.painter(), m, TypeRole::LabelSmall.style(), s.on_secondary_container);
                 let r = Rect::from_min_size(pos2(x0, cy - 10.0), vec2((g.size().x + 12.0).min(x1 - x0), 20.0));
                 paint::container(ui.painter(), r, Radii::all(shape::SMALL), s.secondary_container, Stroke::NONE);
@@ -1262,7 +1268,7 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         // ⋮.
         let slot = Rect::from_center_size(pos2((cols.more.0 + cols.more.1) * 0.5, cy), vec2(MORE_W, MORE_W));
         let mut mui = ui.new_child(UiBuilder::new().max_rect(slot).id_salt(("tbl-more", i)));
-        let more = mui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("tbl-more-btn", i)));
+        let more = mui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip(i18n::common().more).id_salt(("tbl-more-btn", i)));
         nav = pages.track_menu_attach(&more, t, state, out).or(nav);
 
         // A second tap of a double click on ▶ must not pause what the first started.
@@ -1295,16 +1301,16 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
     // (label, x range, sort it triggers)
     let mut cells: Vec<(&str, (f32, f32), Option<TrackSort>, bool)> = vec![
         ("#", cols.num, Some(TrackSort::Added), false),
-        ("Название", (title_x, title_x + 76.0), Some(TrackSort::Title), false),
-        ("Исполнитель", (title_x + 92.0, title_x + 92.0 + 92.0), Some(TrackSort::Artist), false),
+        (i18n::sound_facts().tag_title, (title_x, title_x + 76.0), Some(TrackSort::Title), false),
+        (i18n::sound_facts().tag_artist, (title_x + 92.0, title_x + 92.0 + 92.0), Some(TrackSort::Artist), false),
     ];
     if let Some(a) = cols.album {
-        cells.push(("Альбом", a, Some(TrackSort::Album), false));
+        cells.push((i18n::sound_facts().tag_album, a, Some(TrackSort::Album), false));
     }
     if let Some(q) = cols.quality {
-        cells.push(("Качество", q, None, false));
+        cells.push((i18n::library().quality_col, q, None, false));
     }
-    cells.push(("Длительность", cols.duration, Some(TrackSort::Duration), true));
+    cells.push((i18n::sound_facts().duration, cols.duration, Some(TrackSort::Duration), true));
     for (label, (x0, x1), by, right) in cells {
         let by = by.filter(|_| hits.is_none());
         let active = by.is_some() && by == Some(lib.track_sort);

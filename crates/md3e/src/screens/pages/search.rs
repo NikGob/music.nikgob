@@ -19,12 +19,12 @@ use nikgob_view::{
     Account, Command, Route, SearchAlbum, SearchAnswer, SearchArtist, SearchPick, SearchPlaylist, SearchSources,
     SearchTrack, Service, StreamPage, StreamSearchSection, TOP_TRACKS, TopResult, TorrentResult, ViewState,
 };
+use nikgob_core::i18n;
 
 use super::{PageState, fmt_size, streams, widgets};
 use crate::{
     Icon, Theme, TypeRole,
     components::{Button, FilterChip, IconButton, ListItem, LoadingIndicator, Radii, Size, Style, anim, badge, paint},
-    screens::common,
     tokens::shape,
 };
 use widgets::{Lead, PlayFrom};
@@ -143,7 +143,7 @@ pub fn search_results(
         .show(&mut hui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                let mut chips = vec![("Всё", Filter::All), ("Библиотека", Filter::Library)];
+                let mut chips = vec![(i18n::library().tab_all, Filter::All), (i18n::nav().library, Filter::Library)];
                 if deezer {
                     chips.push(("Deezer", Filter::Deezer));
                 }
@@ -154,7 +154,7 @@ pub fn search_results(
                 if spotify {
                     chips.push(("Spotify", Filter::Spotify));
                 }
-                chips.push(("Торренты", Filter::Torrents));
+                chips.push((i18n::search().chip_torrents, Filter::Torrents));
                 for (name, chip) in chips {
                     if ui.add(FilterChip::new(name, f == chip).id_salt(("sf", name))).clicked() {
                         f = chip;
@@ -240,7 +240,7 @@ fn section_head(ui: &mut Ui, title: &str, loading: bool, all: bool) -> bool {
         if all {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 clicked = ui
-                    .add(Button::new("Все").style(Style::Text).icon(Icon::ArrowForward).id_salt(("search-all", title)))
+                    .add(Button::new(i18n::common().all).style(Style::Text).icon(Icon::ArrowForward).id_salt(("search-all", title)))
                     .clicked();
             });
         }
@@ -285,17 +285,17 @@ fn library(
     let mut nav = None;
     let loading = r.query.trim() != query.trim() || r.searching;
     let empty = r.tracks.is_empty() && r.releases.is_empty() && r.artists.is_empty() && r.playlists.is_empty();
-    section_head(ui, "Библиотека", loading, false);
+    section_head(ui, i18n::nav().library, loading, false);
     if empty && loading {
         return None;
     }
     if empty {
-        widgets::empty_state(ui, Icon::Search, "Ничего не нашлось", "В библиотеке такого нет.", None);
+        widgets::empty_state(ui, Icon::Search, i18n::library().no_results, i18n::search().library_none_body, None);
         ui.add_space(widgets::SECTION_GAP);
         return None;
     }
     if !r.tracks.is_empty() {
-        part_label(ui, "Треки");
+        part_label(ui, i18n::library().tab_tracks);
         nav = widgets::track_list(
             ui,
             "search",
@@ -309,7 +309,7 @@ fn library(
         .or(nav.take());
     }
     if !r.releases.is_empty() {
-        part_label(ui, "Альбомы");
+        part_label(ui, i18n::library().tab_albums);
         widgets::card_row(ui, "search-releases", |ui| {
             for rel in &r.releases {
                 // As the album opens everywhere (its own choice, else the setting).
@@ -318,7 +318,7 @@ fn library(
         });
     }
     if !r.artists.is_empty() {
-        part_label(ui, "Исполнители");
+        part_label(ui, i18n::library().tab_artists);
         widgets::card_row(ui, "search-artists", |ui| {
             for a in &r.artists {
                 nav = widgets::artist_avatar(ui, a, 120.0, out).or(nav.take());
@@ -326,7 +326,7 @@ fn library(
         });
     }
     if !r.playlists.is_empty() {
-        part_label(ui, "Плейлисты");
+        part_label(ui, i18n::library().tab_playlists);
         widgets::card_row(ui, "search-playlists", |ui| {
             for p in &r.playlists {
                 nav = widgets::playlist_card_with(ui, p, widgets::CARD_W, "search", Some(&mut *pages), out)
@@ -343,7 +343,7 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
     let t = &state.search.torrents;
     let q = query.trim();
     let stale = t.query.trim() != q;
-    section_head(ui, "Торренты", t.searching, false);
+    section_head(ui, i18n::search().chip_torrents, t.searching, false);
 
     // The section's own mark says it is looking.
     if t.searching {
@@ -353,8 +353,8 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
     if !state.prefs.prowlarr_configured {
         if quiet(
             ui,
-            "Для раздач нужен Prowlarr: адрес и ключ — в Настройках → Источники → Торренты.",
-            Some(("Настроить", Icon::Settings, "tor-settings")),
+            i18n::search().prowlarr_hint,
+            Some((i18n::search().setup, Icon::Settings, "tor-settings")),
         ) {
             pages.open_setting(super::SettingId::Prowlarr);
         }
@@ -364,7 +364,7 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
     // Not searched for this text yet: offer the search.
     if stale && !q.is_empty() {
         if ui
-            .add(Button::new("Искать раздачи").style(Style::Tonal).icon(Icon::Search).id_salt("tor-search"))
+            .add(Button::new(i18n::search().search_torrents).style(Style::Tonal).icon(Icon::Search).id_salt("tor-search"))
             .clicked()
         {
             out.push(Command::SearchTorrents(q.to_owned()));
@@ -372,7 +372,7 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
     }
 
     if let Some(err) = &t.error {
-        let retry = !stale && quiet(ui, err, Some(("Повторить", Icon::Refresh, "tor-retry")));
+        let retry = !stale && quiet(ui, err, Some((i18n::common().retry, Icon::Refresh, "tor-retry")));
         if retry {
             out.push(Command::SearchTorrents(q.to_owned()));
         }
@@ -381,12 +381,12 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
 
     if t.results.is_empty() {
         if !stale && !t.query.is_empty() {
-            quiet(ui, "Раздач не нашлось.", None);
+            quiet(ui, i18n::search().none_found, None);
         }
         return None;
     }
     if stale {
-        ui.label(TypeRole::BodySmall.style().rich(format!("Результаты для «{}»", t.query), s.on_surface_variant));
+        ui.label(TypeRole::BodySmall.style().rich(i18n::search::fmt_results_for(&t.query), s.on_surface_variant));
     }
     // Buttons fit beside the title only in a wide row.
     let wide = ui.available_width() >= 640.0;
@@ -401,19 +401,19 @@ fn torrent_row(ui: &mut Ui, r: &TorrentResult, wide: bool, out: &mut Vec<Command
     parts.extend(r.format.clone());
     parts.extend(r.size_bytes.map(fmt_size));
     if let Some(n) = r.seeders {
-        parts.push(format!("{n} {}", common::plural(u64::from(n), "сид", "сида", "сидов")));
+        parts.push(i18n::pages::fmt_count(u64::from(n), &i18n::search().seeds));
     }
     parts.push(r.indexer.clone());
     let idx = r.index;
     let buttons = |ui: &mut Ui, out: &mut Vec<Command>| {
         if ui
-            .add(Button::new("Выбрать файлы…").style(Style::Outlined).size(crate::components::Size::S).id_salt(("tor-files", idx)))
+            .add(Button::new(i18n::search().pick_files).style(Style::Outlined).size(crate::components::Size::S).id_salt(("tor-files", idx)))
             .clicked()
         {
             out.push(Command::ListTorrentFiles(idx));
         }
         if ui
-            .add(Button::new("Скачать").style(Style::Tonal).size(crate::components::Size::S).id_salt(("tor-dl", idx)))
+            .add(Button::new(i18n::menus().download).style(Style::Tonal).size(crate::components::Size::S).id_salt(("tor-dl", idx)))
             .clicked()
         {
             out.push(Command::DownloadTorrent { result: idx, files: None });
@@ -429,7 +429,7 @@ fn torrent_row(ui: &mut Ui, r: &TorrentResult, wide: bool, out: &mut Vec<Command
                     buttons(ui, out);
                 }
                 if r.recommended {
-                    marker(ui, "рекоменд.");
+                    marker(ui, i18n::search().recommended);
                 }
             });
         })
@@ -515,10 +515,10 @@ fn stream_section(
     section_head(ui, name, loading, false);
     match why {
         Some(Why::Missing) => {
-            quiet(ui, &format!("{name} нет в этой сборке."), None);
+            quiet(ui, &i18n::search::fmt_not_in_build(name), None);
         }
         Some(Why::Off) => {
-            if quiet(ui, &format!("{name} выключен."), Some(("Включить", Icon::Settings, &format!("sv-on-{salt}")))) {
+            if quiet(ui, &i18n::search::fmt_service_off(name), Some((i18n::search().turn_on, Icon::Settings, &format!("sv-on-{salt}")))) {
                 pages.open_setting(match service {
                     Service::Spotify => super::SettingId::SpotifyEnabled,
                     Service::Youtube => super::SettingId::YouTubeEnabled,
@@ -532,18 +532,18 @@ fn stream_section(
             if widgets::empty_state(
                 ui,
                 Icon::Login,
-                &format!("Войди в {name}"),
-                "Тогда поиск найдёт и там: треки, альбомы, исполнителей и плейлисты.",
-                Some(&format!("Войти через {name}")),
+                &i18n::search::fmt_sign_in_title(name),
+                i18n::search::fmt_sign_in_body(),
+                Some(&i18n::search::fmt_sign_in_button(name)),
             ) {
                 pages.open_setting(super::SettingId::Spotify);
             }
         }
         Some(Why::SigningIn) => {
-            quiet(ui, &format!("Вхожу в {name}…"), None);
+            quiet(ui, &i18n::search::fmt_signing_in(name), None);
         }
         Some(Why::Paused(hm)) => {
-            quiet(ui, &format!("{name} просит подождать до {hm}."), None);
+            quiet(ui, &i18n::search::fmt_paused_until(name, &hm), None);
         }
         None => {
             nav = results(ui, q, service, sec, loading, state, pages, out);
@@ -582,22 +582,22 @@ fn results(
         Some(x) if x.note.is_some() && empty(x) => {}
         Some(x) if x.error.is_some() => {
             let e = x.error.as_deref().unwrap_or_default();
-            if quiet(ui, e, Some(("Повторить", Icon::Refresh, &format!("sv-retry-{salt}")))) {
+            if quiet(ui, e, Some((i18n::common().retry, Icon::Refresh, &format!("sv-retry-{salt}")))) {
                 out.push(Command::Search(q.to_owned()));
             }
         }
         Some(x) if empty(x) => {
-            quiet(ui, &format!("В {} ничего не нашлось.", service.display_name()), None);
+            quiet(ui, &i18n::search::fmt_nothing_on_service(service.display_name()), None);
         }
         Some(x) => {
             if !x.tracks.is_empty() {
-                part_label(ui, "Треки");
+                part_label(ui, i18n::library().tab_tracks);
                 let from = streams::StreamFrom::SearchRows(nikgob_view::QueueOrigin::Search { service: Some(service) });
                 nav = streams::track_rows(ui, &format!("sv-tracks-{salt}"), &x.tracks, false, &from, state, pages, out)
                     .or(nav.take());
             }
             if !x.albums.is_empty() {
-                part_label(ui, "Альбомы");
+                part_label(ui, i18n::library().tab_albums);
                 widgets::card_row(ui, &format!("sv-albums-{salt}"), |ui| {
                     for a in &x.albums {
                         nav = streams::album_card(ui, a, widgets::CARD_W, salt, &state.downloads.wishlist, out).or(nav.take());
@@ -605,7 +605,7 @@ fn results(
                 });
             }
             if !x.artists.is_empty() {
-                part_label(ui, "Исполнители");
+                part_label(ui, i18n::library().tab_artists);
                 widgets::card_row(ui, &format!("sv-artists-{salt}"), |ui| {
                     for a in &x.artists {
                         nav = streams::artist_card(ui, a, 120.0, out).or(nav.take());
@@ -613,7 +613,7 @@ fn results(
                 });
             }
             if !x.playlists.is_empty() {
-                part_label(ui, "Плейлисты");
+                part_label(ui, i18n::library().tab_playlists);
                 widgets::card_row(ui, &format!("sv-playlists-{salt}"), |ui| {
                     for p in &x.playlists {
                         nav = streams::playlist_card(ui, p, widgets::CARD_W, salt, out).or(nav.take());
@@ -657,15 +657,15 @@ fn all_page(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
                 ui.add(LoadingIndicator::new().size(32.0));
             });
         } else if let Some(e) = a.error.as_deref().filter(|_| !loading) {
-            if quiet(ui, e, Some(("Повторить", Icon::Refresh, "sa-retry"))) {
+            if quiet(ui, e, Some((i18n::common().retry, Icon::Refresh, "sa-retry"))) {
                 out.push(Command::Search(q.to_owned()));
             }
         } else if !loading {
             widgets::empty_state(
                 ui,
                 Icon::Search,
-                "Ничего не нашлось",
-                "Проверь, как написано, или поищи раздачи в торрентах.",
+                i18n::library().no_results,
+                i18n::search().no_results_body,
                 None,
             );
         }
@@ -698,12 +698,12 @@ fn all_page(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
         let lrect = Rect::from_min_size(top, vec2(left, 40.0 + top_h));
         let rrect = Rect::from_min_size(pos2(top.x + left + gap, top.y), vec2(w - left - gap, 40.0 + top_h));
         let mut lui = ui.new_child(UiBuilder::new().max_rect(lrect).id_salt("sa-top-col"));
-        part_head(&mut lui, "Лучший результат", loading && a.top_pending);
+        part_head(&mut lui, i18n::search().best_result, loading && a.top_pending);
         nav = top_card(&mut lui, a.top.as_ref(), top_h, true, &picks, &context, state, pages, out).or(nav.take());
         let mut rui = ui.new_child(UiBuilder::new().max_rect(rrect).id_salt("sa-tracks-col"));
         rui.spacing_mut().item_spacing.y = 8.0;
         if first > 0 {
-            part_head(&mut rui, "Треки", loading && !a.top_pending);
+            part_head(&mut rui, i18n::library().tab_tracks, loading && !a.top_pending);
             nav = track_rows(&mut rui, a, 0..first, offset, &picks, &context, state, pages, out).or(nav.take());
         }
         let h = lui.min_rect().height().max(rui.min_rect().height());
@@ -711,12 +711,12 @@ fn all_page(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
         ui.add_space(widgets::SECTION_GAP);
     } else {
         if show_top {
-            part_head(ui, "Лучший результат", loading && a.top_pending);
+            part_head(ui, i18n::search().best_result, loading && a.top_pending);
             nav = top_card(ui, a.top.as_ref(), TOP_H_NARROW, false, &picks, &context, state, pages, out).or(nav.take());
             ui.add_space(8.0);
         }
         if first > 0 {
-            part_head(ui, "Треки", loading && !a.top_pending && !show_top);
+            part_head(ui, i18n::library().tab_tracks, loading && !a.top_pending && !show_top);
             nav = track_rows(ui, a, 0..first, offset, &picks, &context, state, pages, out).or(nav.take());
         }
     }
@@ -727,13 +727,13 @@ fn all_page(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
         let key = Id::new(EXPANDED_KEY);
         let expanded = ui.ctx().data(|d| d.get_temp::<String>(key)).is_some_and(|k| k == q);
         if wide && show_top {
-            part_head(ui, "Ещё треки", false);
+            part_head(ui, i18n::search().more_tracks, false);
         }
         let n = if expanded { rest } else { rest.min(MORE) };
         nav = track_rows(ui, a, first..first + n, offset, &picks, &context, state, pages, out).or(nav.take());
         if n < rest
             && ui
-                .add(Button::new("Ещё").style(Style::Text).icon(Icon::ExpandMore).id_salt("sa-more-tracks"))
+                .add(Button::new(i18n::common().more).style(Style::Text).icon(Icon::ExpandMore).id_salt("sa-more-tracks"))
                 .clicked()
         {
             ui.ctx().data_mut(|d| d.insert_temp(key, q.to_owned()));
@@ -744,7 +744,7 @@ fn all_page(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
     }
 
     if !a.albums.is_empty() {
-        part_head(ui, "Альбомы", false);
+        part_head(ui, i18n::library().tab_albums, false);
         widgets::card_row(ui, "sa-albums", |ui| {
             for x in &a.albums {
                 nav = match x {
@@ -757,7 +757,7 @@ fn all_page(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
         ui.add_space(widgets::SECTION_GAP);
     }
     if !a.artists.is_empty() {
-        part_head(ui, "Исполнители", false);
+        part_head(ui, i18n::library().tab_artists, false);
         widgets::card_row(ui, "sa-artists", |ui| {
             for x in &a.artists {
                 nav = match x {
@@ -770,7 +770,7 @@ fn all_page(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
         ui.add_space(widgets::SECTION_GAP);
     }
     if !a.playlists.is_empty() {
-        part_head(ui, "Плейлисты", false);
+        part_head(ui, i18n::library().tab_playlists, false);
         widgets::card_row(ui, "sa-playlists", |ui| {
             for x in &a.playlists {
                 nav = match x {
@@ -850,7 +850,7 @@ fn top_view(top: &TopResult, picks: &[SearchPick], context: &str) -> TopView {
     match top {
         TopResult::Artist(SearchArtist::Library(a)) => TopView {
             title: a.name.clone(),
-            line: format!("{} · в библиотеке", widgets::artist_kind(a)),
+            line: i18n::search::fmt_artist_in_library(&widgets::artist_kind(a)),
             image: a.image.as_ref().map(|c| c.uri()),
             shape: MaterialShape::Circle,
             open: Some(Route::Artist(a.id)),
@@ -866,7 +866,7 @@ fn top_view(top: &TopResult, picks: &[SearchPick], context: &str) -> TopView {
             });
             TopView {
                 title: a.name.clone(),
-                line: "Исполнитель".into(),
+                line: i18n::sound_facts().tag_artist.into(),
                 image: a.image_url.clone(),
                 shape: if a.image_url.is_some() { MaterialShape::Circle } else { widgets::avatar_shape(&a.remote.id) },
                 open: Some(match a.artist {
@@ -884,9 +884,9 @@ fn top_view(top: &TopResult, picks: &[SearchPick], context: &str) -> TopView {
                 }
                 SearchTrack::Stream(r) => (r.title.clone(), r.artist.clone(), r.cover_url.clone(), r.has_local, format!("st-{}", r.remote)),
             };
-            let mut line = format!("Трек · {artist}");
+            let mut line = i18n::search::fmt_track_kind(&artist);
             if local {
-                line.push_str(" · у тебя");
+                line.push_str(&format!(" · {}", i18n::pages().you_have));
             }
             TopView { title, line, image, shape: MaterialShape::Square, open: None, play: Some(play_queue()), salt }
         }
@@ -912,12 +912,7 @@ fn top_view(top: &TopResult, picks: &[SearchPick], context: &str) -> TopView {
 }
 
 fn album_line(artist: &str, year: Option<i32>) -> String {
-    match year {
-        Some(y) if !artist.is_empty() => format!("Альбом · {artist} · {y}"),
-        Some(y) => format!("Альбом · {y}"),
-        None if !artist.is_empty() => format!("Альбом · {artist}"),
-        None => "Альбом".into(),
-    }
+    i18n::search::fmt_album_kind(artist, year)
 }
 
 /// «Лучший результат»: a large card (picture, name, what it is) with ▶;
@@ -1008,7 +1003,7 @@ fn top_card(
                 .size(Size::M)
                 .style(Style::Filled)
                 .filled_icon(true)
-                .tooltip("Слушать")
+                .tooltip(i18n::common().play)
                 .id_salt(("sa-top-play-btn", &v.salt)),
             )
             .clicked();

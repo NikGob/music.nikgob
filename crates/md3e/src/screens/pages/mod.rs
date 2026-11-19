@@ -32,6 +32,7 @@ pub(crate) use worlds::choose as choose_world;
 pub(crate) use worlds::{hide_stage as hide_world_stage, play_primary as play_world};
 
 use egui::{Context, Rect, Response, Ui, UiBuilder, vec2};
+use nikgob_core::i18n;
 use nikgob_view::{
     Command, LIKED_PLAYLIST, LibraryTab, ReleaseId, Route, TorrentFiles, TrackId, TrackMenuItem, TrackMenuPlace, TrackMenuSlot,
     TrackRow, ViewState,
@@ -119,7 +120,7 @@ pub(crate) fn request_delete(ctx: &Context, what: Doomed, title: String, forever
 
 /// [`request_delete`] of an album. `(album, title, for good)`.
 pub(crate) fn request_release_delete(ctx: &Context, id: nikgob_view::ReleaseId, title: &str, forever: bool) {
-    request_delete(ctx, Doomed::Release(id), format!("Альбом «{title}»"), forever);
+    request_delete(ctx, Doomed::Release(id), i18n::menus::fmt_album_quoted(title), forever);
 }
 
 fn apart_request_key() -> egui::Id {
@@ -143,39 +144,52 @@ pub(crate) fn request_tracks_to_playlist(ctx: &Context, tracks: Vec<TrackId>, an
 }
 
 /// «Радио по треку» in the track menus.
+// i18n: use menus().radio_by_track
 pub(crate) const RADIO_BY_TRACK: &str = "Радио по треку";
 /// Right after the track playing.
+// i18n: use menus().play_next
 pub(crate) const PLAY_NEXT: &str = "Сыграть следующим";
 /// To the end of the queue.
+// i18n: use menus().to_queue
 pub(crate) const TO_QUEUE: &str = "В очередь";
 /// A song outside the library into it (no like, nothing downloads).
+// i18n: use menus().to_library
 pub(crate) const TO_LIBRARY: &str = "В библиотеку";
 /// A song in the library without a file or a like out of it.
+// i18n: use menus().out_of_library
 pub(crate) const OUT_OF_LIBRARY: &str = "Убрать из библиотеки";
 /// The like of a track or an album, and its undo.
+// i18n: use menus().like / menus().unlike
 pub(crate) const LIKE: &str = "Нравится";
+// i18n: use menus().unlike
 pub(crate) const UNLIKE: &str = "Убрать из любимого";
 /// The menu item of a track whose file holds another song.
+// i18n: use menus().wrong_file
 pub(crate) const WRONG_FILE: &str = "В файле другая песня";
 /// «Файл ▸» of a track whose lossless file surely holds an MP3.
+// i18n: use menus().to_mp3
 pub(crate) const TO_MP3: &str = "Превратить в MP3";
 /// A better copy of a file, through the download sources.
+// i18n: use menus().find_better
 pub(crate) const FIND_BETTER: &str = "Найти качество лучше";
 /// The indexer's search for a release of a track or an album, by hand.
+// i18n: use menus().pick_release
 pub(crate) const PICK_RELEASE: &str = "Выбрать раздачу…";
 /// A song of two albums is two songs: never linked again.
+// i18n: use menus().apart
 pub(crate) const APART: &str = "Разные песни";
 /// The submenu of a track's menu ([`track_rows`]).
+// i18n: use menus().file
 pub(crate) const FILE: &str = "Файл";
 
 /// The like of a track or an album as a menu item or a tooltip says it.
 pub(crate) fn like_label(liked: bool) -> &'static str {
-    if liked { UNLIKE } else { LIKE }
+    if liked { i18n::menus().unlike } else { i18n::menus().like }
 }
 
 /// «Не нравится» of a track, or its undo when it is disliked.
 pub(crate) fn dislike_item(disliked: bool) -> MenuItem {
-    MenuItem::new(if disliked { "Убрать «Не нравится»" } else { "Не нравится" }).icon(Icon::ThumbDown).selected(disliked)
+    MenuItem::new(if disliked { i18n::menus().undislike } else { i18n::menus().dislike }).icon(Icon::ThumbDown).selected(disliked)
 }
 
 pub(crate) fn dislike_command(track: nikgob_view::TrackId, marks: &nikgob_view::DislikesView) -> Command {
@@ -185,7 +199,7 @@ pub(crate) fn dislike_command(track: nikgob_view::TrackId, marks: &nikgob_view::
 /// «Не рекомендовать исполнителя» of `artist`, or its undo.
 pub(crate) fn ban_item(artist: nikgob_view::ArtistId, marks: &nikgob_view::DislikesView) -> MenuItem {
     let banned = marks.artist(artist);
-    MenuItem::new(if banned { "Снова рекомендовать исполнителя" } else { "Не рекомендовать исполнителя" }).icon(Icon::Block)
+    MenuItem::new(if banned { i18n::menus().unban_artist } else { i18n::menus().ban_artist }).icon(Icon::Block)
 }
 
 pub(crate) fn ban_command(artist: nikgob_view::ArtistId, marks: &nikgob_view::DislikesView) -> Command {
@@ -477,34 +491,34 @@ pub fn track_rows(o: TrackMenuOf) -> Vec<widgets::Row<TrackAct>> {
     use widgets::Row;
     let mut rows = Vec::new();
     if o.playable {
-        rows.push(Row::Item(A::Next, MenuItem::new(PLAY_NEXT).icon(Icon::QueueMusic)));
-        rows.push(Row::Item(A::Queue, MenuItem::new(TO_QUEUE).icon(Icon::QueueMusic)));
+        rows.push(Row::Item(A::Next, MenuItem::new(i18n::menus().play_next).icon(Icon::QueueMusic)));
+        rows.push(Row::Item(A::Queue, MenuItem::new(i18n::menus().to_queue).icon(Icon::QueueMusic)));
     }
-    rows.push(Row::Item(A::Radio, MenuItem::new(RADIO_BY_TRACK).icon(Icon::Radio)));
+    rows.push(Row::Item(A::Radio, MenuItem::new(i18n::menus().radio_by_track).icon(Icon::Radio)));
     rows.push(Row::Divider);
-    rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
+    rows.push(Row::Item(A::Playlist, MenuItem::new(i18n::menus().to_playlist).icon(Icon::PlaylistAdd)));
     match o.library {
-        Some(true) => rows.push(Row::Item(A::ToLibrary, MenuItem::new(TO_LIBRARY).icon(Icon::LibraryMusic))),
-        Some(false) => rows.push(Row::Item(A::OutOfLibrary, MenuItem::new(OUT_OF_LIBRARY).icon(Icon::LibraryMusic))),
+        Some(true) => rows.push(Row::Item(A::ToLibrary, MenuItem::new(i18n::menus().to_library).icon(Icon::LibraryMusic))),
+        Some(false) => rows.push(Row::Item(A::OutOfLibrary, MenuItem::new(i18n::menus().out_of_library).icon(Icon::LibraryMusic))),
         None => {}
     }
     rows.push(Row::Divider);
     if o.has_album {
-        rows.push(Row::Item(A::Album, MenuItem::new("К альбому").icon(Icon::Album)));
+        rows.push(Row::Item(A::Album, MenuItem::new(i18n::menus().to_album).icon(Icon::Album)));
     }
     // One song on two albums: the other album (the way out of it is last).
     let apart = o.also_on.is_some();
     if let Some(album) = o.also_on {
-        rows.push(Row::Item(A::AlsoOn, MenuItem::new(format!("Есть и на альбоме «{album}»")).icon(Icon::Album)));
+        rows.push(Row::Item(A::AlsoOn, MenuItem::new(i18n::menus::fmt_also_on_album(&album)).icon(Icon::Album)));
     }
     if o.has_artists {
-        rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person)));
+        rows.push(Row::Item(A::Artist, MenuItem::new(i18n::menus().to_artist).icon(Icon::Person)));
     }
-    rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
+    rows.push(Row::Item(A::Share, MenuItem::new(i18n::menus().share).icon(Icon::Share)));
     rows.push(Row::Divider);
     let mut file = Vec::new();
     if o.info {
-        file.push(Row::Item(A::Info, MenuItem::new("Источник и качество").icon(Icon::Info)));
+        file.push(Row::Item(A::Info, MenuItem::new(i18n::menus().source_quality).icon(Icon::Info)));
     }
     // «Скачать» stands in the menu itself; a file's «Редактировать теги…»
     // in «Файл».
@@ -515,31 +529,31 @@ pub fn track_rows(o: TrackMenuOf) -> Vec<widgets::Row<TrackAct>> {
     }
     if o.has_file {
         if o.better {
-            file.push(Row::Item(A::Better, MenuItem::new(FIND_BETTER).icon(Icon::Search)));
+            file.push(Row::Item(A::Better, MenuItem::new(i18n::menus().find_better).icon(Icon::Search)));
         }
         // A file that holds another song: to the Trash, looked for again.
         if o.wrong_file {
-            file.push(Row::Item(A::WrongFile, MenuItem::new(WRONG_FILE).icon(Icon::Delete)));
+            file.push(Row::Item(A::WrongFile, MenuItem::new(i18n::menus().wrong_file).icon(Icon::Delete)));
         }
     } else {
         if o.has_album {
-            file.push(Row::Item(A::AlbumDownload, MenuItem::new("Скачать альбом").icon(Icon::Download)));
+            file.push(Row::Item(A::AlbumDownload, MenuItem::new(i18n::menus().download_album).icon(Icon::Download)));
         }
         if o.pick_release {
-            file.push(Row::Item(A::PickRelease, MenuItem::new(PICK_RELEASE).icon(Icon::Search)));
+            file.push(Row::Item(A::PickRelease, MenuItem::new(i18n::menus().pick_release).icon(Icon::Search)));
         }
         // A clip: its song by hand; a stream from YouTube: another version.
         if let Some(f) = o.find_song {
             file.push(Row::Item(A::FindSong, MenuItem::new(f).icon(Icon::MusicNote)));
         }
     }
-    rows.push(Row::Sub(MenuItem::new(FILE).icon(Icon::Folder), file));
+    rows.push(Row::Sub(MenuItem::new(i18n::menus().file).icon(Icon::Folder), file));
     rows.push(Row::Divider);
     rows.push(Row::Item(A::Dislike, o.dislike));
     rows.extend(o.ban.map(|b| Row::Item(A::Ban, b)));
     if apart {
         rows.push(Row::Divider);
-        rows.push(Row::Item(A::Apart, MenuItem::new(APART).icon(Icon::Close)));
+        rows.push(Row::Item(A::Apart, MenuItem::new(i18n::menus().apart).icon(Icon::Close)));
     }
     rows
 }
@@ -547,7 +561,7 @@ pub fn track_rows(o: TrackMenuOf) -> Vec<widgets::Row<TrackAct>> {
 /// Where the rows of the sound go in a track's `rows`: right before «Файл».
 pub(crate) fn sound_at<A>(rows: &[widgets::Row<A>]) -> usize {
     rows.iter()
-        .position(|r| matches!(r, widgets::Row::Sub(item, _) if item.label == FILE))
+        .position(|r| matches!(r, widgets::Row::Sub(item, _) if item.label == i18n::menus().file))
         .unwrap_or(rows.len())
 }
 
@@ -619,7 +633,7 @@ pub(crate) fn with_speed_row(
 ) -> Vec<widgets::Row<TrackAct>> {
     if speeds.enabled && playing {
         let at = sound_at(&rows);
-        rows.insert(at, widgets::Row::Item(TrackAct::Speed, MenuItem::new("Скорость…").icon(Icon::GraphicEq)));
+        rows.insert(at, widgets::Row::Item(TrackAct::Speed, MenuItem::new(i18n::menus().speed).icon(Icon::GraphicEq)));
     }
     rows
 }
@@ -668,7 +682,7 @@ pub(crate) fn is_playing(state: &ViewState, track: TrackId) -> bool {
 /// none while it is on its way (its row's mark says so).
 pub(crate) fn download_item(wished: Option<nikgob_view::WishlistStatus>) -> Option<MenuItem> {
     use nikgob_view::WishlistStatus as St;
-    matches!(wished, None | Some(St::Waiting | St::NoTorrent | St::Failed)).then(|| MenuItem::new("Скачать").icon(Icon::Download))
+    matches!(wished, None | Some(St::Waiting | St::NoTorrent | St::Failed)).then(|| MenuItem::new(i18n::menus().download).icon(Icon::Download))
 }
 
 /// «В библиотеку» of a track menu: what the item of a song does
@@ -689,7 +703,7 @@ pub(crate) fn library_item(in_library: bool, has_local: bool, liked: bool) -> Op
 pub(crate) fn library_track_rows(track: &TrackRow, o: LibraryRowsOf<'_>) -> Vec<widgets::Row<TrackAct>> {
     // A file: its tags and a better copy; no file: download it (no like)
     // or look for a release by hand.
-    let fetch = if track.has_local { Some(MenuItem::new("Редактировать теги…").icon(Icon::Edit)) } else { download_item(o.wished) };
+    let fetch = if track.has_local { Some(MenuItem::new(i18n::menus().edit_tags).icon(Icon::Edit)) } else { download_item(o.wished) };
     let mut rows = track_rows(TrackMenuOf {
         playable: true,
         has_album: track.release_id.is_some(),
@@ -709,20 +723,20 @@ pub(crate) fn library_track_rows(track: &TrackRow, o: LibraryRowsOf<'_>) -> Vec<
     // A lossless file the check is sure holds an MP3 (its row says «FLAC
     // из MP3»): that MP3, right after the better copy. A doubt has none.
     let mp3 = track.has_local && track.quality.as_deref().is_some_and(nikgob_core::quality::row_label_mp3_inside);
-    if mp3 && let Some(file) = widgets::sub_rows_mut(&mut rows, FILE) {
+    if mp3 && let Some(file) = widgets::sub_rows_mut(&mut rows, i18n::menus().file) {
         let at = file
             .iter()
             .position(|r| matches!(r, widgets::Row::Item(TrackAct::Better, _)))
             .map_or(file.len(), |i| i + 1);
-        file.insert(at, widgets::Row::Item(TrackAct::ToMp3, MenuItem::new(TO_MP3).icon(Icon::Sync)));
+        file.insert(at, widgets::Row::Item(TrackAct::ToMp3, MenuItem::new(i18n::menus().to_mp3).icon(Icon::Sync)));
     }
     // The cover of the album of a file, last of the file's own items. A
     // song without an album has no cover of its own to refresh.
     if track.has_local
         && track.release_id.is_some()
-        && let Some(file) = widgets::sub_rows_mut(&mut rows, FILE)
+        && let Some(file) = widgets::sub_rows_mut(&mut rows, i18n::menus().file)
     {
-        file.push(widgets::Row::Item(TrackAct::RefreshCover, MenuItem::new(widgets::REFRESH_COVER).icon(Icon::Refresh)));
+        file.push(widgets::Row::Item(TrackAct::RefreshCover, MenuItem::new(i18n::menus().refresh_cover).icon(Icon::Refresh)));
     }
     rows
 }
@@ -739,12 +753,12 @@ pub(crate) fn can_trash(track: &TrackRow) -> bool {
 fn push_deletes(rows: &mut Vec<widgets::Row<TrackAct>>, track: &TrackRow) {
     let mut deletes = vec![
         widgets::Row::Divider,
-        widgets::Row::Item(TrackAct::Trash, MenuItem::new("Удалить из библиотеки").icon(Icon::Delete)),
+        widgets::Row::Item(TrackAct::Trash, MenuItem::new(i18n::menus().delete_from_library).icon(Icon::Delete)),
     ];
     if track.has_local {
-        deletes.push(widgets::Row::Item(TrackAct::Purge, MenuItem::new("Удалить навсегда").icon(Icon::Delete)));
+        deletes.push(widgets::Row::Item(TrackAct::Purge, MenuItem::new(i18n::menus().purge_forever).icon(Icon::Delete)));
     }
-    match widgets::sub_rows_mut(rows, FILE) {
+    match widgets::sub_rows_mut(rows, i18n::menus().file) {
         Some(file) => file.extend(deletes),
         None => rows.extend(deletes),
     }
@@ -1056,15 +1070,15 @@ impl PageState {
             .rect_filled(fab.rect.expand2(vec2(20.0, 20.0)), 0, s.surface);
         let extended = fab.rect.width() > 76.0;
         let items = [
-            FabMenuItem::new(Icon::UploadFile, "Файлы…"),
-            FabMenuItem::new(Icon::Folder, "Папку…"),
-            FabMenuItem::new(Icon::AttachFile, ".torrent…"),
-            FabMenuItem::new(Icon::Link, "Magnet-ссылку…"),
-            FabMenuItem::new(Icon::PlaylistAdd, "Новый плейлист…"),
+            FabMenuItem::new(Icon::UploadFile, i18n::pages().fab_files),
+            FabMenuItem::new(Icon::Folder, i18n::pages().fab_folder),
+            FabMenuItem::new(Icon::AttachFile, i18n::pages().fab_torrent),
+            FabMenuItem::new(Icon::Link, i18n::pages().fab_magnet),
+            FabMenuItem::new(Icon::PlaylistAdd, i18n::pages().fab_new_playlist),
         ];
         let mut menu = FabMenu::new("add-fab-menu", Icon::Add, &items);
         if extended {
-            menu = menu.label("Добавить");
+            menu = menu.label(i18n::common().add);
         }
         let slot = Rect::from_min_size(fab.rect.min, vec2(260.0, 56.0));
         let mut cui = ui.new_child(UiBuilder::new().max_rect(slot).id_salt("add-fab-slot"));
@@ -1072,15 +1086,15 @@ impl PageState {
         match picked {
             Some(0) => dialogs::files(
                 |d| {
-                    d.set_title("Добавить файлы")
-                        .add_filter("Музыка", &["flac", "mp3", "m4a", "aac", "ogg", "opus", "wav", "alac", "aiff"])
+                    d.set_title(i18n::pages().files_dialog_title)
+                        .add_filter(i18n::pages().files_filter, &["flac", "mp3", "m4a", "aac", "ogg", "opus", "wav", "alac", "aiff"])
                 },
                 Command::ImportFiles,
                 out,
             ),
-            Some(1) => dialogs::folder(|d| d.set_title("Добавить папку"), Command::ImportFolder, out),
+            Some(1) => dialogs::folder(|d| d.set_title(i18n::pages().add_folder), Command::ImportFolder, out),
             Some(2) => dialogs::file(
-                |d| d.set_title("Открыть .torrent").add_filter("Торрент", &["torrent"]),
+                |d| d.set_title(i18n::pages().open_torrent_title).add_filter(i18n::pages().torrent_filter, &["torrent"]),
                 Command::AddTorrentFile,
                 out,
             ),
@@ -1175,8 +1189,8 @@ impl PageState {
             A::RefreshCover => out.extend(track.release_id.map(Command::RefreshReleaseCover)),
             A::Dislike => out.push(dislike_command(track.id, marks)),
             A::Ban => out.extend(track.artist_id().map(|a| ban_command(a, marks))),
-            A::Trash => self.confirm_trash = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
-            A::Purge => self.confirm_purge = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
+            A::Trash => self.confirm_trash = Some((Doomed::Tracks(vec![track.id]), i18n::menus::fmt_quoted(&track.title))),
+            A::Purge => self.confirm_purge = Some((Doomed::Tracks(vec![track.id]), i18n::menus::fmt_quoted(&track.title))),
             A::Remove => {}
         }
         None
@@ -1240,34 +1254,34 @@ impl PageState {
         let can_download = f.result.is_some() && ready && n_sel > 0;
         let mut open = true;
         let sel = &mut self.files_sel;
-        let r = crate::components::Dialog::new("torrent-files", "Выбрать файлы")
-            .supporting(if f.name.is_empty() { "Раздача" } else { f.name.as_str() })
+        let r = crate::components::Dialog::new("torrent-files", i18n::search().pick_files)
+            .supporting(if f.name.is_empty() { i18n::search().torrent_word } else { f.name.as_str() })
             .max_width(560.0)
-            .action("Отмена")
-            .action_with(DialogAction::new("Скачать").enabled(can_download))
+            .action(i18n::common().cancel)
+            .action_with(DialogAction::new(i18n::menus().download).enabled(can_download))
             .show_with(ctx, &mut open, |ui| {
                 ui.add_space(16.0);
                 if f.loading {
                     ui.horizontal(|ui| {
                         ui.add(LoadingIndicator::new().size(32.0));
-                        ui.label(TypeRole::BodyMedium.style().rich("Читаю список файлов…", s.on_surface_variant));
+                        ui.label(TypeRole::BodyMedium.style().rich(i18n::search().reading_files, s.on_surface_variant));
                     });
                 } else if let Some(e) = &f.error {
                     ui.label(TypeRole::BodyMedium.style().rich(e, s.error));
                 } else if f.files.is_empty() {
-                    ui.label(TypeRole::BodyMedium.style().rich("В раздаче нет файлов.", s.on_surface_variant));
+                    ui.label(TypeRole::BodyMedium.style().rich(i18n::search().no_files, s.on_surface_variant));
                 } else {
                     let (n, bytes) = chosen(sel);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        if ui.add(Button::new("Все").style(Style::Text).size(Size::Xs).id_salt("files-all")).clicked() {
+                        if ui.add(Button::new(i18n::common().all).style(Style::Text).size(Size::Xs).id_salt("files-all")).clicked() {
                             *sel = f.files.iter().map(|(i, ..)| *i).collect();
                         }
-                        if ui.add(Button::new("Ничего").style(Style::Text).size(Size::Xs).id_salt("files-none")).clicked() {
+                        if ui.add(Button::new(i18n::search().select_none).style(Style::Text).size(Size::Xs).id_salt("files-none")).clicked() {
                             sel.clear();
                         }
                         ui.label(TypeRole::BodySmall.style().rich(
-                            format!("Выбрано {n} из {} · {}", f.files.len(), fmt_size(bytes)),
+                            i18n::search::fmt_selected_files(n, f.files.len(), fmt_size(bytes)),
                             s.on_surface_variant,
                         ));
                     });
@@ -1295,7 +1309,7 @@ impl PageState {
                     if f.result.is_none() {
                         ui.add_space(8.0);
                         ui.label(TypeRole::BodySmall.style().rich_para(
-                            "Выбор файлов для .torrent и magnet пока недоступен: список только для просмотра.",
+                            i18n::search().files_readonly_note,
                             s.on_surface_variant,
                         ));
                     }
@@ -1328,12 +1342,12 @@ impl PageState {
         if let Some(tracks) = self.pending_add.clone() {
             let mut open = true;
             let mut menu = Menu::new("playlist-picker")
-                .item(MenuItem::new("Любимые").icon(Icon::Favorite));
+                .item(MenuItem::new(i18n::pages().liked_short).icon(Icon::Favorite));
             let user: Vec<_> = state.library.playlists.iter().filter(|p| !p.pinned).collect();
             for p in &user {
                 menu = menu.item(MenuItem::new(&p.name).icon(Icon::QueueMusic));
             }
-            menu = menu.divider().item(MenuItem::new("Новый плейлист…").icon(Icon::Add));
+            menu = menu.divider().item(MenuItem::new(i18n::pages().new_playlist_dots).icon(Icon::Add));
             let anchor = self
                 .pending_add_anchor
                 .unwrap_or_else(|| Rect::from_center_size(area.center(), egui::vec2(1.0, 1.0)));
@@ -1373,13 +1387,13 @@ impl PageState {
             let liked = matches!(&add, StreamAdd::Tracks(t) if t.len() == 1) || matches!(add, StreamAdd::Release(_));
             let mut menu = Menu::new("playlist-picker-stream");
             if liked {
-                menu = menu.item(MenuItem::new("Любимые").icon(Icon::Favorite));
+                menu = menu.item(MenuItem::new(i18n::pages().liked_short).icon(Icon::Favorite));
             }
             let user: Vec<_> = state.library.playlists.iter().filter(|p| !p.pinned).collect();
             for p in &user {
                 menu = menu.item(MenuItem::new(&p.name).icon(Icon::QueueMusic));
             }
-            menu = menu.divider().item(MenuItem::new("Новый плейлист…").icon(Icon::Add));
+            menu = menu.divider().item(MenuItem::new(i18n::pages().new_playlist_dots).icon(Icon::Add));
             let anchor = self
                 .pending_add_anchor
                 .unwrap_or_else(|| Rect::from_center_size(area.center(), egui::vec2(1.0, 1.0)));
@@ -1404,26 +1418,34 @@ impl PageState {
         if let Some(ask) = self.ask.clone() {
             let mut open = true;
             let dialog = match &ask {
-                Ask::NewPlaylist { .. } | Ask::NewPlaylistStream(_) => TextInputDialog::new("ask-new-playlist", "Новый плейлист", "Название")
-                    .icon(Icon::PlaylistAdd)
-                    .buttons("Создать", "Отмена")
-                    .validate(|t| t.trim().is_empty().then(|| "Введи название".to_owned())),
-                Ask::RenamePlaylist(_) => TextInputDialog::new("ask-rename", "Переименовать", "Название")
-                    .buttons("Сохранить", "Отмена")
-                    .validate(|t| t.trim().is_empty().then(|| "Введи название".to_owned())),
-                Ask::WishMagnet(_) => TextInputDialog::new("ask-wish-magnet", "Magnet-ссылка", "magnet:?xt=…")
-                    .icon(Icon::Link)
-                    .supporting("Раздача скачается как этот трек из «Хочу скачать».")
-                    .buttons("Скачать", "Отмена")
-                    .validate(|t| {
-                        (!t.trim().starts_with("magnet:")).then(|| "Ссылка должна начинаться с magnet:".to_owned())
-                    }),
-                Ask::Magnet => TextInputDialog::new("ask-magnet", "Magnet-ссылка", "magnet:?xt=…")
-                    .icon(Icon::Link)
-                    .buttons("Скачать", "Отмена")
-                    .validate(|t| {
-                        (!t.trim().starts_with("magnet:")).then(|| "Ссылка должна начинаться с magnet:".to_owned())
-                    }),
+                Ask::NewPlaylist { .. } | Ask::NewPlaylistStream(_) => {
+                    TextInputDialog::new("ask-new-playlist", i18n::pages().ask_title_new_playlist, i18n::pages().ask_name_label)
+                        .icon(Icon::PlaylistAdd)
+                        .buttons(i18n::pages().create_btn, i18n::common().cancel)
+                        .validate(|t| t.trim().is_empty().then(|| i18n::pages().enter_name.to_owned()))
+                }
+                Ask::RenamePlaylist(_) => {
+                    TextInputDialog::new("ask-rename", i18n::pages().ask_title_rename, i18n::pages().ask_name_label)
+                        .buttons(i18n::common().save, i18n::common().cancel)
+                        .validate(|t| t.trim().is_empty().then(|| i18n::pages().enter_name.to_owned()))
+                }
+                Ask::WishMagnet(_) => {
+                    TextInputDialog::new("ask-wish-magnet", i18n::pages().magnet_title, i18n::pages().magnet_placeholder)
+                        .icon(Icon::Link)
+                        .supporting(i18n::pages().magnet_as_track)
+                        .buttons(i18n::menus().download, i18n::common().cancel)
+                        .validate(|t| {
+                            (!t.trim().starts_with("magnet:")).then(|| i18n::pages().magnet_must_start.to_owned())
+                        })
+                }
+                Ask::Magnet => {
+                    TextInputDialog::new("ask-magnet", i18n::pages().magnet_title, i18n::pages().magnet_placeholder)
+                        .icon(Icon::Link)
+                        .buttons(i18n::menus().download, i18n::common().cancel)
+                        .validate(|t| {
+                            (!t.trim().starts_with("magnet:")).then(|| i18n::pages().magnet_must_start.to_owned())
+                        })
+                }
             };
             match dialog.show(ctx, &mut open, &mut self.ask_text) {
                 Some(TextInputResult::Confirmed) => {
@@ -1484,14 +1506,14 @@ impl PageState {
                 .or_else(|| state.library.playlists.iter().find(|p| p.id == id).and_then(|p| p.service))
                 .map(|s| s.display_name());
             let text = match service {
-                Some(s) => format!("Треки останутся в библиотеке, а плейлист в {s} — как был."),
-                None => "Треки останутся в библиотеке.".to_owned(),
+                Some(s) => i18n::pages::fill_service(i18n::pages().playlist_delete_kept, s),
+                None => i18n::pages().playlist_delete_plain.to_owned(),
             };
-            let r = crate::components::Dialog::new("confirm-delete", "Удалить плейлист?")
+            let r = crate::components::Dialog::new("confirm-delete", i18n::pages().delete_playlist_q)
                 .icon(Icon::Delete)
                 .supporting(text)
-                .action("Отмена")
-                .action("Удалить")
+                .action(i18n::common().cancel)
+                .action(i18n::pages().delete_btn)
                 .show(ctx, &mut open);
             if r.action == Some(1) {
                 out.push(Command::DeletePlaylist(id));
@@ -1505,11 +1527,11 @@ impl PageState {
         // «Связать с сервисом…»: a playlist is made in the service at once.
         if let Some(id) = self.confirm_link {
             let mut open = true;
-            let r = crate::components::Dialog::new("confirm-link", "Связать с сервисом?")
+            let r = crate::components::Dialog::new("confirm-link", i18n::pages().link_service_q)
                 .icon(Icon::Sync)
-                .supporting("Плейлист появится в Spotify или YouTube Music, и изменения пойдут в обе стороны.")
-                .action("Отмена")
-                .action("Связать")
+                .supporting(i18n::pages().link_service_body)
+                .action(i18n::common().cancel)
+                .action(i18n::pages().link_btn)
                 .show(ctx, &mut open);
             if r.action == Some(1) {
                 out.push(widgets::playlist_link_command(id));
@@ -1533,11 +1555,11 @@ impl PageState {
         }
         if let Some((track, title, album)) = self.confirm_apart.clone() {
             let mut open = true;
-            let r = crate::components::Dialog::new("confirm-apart", "Это разные песни?")
+            let r = crate::components::Dialog::new("confirm-apart", i18n::pages().apart_q)
                 .icon(Icon::Close)
-                .supporting(format!("«{title}» и песня с альбома «{album}» больше не будут считаться одной. Отменить нельзя."))
-                .action("Отмена")
-                .action(APART)
+                .supporting(i18n::menus::fmt_apart_body(&title, &album))
+                .action(i18n::common().cancel)
+                .action(i18n::menus().apart)
                 .show(ctx, &mut open);
             if r.action == Some(1) {
                 out.push(Command::RecordingApart(track));
@@ -1550,16 +1572,19 @@ impl PageState {
         if let Some((what, title)) = self.confirm_trash.clone() {
             let mut open = true;
             let trash = state.prefs.use_trash;
-            let r = crate::components::Dialog::new("confirm-trash", if trash { "Удалить из библиотеки?" } else { "Удалить навсегда?" })
-                .icon(Icon::Delete)
-                .supporting(if trash {
-                    format!("{title} переедет в Корзину на 30 дней: из библиотеки пропадёт сразу, вернуть можно из Библиотеки → Корзина.")
-                } else {
-                    format!("{title}: файлы будут стёрты с диска. Корзина выключена в настройках, отменить нельзя.")
-                })
-                .action("Отмена")
-                .action(if trash { "Удалить" } else { "Удалить навсегда" })
-                .show(ctx, &mut open);
+            let r = crate::components::Dialog::new(
+                "confirm-trash",
+                if trash { i18n::pages().trash_q } else { i18n::pages().purge_q },
+            )
+            .icon(Icon::Delete)
+            .supporting(if trash {
+                i18n::pages::fill(i18n::pages().trash_note_30, &title)
+            } else {
+                i18n::pages::fill(i18n::pages().trash_note_off, &title)
+            })
+            .action(i18n::common().cancel)
+            .action(if trash { i18n::pages().delete_btn } else { i18n::pages().purge_forever_field })
+            .show(ctx, &mut open);
             if r.action == Some(1) {
                 match what {
                     Doomed::Tracks(ids) => out.extend(ids.into_iter().map(Command::TrashTrack)),
@@ -1572,11 +1597,11 @@ impl PageState {
         }
         if let Some((what, title)) = self.confirm_purge.clone() {
             let mut open = true;
-            let r = crate::components::Dialog::new("confirm-purge", "Удалить навсегда?")
+            let r = crate::components::Dialog::new("confirm-purge", i18n::pages().purge_q)
                 .icon(Icon::Delete)
-                .supporting(format!("{title}: файлы будут стёрты с диска, треки уйдут из плейлистов и Любимых. Отменить нельзя."))
-                .action("Отмена")
-                .action("Удалить навсегда")
+                .supporting(i18n::pages::fill(i18n::pages().purge_note, &title))
+                .action(i18n::common().cancel)
+                .action(i18n::pages().purge_forever_field)
                 .show(ctx, &mut open);
             if r.action == Some(1) {
                 out.push(match what {
@@ -1591,14 +1616,11 @@ impl PageState {
         if self.confirm_empty_trash {
             let mut open = true;
             let n = state.library.trash.len() as u64;
-            let r = crate::components::Dialog::new("confirm-empty-trash", "Очистить корзину?")
+            let r = crate::components::Dialog::new("confirm-empty-trash", i18n::pages().empty_trash_q)
                 .icon(Icon::Delete)
-                .supporting(format!(
-                    "{n} {} и их файлы будут стёрты навсегда. Отменить нельзя.",
-                    crate::screens::common::plural(n, "трек", "трека", "треков")
-                ))
-                .action("Отмена")
-                .action("Очистить")
+                .supporting(i18n::pages::fill_count(i18n::pages().empty_trash_forever, &i18n::tracks_count(n)))
+                .action(i18n::common().cancel)
+                .action(i18n::pages().clear_trash_btn)
                 .show(ctx, &mut open);
             if r.action == Some(1) {
                 out.push(Command::EmptyTrash);
@@ -1611,11 +1633,11 @@ impl PageState {
         // Seeding cleanup.
         if self.confirm_clean {
             let mut open = true;
-            let r = crate::components::Dialog::new("confirm-clean", "Очистить раздачу?")
+            let r = crate::components::Dialog::new("confirm-clean", i18n::pages().clean_seeding_q)
                 .icon(Icon::Delete)
-                .supporting("Завершённые торренты перестанут раздаваться, их файлы будут удалены. Музыка в библиотеке останется.")
-                .action("Отмена")
-                .action("Очистить")
+                .supporting(i18n::pages().clean_seeding_body)
+                .action(i18n::common().cancel)
+                .action(i18n::pages().clear_trash_btn)
                 .show(ctx, &mut open);
             if r.action == Some(1) {
                 out.push(Command::CleanSeeding);
@@ -1694,7 +1716,7 @@ pub fn search_bar(
     let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("search-bar"));
     let before = query.clone();
     let o = SearchBar::new("main-search")
-        .placeholder("Поиск")
+        .placeholder(i18n::common().search)
         .width(rect.width())
         .shortcut(true)
         .show(&mut cui, query);
@@ -1820,18 +1842,7 @@ fn settle_scroll(ui: &Ui, pages: &mut PageState, restore: Option<f32>, offset: f
 
 /// Human size: "412 МБ", "1.1 ГБ".
 pub(super) fn fmt_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
-    let mut v = bytes as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < UNITS.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    match i {
-        0 => format!("{bytes} Б"),
-        _ if v >= 100.0 => format!("{v:.0} {}", UNITS[i]),
-        _ => format!("{v:.1} {}", UNITS[i]),
-    }
+    i18n::pages::fmt_size(bytes)
 }
 
 /// A connected button group (single select) that can disable members and

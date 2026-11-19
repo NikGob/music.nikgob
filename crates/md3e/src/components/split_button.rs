@@ -80,7 +80,7 @@ impl SplitButton {
             style: Style::Tonal,
             enabled: true,
             items: Vec::new(),
-            trigger_tooltip: "Ещё варианты".to_owned(),
+            trigger_tooltip: nikgob_core::i18n::pages().more_options.to_owned(),
             width_delta: 0.0,
         }
     }

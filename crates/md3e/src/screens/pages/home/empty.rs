@@ -4,13 +4,14 @@
 //! «Сервисы»), a folder to add, the search that finds and downloads.
 
 use egui::{Id, Rect, Sense, Ui, pos2, vec2};
+use nikgob_core::i18n;
 use nikgob_view::{Account, Command, Service, ViewState};
-
 use super::super::first_run::{Art, tile};
 use super::super::{PageState, SettingId};
 use super::{Grid, entering};
 use crate::{Icon, Theme, TypeRole};
 
+// i18n: use pages().empty_line
 pub const EMPTY_LINE: &str = "Музыки пока нет";
 
 /// A tile's side and the space between tiles.
@@ -27,13 +28,15 @@ enum Way {
     Search,
 }
 
-const WAYS: [(Way, &str); 5] = [
-    (Way::Service(Service::Spotify), "Spotify"),
-    (Way::Service(Service::Youtube), "YouTube Music"),
-    (Way::Service(Service::Soundcloud), "SoundCloud"),
-    (Way::Folder, "Добавить папку"),
-    (Way::Search, "Найти музыку"),
-];
+fn ways() -> [(Way, &'static str); 5] {
+    [
+        (Way::Service(Service::Spotify), "Spotify"),
+        (Way::Service(Service::Youtube), "YouTube Music"),
+        (Way::Service(Service::Soundcloud), "SoundCloud"),
+        (Way::Folder, i18n::pages().add_folder),
+        (Way::Search, i18n::pages().find_music),
+    ]
+}
 
 /// The tiles in rows from the page's left edge, as its sections stand (all
 /// five in one where they fit, else 3 + 2); `line`: «Музыки пока нет» over
@@ -43,8 +46,8 @@ const WAYS: [(Way, &str); 5] = [
 pub(super) fn show(ui: &mut Ui, grid: Grid, state: &ViewState, pages: &mut PageState, line: bool, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let per = ((grid.width + GAP) / (TILE_MIN_W + GAP)).floor().clamp(1.0, 5.0) as usize;
-    let rows = WAYS.len().div_ceil(per);
-    let per = WAYS.len().div_ceil(rows);
+    let rows = ways().len().div_ceil(per);
+    let per = ways().len().div_ceil(rows);
     let w = ((grid.width - GAP * (per - 1) as f32) / per as f32).min(TILE_W);
     let title_h = if line { TypeRole::HeadlineSmall.style().line_height + 16.0 } else { 0.0 };
     let h = title_h + rows as f32 * (TILE_H + GAP) - GAP;
@@ -54,11 +57,11 @@ pub(super) fn show(ui: &mut Ui, grid: Grid, state: &ViewState, pages: &mut PageS
     if line {
         let title = Rect::from_min_size(area.min, vec2(area.width(), title_h));
         entering(ui, title, 0, "empty-line", |ui| {
-            let g = crate::typography::layout(ui.painter(), TypeRole::HeadlineSmall.style().job(EMPTY_LINE, s.on_surface));
+            let g = crate::typography::layout(ui.painter(), TypeRole::HeadlineSmall.style().job(i18n::pages().empty_line, s.on_surface));
             ui.painter().galley(title.min, g, s.on_surface);
         });
     }
-    for (i, (way, label)) in WAYS.iter().enumerate() {
+    for (i, (way, label)) in ways().iter().enumerate() {
         let (row, k) = (i / per, i % per);
         let x = area.left() + k as f32 * (w + GAP);
         let cell = Rect::from_min_size(pos2(x, area.top() + title_h + row as f32 * (TILE_H + GAP)), vec2(w, TILE_H));
@@ -83,7 +86,7 @@ fn go(way: Way, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>
         Way::Service(Service::Spotify) => pages.open_setting(SettingId::Spotify),
         Way::Service(Service::Youtube) => pages.open_setting(SettingId::YouTube),
         Way::Service(_) => pages.open_setting(SettingId::SoundCloud),
-        Way::Folder => super::super::dialogs::folder(|d| d.set_title("Добавить папку"), Command::ImportFolder, out),
+        Way::Folder => super::super::dialogs::folder(|d| d.set_title(i18n::pages().add_folder), Command::ImportFolder, out),
         Way::Search => pages.focus_search = true,
     }
 }

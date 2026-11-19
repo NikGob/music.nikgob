@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use egui::{Color32, Galley, Id, Pos2, Rect, Response, Sense, Ui, UiBuilder, Vec2, emath::TSTransform, pos2, vec2};
 use nikgob_view::{Command, LaneCard, MixCard, PlaylistCard, Route, Shortcut, Status, ViewState};
+use nikgob_core::i18n;
 
 use crate::{
     Icon, Theme, TypeRole, TypeStyle,
@@ -72,7 +73,7 @@ pub fn grow_button(ui: &mut Ui, id: Id, shown: bool, slot: Rect, button: IconBut
 pub fn more_button(ui: &mut Ui, id: Id, shown: bool, slot: Rect) -> Option<Response> {
     let s = Theme::get(ui.ctx()).scheme;
     let colors = Colors { container: s.surface_container_high, content: s.on_surface, border: Color32::TRANSPARENT };
-    let button = IconButton::new(Icon::MoreVert).size(Size::S).style(Style::Filled).colors(colors).tooltip("Ещё").id_salt(id.with("more-btn"));
+    let button = IconButton::new(Icon::MoreVert).size(Size::S).style(Style::Filled).colors(colors).tooltip(i18n::common().more).id_salt(id.with("more-btn"));
     grow_button(ui, id.with("more"), shown, slot, button)
 }
 
@@ -169,20 +170,21 @@ pub fn mosaic(ui: &Ui, rect: Rect, covers: &[String], r: f32, gap: f32, zoom: f3
 /// names: «Серега Пират, mzlff и новое: Пошлая Молли».
 pub fn names_line(fits: &dyn Fn(&str) -> bool, names: &[String], new: &[String]) -> String {
     let compose = |mine: &[&str], fresh: &[&str], all_mine: bool| -> String {
+        let h = i18n::pages();
         let mut s = String::new();
         if fresh.is_empty() {
             match mine {
                 [] => {}
                 [a] if all_mine => s.push_str(a),
-                [a, b] if all_mine => s = format!("{a} и {b}"),
+                [a, b] if all_mine => s = format!("{a}{}{b}", h.and),
                 _ if all_mine => {
                     let (last, head) = mine.split_last().unwrap_or((&"", &[]));
-                    s = format!("{} и {last}", head.join(", "));
+                    s = format!("{}{}{last}", head.join(", "), h.and);
                 }
-                _ => s = format!("{} и другие", mine.join(", ")),
+                _ => s = format!("{}{}{}", mine.join(", "), h.and, h.and_others),
             }
         } else {
-            s = format!("{} и новое: {}", mine.join(", "), fresh.join(", "));
+            s = format!("{}{}{}{}", mine.join(", "), h.and, h.and_new, fresh.join(", "));
         }
         s
     };
@@ -269,7 +271,7 @@ pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize
             let n = u64::from(p.track_count);
             (
                 p.display_name().to_owned(),
-                format!("Плейлист · {n} {}", crate::screens::common::plural(n, "трек", "трека", "треков")),
+                format!("{} · {}", i18n::library().tab_playlists, i18n::tracks_count(n)),
                 Route::Playlist(p.id),
                 Command::PlayPlaylist { id: p.id, start: None, shuffle: false },
             )
@@ -341,7 +343,7 @@ pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize
             crate::components::Equalizer::new(id.with("eq"), s.primary).size(20.0).playing(true).paint_at(ui, slot);
         }
         let slot = Rect::from_center_size(cover.center(), vec2(40.0, 40.0));
-        grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::S, &format!("Слушать «{title}»"), id.with("play-btn")))
+        grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::S, &i18n::pages::fmt_play_quoted(&title), id.with("play-btn")))
             .is_some_and(|r| r.clicked())
     });
     let menu_route = match sc {
@@ -487,9 +489,9 @@ pub fn mix(
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
         let tip: std::borrow::Cow<'static, str> = if playing {
-            std::borrow::Cow::Borrowed("Пауза")
+            std::borrow::Cow::Borrowed(i18n::pages().pause)
         } else if hover {
-            std::borrow::Cow::Owned(format!("Слушать «{full_title}»"))
+            std::borrow::Cow::Owned(i18n::pages::fmt_play_quoted(full_title))
         } else {
             std::borrow::Cow::Borrowed("")
         };
@@ -705,11 +707,11 @@ pub fn wave(ui: &mut Ui, cell: Rect, playing: bool, ours: bool, status: Status, 
         paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
-        let tip = if playing { "Пауза" } else { "Слушать «Моя волна»" };
+        let tip = if playing { i18n::pages().pause } else { &i18n::pages::fmt_play_quoted(i18n::home_recs().my_wave) };
         grow_button(ui, id.with("play"), hover || playing, slot, play_button(playing, Size::M, tip, id.with("play-btn"))).is_some_and(|b| b.clicked())
     });
     let name_c = if playing { s.primary } else { s.on_surface };
-    let name = text(ui, "Моя волна", TypeRole::TitleMedium.style(), name_c, cell.width(), 1);
+    let name = text(ui, i18n::home_recs().my_wave, TypeRole::TitleMedium.style(), name_c, cell.width(), 1);
     ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0), name, name_c);
     if play || resp.clicked() {
         out.push(if playing && status == Status::Playing {
@@ -819,7 +821,7 @@ pub fn liked_playlist(
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
         let display = p.display_name();
-        let tip = if playing { "Пауза".to_owned() } else { format!("Слушать «{display}»") };
+        let tip = if playing { i18n::pages().pause.to_owned() } else { i18n::pages::fmt_play_quoted(&display) };
         let clicked = grow_button(ui, id.with("play"), hover || playing, slot, play_button(playing, Size::M, &tip, id.with("play-btn")))
             .is_some_and(|r| r.clicked());
         let m = Size::S.height();
@@ -831,7 +833,7 @@ pub fn liked_playlist(
     let name = text(ui, p.display_name(), TypeRole::TitleMedium.style(), name_c, cell.width(), 1);
     ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0), name, name_c);
     let n = u64::from(p.track_count);
-    let count = format!("{n} {}", crate::screens::common::plural(n, "трек", "трека", "треков"));
+    let count = i18n::tracks_count(n);
     let line = text(ui, &count, TypeRole::BodyMedium.style(), s.on_surface_variant, cell.width(), 1);
     ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0 + TITLE_LINE), line, s.on_surface_variant);
     // ⋮ and the right click: what a playlist's card offers.
@@ -938,16 +940,16 @@ pub fn mix_menu(key: Id, l: &LaneCard, items: &[MixItem]) -> Menu {
             m = m.divider();
         }
         m = m.item(match item {
-            MixItem::List => MenuItem::new("Список треков").icon(Icon::QueueMusic).shortcut(l.tracks.len().to_string()),
-            MixItem::Play => MenuItem::new("Слушать").icon(Icon::PlayArrow),
-            MixItem::Shuffle => MenuItem::new("Перемешать").icon(Icon::Shuffle),
-            MixItem::PlayNext => MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic),
-            MixItem::Enqueue => MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic),
-            MixItem::Save => MenuItem::new("Сохранить как плейлист").icon(Icon::PlaylistAdd),
-            MixItem::Download => MenuItem::new("Скачать недостающие").icon(Icon::Download),
-            MixItem::Redraw => MenuItem::new("Другой состав").icon(Icon::Refresh),
-            MixItem::Blend => MenuItem::new("Смешать с…").icon(Icon::Add),
-            MixItem::Hide => MenuItem::new("Не предлагать этот микс").icon(Icon::Block),
+            MixItem::List => MenuItem::new(i18n::menus().list_tracks).icon(Icon::QueueMusic).shortcut(l.tracks.len().to_string()),
+            MixItem::Play => MenuItem::new(i18n::common().play).icon(Icon::PlayArrow),
+            MixItem::Shuffle => MenuItem::new(i18n::common().shuffle).icon(Icon::Shuffle),
+            MixItem::PlayNext => MenuItem::new(i18n::menus().play_next).icon(Icon::QueueMusic),
+            MixItem::Enqueue => MenuItem::new(i18n::menus().to_queue).icon(Icon::QueueMusic),
+            MixItem::Save => MenuItem::new(i18n::menus().save_as_playlist).icon(Icon::PlaylistAdd),
+            MixItem::Download => MenuItem::new(i18n::menus().download_missing).icon(Icon::Download),
+            MixItem::Redraw => MenuItem::new(i18n::menus().redraw_mix).icon(Icon::Refresh),
+            MixItem::Blend => MenuItem::new(i18n::menus().blend).icon(Icon::Add),
+            MixItem::Hide => MenuItem::new(i18n::menus().hide_mix).icon(Icon::Block),
         });
     }
     m
@@ -1114,7 +1116,7 @@ pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usiz
         }
         let slot = Rect::from_center_size(cover.center(), vec2(40.0, 40.0));
         let tip: std::borrow::Cow<'static, str> = if hover {
-            std::borrow::Cow::Owned(format!("Слушать «{title}»"))
+            std::borrow::Cow::Owned(i18n::pages::fmt_play_quoted(title))
         } else {
             std::borrow::Cow::Borrowed("")
         };
@@ -1163,11 +1165,11 @@ pub fn of_day_rows() -> [OfDayItem; 4] {
 
 fn of_day_menu(key: Id) -> Menu {
     Menu::new(key)
-        .item(MenuItem::new("Слушать").icon(Icon::PlayArrow))
+        .item(MenuItem::new(i18n::common().play).icon(Icon::PlayArrow))
         .item(MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic))
         .item(MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic))
         .divider()
-        .item(MenuItem::new("Скачать недостающие").icon(Icon::Download))
+        .item(MenuItem::new(i18n::menus().download_missing).icon(Icon::Download))
 }
 
 // ---- Album.
@@ -1201,7 +1203,7 @@ pub fn album(ui: &mut Ui, cell: Rect, title: &str, artist: &str, tail: &str, cov
         paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
-        let clicked = grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::M, &format!("Слушать «{title}»"), id.with("play-btn")))
+        let clicked = grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::M, &i18n::pages::fmt_play_quoted(title), id.with("play-btn")))
             .is_some_and(|r| r.clicked());
         let m = Size::S.height();
         more = more_button(ui, id, hover, Rect::from_min_size(pos2(art.right() - 8.0 - m, art.top() + 8.0), vec2(m, m)));

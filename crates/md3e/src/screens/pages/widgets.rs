@@ -4,6 +4,7 @@
 use egui::{
     Color32, Id, Rect, Response, Sense, Stroke, Ui, UiBuilder, pos2, vec2,
 };
+use nikgob_core::i18n;
 use nikgob_shapes::MaterialShape;
 use std::collections::HashMap;
 
@@ -68,16 +69,16 @@ pub fn quiet_line(ui: &mut Ui, text: &str, button: Option<(&str, Option<Icon>, S
 /// icon button, so the row keeps to one line.
 pub fn shuffle_member(ui: &Ui) -> crate::components::Member {
     if ui.available_width() < 640.0 {
-        IconButton::new(Icon::Shuffle).size(Size::M).style(Style::Tonal).tooltip("Перемешать").into()
+        IconButton::new(Icon::Shuffle).size(Size::M).style(Style::Tonal).tooltip(i18n::common().shuffle).into()
     } else {
-        crate::components::Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Tonal).into()
+        crate::components::Button::new(i18n::common().shuffle).icon(Icon::Shuffle).size(Size::M).style(Style::Tonal).into()
     }
 }
 
 /// Title-large section header with an optional "Все →" text button.
 /// Returns true when "Все" is clicked.
 pub fn section_header(ui: &mut Ui, title: &str, all: bool) -> bool {
-    section_header_with(ui, title, all.then_some(("Все", Icon::ArrowForward)))
+    section_header_with(ui, title, all.then_some((i18n::common().all, Icon::ArrowForward)))
 }
 
 /// [`section_header`] with its own text button on the right («Слушать
@@ -140,7 +141,7 @@ pub fn progress_badge(r: &ReleaseCard) -> Option<String> {
         return None;
     }
     match r.total_tracks {
-        Some(t) if r.local_tracks < t => Some(format!("{} из {}", r.local_tracks, t)),
+        Some(t) if r.local_tracks < t => Some(i18n::pages::fmt_of(r.local_tracks, t)),
         _ => None,
     }
 }
@@ -151,9 +152,9 @@ pub fn progress_badge(r: &ReleaseCard) -> Option<String> {
 /// of those songs has a file, else nothing.
 pub fn card_badge(r: &ReleaseCard) -> Option<String> {
     if r.mine.is_some() {
-        (r.mine_local == 0).then(|| "стрим".to_owned())
+        (r.mine_local == 0).then(|| i18n::pages().stream.to_owned())
     } else if r.local_tracks == 0 {
-        Some("стрим".to_owned())
+        Some(i18n::pages().stream.to_owned())
     } else {
         progress_badge(r)
     }
@@ -233,9 +234,11 @@ pub fn visit_whole(ctx: &egui::Context, id: ReleaseId) -> Option<bool> {
 
 /// «Добавить в библиотеку» of an album: the whole album, nothing
 /// downloads.
+// i18n: use menus().add_album
 pub const ADD_ALBUM: &str = "Добавить в библиотеку";
 /// The album added to the library back to the user's songs of it (they
 /// stay).
+// i18n: use menus().keep_mine
 pub const KEEP_MINE: &str = "Оставить только мои треки";
 
 /// The like of an album: into (or out of) «Любимые альбомы».
@@ -244,6 +247,7 @@ pub fn album_like_label(liked: bool) -> &'static str {
 }
 
 /// «Обновить обложку» of an album, the library's or a service's.
+// i18n: use menus().refresh_cover
 pub const REFRESH_COVER: &str = "Обновить обложку";
 
 //// What the menu of an album does.
@@ -291,31 +295,31 @@ pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
     let mut rows = Vec::new();
     let partial = r.mine.is_some();
     if !on_page {
-        rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
-        rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
+        rows.push(Row::Item(A::Play, MenuItem::new(i18n::common().play).icon(Icon::PlayArrow)));
+        rows.push(Row::Item(A::Shuffle, MenuItem::new(i18n::common().shuffle).icon(Icon::Shuffle)));
     }
     if partial {
-        rows.push(Row::Item(A::PlayWhole, MenuItem::new("Слушать весь альбом").icon(Icon::Album)));
+        rows.push(Row::Item(A::PlayWhole, MenuItem::new(i18n::menus().play_whole_album).icon(Icon::Album)));
     }
-    rows.push(Row::Item(A::Radio, MenuItem::new("Радио по альбому").icon(Icon::Radio)));
-    rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
-    rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Radio, MenuItem::new(i18n::menus().radio_by_album).icon(Icon::Radio)));
+    rows.push(Row::Item(A::Next, MenuItem::new(i18n::menus().play_next).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Queue, MenuItem::new(i18n::menus().to_queue).icon(Icon::QueueMusic)));
     rows.push(Row::Divider);
     if !on_page {
         rows.push(Row::Item(A::Like, MenuItem::new(album_like_label(r.liked)).icon(Icon::Favorite).selected(r.liked)));
     }
-    rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
+    rows.push(Row::Item(A::Playlist, MenuItem::new(i18n::menus().to_playlist).icon(Icon::PlaylistAdd)));
     if partial {
-        rows.push(Row::Item(A::AddWhole, MenuItem::new(ADD_ALBUM).icon(Icon::LibraryMusic)));
+        rows.push(Row::Item(A::AddWhole, MenuItem::new(i18n::menus().add_album).icon(Icon::LibraryMusic)));
     } else if r.whole && !on_page {
-        rows.push(Row::Item(A::KeepMine, MenuItem::new(KEEP_MINE).icon(Icon::LibraryMusic)));
+        rows.push(Row::Item(A::KeepMine, MenuItem::new(i18n::menus().keep_mine).icon(Icon::LibraryMusic)));
     }
     rows.push(Row::Divider);
     if !r.artists.linked().is_empty() {
-        rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person)));
+        rows.push(Row::Item(A::Artist, MenuItem::new(i18n::menus().to_artist).icon(Icon::Person)));
     }
-    rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
-    rows.push(Row::Item(A::RefreshCover, MenuItem::new(REFRESH_COVER).icon(Icon::Refresh)));
+    rows.push(Row::Item(A::Share, MenuItem::new(i18n::menus().share).icon(Icon::Share)));
+    rows.push(Row::Item(A::RefreshCover, MenuItem::new(i18n::menus().refresh_cover).icon(Icon::Refresh)));
     // An album only some songs of which are the user's lacks only those
     // without a file; the whole of it is a download of its own.
     let download = !on_page && (progress_badge(r).is_some() || r.mine.is_some_and(|n| r.mine_local < n));
@@ -324,18 +328,18 @@ pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
         rows.push(Row::Divider);
     }
     if download {
-        rows.push(Row::Item(A::Download, MenuItem::new("Скачать недостающие").icon(Icon::Download)));
+        rows.push(Row::Item(A::Download, MenuItem::new(i18n::menus().download_missing).icon(Icon::Download)));
     }
     if partial {
-        rows.push(Row::Item(A::DownloadWhole, MenuItem::new("Скачать весь альбом").icon(Icon::Download)));
+        rows.push(Row::Item(A::DownloadWhole, MenuItem::new(i18n::menus().download_whole_album).icon(Icon::Download)));
     }
     if better {
-        rows.push(Row::Item(A::Better, MenuItem::new(super::FIND_BETTER).icon(Icon::Search)));
+        rows.push(Row::Item(A::Better, MenuItem::new(i18n::menus().find_better).icon(Icon::Search)));
     }
     rows.push(Row::Divider);
-    rows.push(Row::Item(A::Trash, MenuItem::new("Удалить альбом").icon(Icon::Delete)));
+    rows.push(Row::Item(A::Trash, MenuItem::new(i18n::menus().delete_album).icon(Icon::Delete)));
     if r.local_tracks > 0 {
-        rows.push(Row::Item(A::Purge, MenuItem::new("Удалить альбом навсегда").icon(Icon::Delete)));
+        rows.push(Row::Item(A::Purge, MenuItem::new(i18n::menus().delete_album_forever).icon(Icon::Delete)));
     }
     rows
 }
@@ -402,11 +406,7 @@ pub fn playlist_card_with(
     out: &mut Vec<Command>,
 ) -> Option<Route> {
     // A playlist that follows a service says which, in words.
-    let mut subtitle = format!(
-        "{} {}",
-        p.track_count,
-        common::plural(u64::from(p.track_count), "трек", "трека", "треков")
-    );
+    let mut subtitle = i18n::tracks_count(u64::from(p.track_count));
     if let Some(s) = p.service {
         subtitle = format!("{} · {subtitle}", s.display_name());
     }
@@ -513,7 +513,7 @@ pub fn shown_rows<A>(rows: Vec<Row<A>>) -> Vec<Row<A>> {
                 let rows = shown_rows(rows);
                 match rows.iter().filter(|r| matches!(r, Row::Item(..))).count() {
                     0 => {}
-                    1 if parent.label != super::FILE => shown.extend(rows.into_iter().filter(|r| matches!(r, Row::Item(..)))),
+                    1 if parent.label != i18n::menus().file => shown.extend(rows.into_iter().filter(|r| matches!(r, Row::Item(..)))),
                     _ => shown.push(Row::Sub(parent, rows)),
                 }
             }
@@ -595,9 +595,9 @@ pub struct PlaylistMenuOf<'a> {
 pub fn sync_menu_label(m: nikgob_view::PlaylistSyncMode) -> &'static str {
     use nikgob_view::PlaylistSyncMode as M;
     match m {
-        M::TwoWay => "Изменения в обе стороны",
-        M::Follow => "Только получать изменения",
-        M::Once => "Выключить синхронизацию",
+        M::TwoWay => i18n::menus().sync_two_way,
+        M::Follow => i18n::menus().sync_follow,
+        M::Once => i18n::menus().sync_off,
     }
 }
 
@@ -605,9 +605,9 @@ pub fn sync_menu_label(m: nikgob_view::PlaylistSyncMode) -> &'static str {
 pub fn sync_state_label(m: nikgob_view::PlaylistSyncMode) -> &'static str {
     use nikgob_view::PlaylistSyncMode as M;
     match m {
-        M::TwoWay => "изменения в обе стороны",
-        M::Follow => "только получение изменений",
-        M::Once => "не синхронизируется",
+        M::TwoWay => i18n::pages().sync_state_two_way,
+        M::Follow => i18n::pages().sync_state_follow,
+        M::Once => i18n::pages().sync_state_off,
     }
 }
 
@@ -619,22 +619,22 @@ pub fn playlist_rows(o: PlaylistMenuOf<'_>) -> Vec<Row<PlaylistAct>> {
     use PlaylistAct as A;
     let mut rows = Vec::new();
     if !o.on_page {
-        rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
-        rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
+        rows.push(Row::Item(A::Play, MenuItem::new(i18n::common().play).icon(Icon::PlayArrow)));
+        rows.push(Row::Item(A::Shuffle, MenuItem::new(i18n::common().shuffle).icon(Icon::Shuffle)));
     }
-    rows.push(Row::Item(A::Radio, MenuItem::new("Радио по плейлисту").icon(Icon::Radio)));
-    rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
-    rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Radio, MenuItem::new(i18n::menus().radio_by_playlist).icon(Icon::Radio)));
+    rows.push(Row::Item(A::Next, MenuItem::new(i18n::menus().play_next).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Queue, MenuItem::new(i18n::menus().to_queue).icon(Icon::QueueMusic)));
     if o.editable {
         rows.push(Row::Divider);
         // The page edits the name and the cover; a card renames.
-        let edit = if o.on_page { "Изменить…" } else { "Переименовать…" };
+        let edit = if o.on_page { i18n::menus().edit_item } else { i18n::menus().rename_item };
         rows.push(Row::Item(A::Edit, MenuItem::new(edit).icon(Icon::Edit)));
     }
     if let Some((service, mode)) = o.sync {
         use nikgob_view::PlaylistSyncMode as M;
         rows.push(Row::Divider);
-        rows.push(Row::Label(format!("Синхронизация с {service}")));
+        rows.push(Row::Label(i18n::menus::fmt_sync_with(service)));
         // The two ways it can sync, the one on marked; while it is off
         // neither is, and a pick turns it on again.
         for m in [M::TwoWay, M::Follow] {
@@ -650,10 +650,10 @@ pub fn playlist_rows(o: PlaylistMenuOf<'_>) -> Vec<Row<PlaylistAct>> {
         rows.push(Row::Divider);
     }
     if link {
-        rows.push(Row::Item(A::Link, MenuItem::new("Связать с сервисом…").icon(Icon::Sync)));
+        rows.push(Row::Item(A::Link, MenuItem::new(i18n::menus().link_service).icon(Icon::Sync)));
     }
     if o.editable {
-        rows.push(Row::Item(A::Delete, MenuItem::new("Удалить плейлист").icon(Icon::Delete)));
+        rows.push(Row::Item(A::Delete, MenuItem::new(i18n::menus().delete_playlist).icon(Icon::Delete)));
     }
     rows
 }
@@ -790,7 +790,7 @@ pub fn artist_leading(ui: &Ui, a: &ArtistCard) -> Leading {
 pub fn artist_tracks(a: &ArtistCard) -> String {
     match a.track_count {
         0 => String::new(),
-        n => format!("{n} {}", common::plural(u64::from(n), "трек", "трека", "треков")),
+        n => i18n::tracks_count(u64::from(n)),
     }
 }
 
@@ -809,7 +809,7 @@ pub fn artist_caption(a: &ArtistCard) -> String {
 /// What an artist is on a tile and in a search's top result, with its
 /// Latin name: «Исполнитель · Ayako Saso», a role «Персонаж · Riko».
 pub fn artist_kind(a: &ArtistCard) -> String {
-    let kind = if a.character { "Персонаж" } else { "Исполнитель" };
+    let kind = if a.character { i18n::pages().character } else { i18n::sound_facts().tag_artist };
     match &a.latin {
         Some(l) => format!("{kind} · {l}"),
         None => kind.to_owned(),
@@ -949,7 +949,7 @@ pub fn artist_avatar(
                     .size(Size::M)
                     .style(Style::Filled)
                     .filled_icon(true)
-                    .tooltip("Слушать микс")
+                    .tooltip(i18n::menus().play_mix)
                     .id_salt(("artist-play-btn", a.id)),
             )
             .clicked();
@@ -997,15 +997,15 @@ pub fn artist_rows(a: &ArtistCard, on_page: bool, marks: &nikgob_view::DislikesV
     use ArtistAct as A;
     let mut rows = Vec::new();
     if !on_page {
-        rows.push(Row::Item(A::Play, MenuItem::new("Слушать микс").icon(Icon::PlayArrow)));
-        rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
-        rows.push(Row::Item(A::Radio, MenuItem::new("Радио исполнителя").icon(Icon::Radio)));
+        rows.push(Row::Item(A::Play, MenuItem::new(i18n::menus().play_mix).icon(Icon::PlayArrow)));
+        rows.push(Row::Item(A::Shuffle, MenuItem::new(i18n::common().shuffle).icon(Icon::Shuffle)));
+        rows.push(Row::Item(A::Radio, MenuItem::new(i18n::menus().radio_artist).icon(Icon::Radio)));
     }
-    rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
-    rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Next, MenuItem::new(i18n::menus().play_next).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Queue, MenuItem::new(i18n::menus().to_queue).icon(Icon::QueueMusic)));
     rows.push(Row::Divider);
     if !on_page {
-        rows.push(Row::Item(A::Follow, MenuItem::new(if a.liked { "Отписаться" } else { "Подписаться" }).icon(Icon::Favorite)));
+        rows.push(Row::Item(A::Follow, MenuItem::new(if a.liked { i18n::menus().unfollow } else { i18n::menus().follow }).icon(Icon::Favorite)));
     }
     rows.push(Row::Item(A::Ban, super::ban_item(a.id, marks)));
     rows
@@ -1229,9 +1229,9 @@ pub fn track_list_ext(
             let disc = disc_of(&lines[j]);
             let versions_head = versions_at == Some(j);
             let head = if versions_head {
-                Some("Другие версии".to_owned())
+                Some(i18n::pages().versions_head.to_owned())
             } else if discs && versions_at.is_none_or(|at| j < at) && (j == 0 || disc_of(&lines[j - 1]) != disc) {
-                Some(format!("Диск {disc}"))
+                Some(i18n::pages::fmt_disc(disc))
             } else {
                 None
             };
@@ -1291,7 +1291,7 @@ fn hole_row(
     state: &ViewState,
     out: &mut Vec<Command>,
 ) -> Response {
-    let title = if no > 0 { format!("Трек {no}") } else { "Трек без номера".to_owned() };
+    let title = if no > 0 { i18n::pages::fmt_track_no(no) } else { i18n::pages().track_no_number.to_owned() };
     let wished = album.and_then(|r| wish.of_release(r));
     let leading = Leading::Number(if no > 0 { no.to_string() } else { String::new() });
     ListItem::new(title)
@@ -1311,7 +1311,7 @@ fn hole_row(
                     (None, Some(r)) => {
                         let dl = IconButton::new(Icon::Download)
                             .size(Size::Xs)
-                            .tooltip("Скачать недостающие — в «Хочу скачать»")
+                            .tooltip(i18n::pages().dl_missing_tip)
                             .id_salt(("hole-dl", id, j));
                         if ui.add(dl).clicked() {
                             out.push(Command::DownloadRelease(r));
@@ -1320,7 +1320,7 @@ fn hole_row(
                     (None, None) => {}
                 }
                 let variant = Theme::get(ui.ctx()).scheme.on_surface_variant;
-                ui.label(TypeRole::LabelSmall.style().rich("нет файла", variant));
+                ui.label(TypeRole::LabelSmall.style().rich(i18n::pages().no_file, variant));
             });
         })
         .id_salt(("hole", id, j))
@@ -1376,10 +1376,10 @@ fn track_row(
     }
     // A liked YouTube clip without its song: said, as search says it.
     if t.clip {
-        supporting = format!("{supporting} · клип");
+        supporting = format!("{supporting} · {}", i18n::pages().clip);
     }
     if opts.mark_local && t.has_local {
-        supporting = format!("{supporting} · у тебя");
+        supporting = format!("{supporting} · {}", i18n::pages().you_have);
     }
     let dur = t.duration.map(common::fmt_time).unwrap_or_default();
     // No file: it streams (a ⬇ to «Хочу скачать», or how far it is there),
@@ -1400,14 +1400,14 @@ fn track_row(
         .enabled(true)
         .trailing(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let m = ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("track-more", id, i)));
+                let m = ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip(i18n::common().more).id_salt(("track-more", id, i)));
                 menu_resp = Some(m);
                 if let Some((mark, release)) = mark {
                     let mine = mark == AlbumMark::Mine;
                     let b = IconButton::new(if mine { Icon::Check } else { Icon::Add })
                         .size(Size::Xs)
                         .selected(mine)
-                        .tooltip(if mine { "Убрать из моих треков" } else { "Добавить в мои треки" })
+                        .tooltip(if mine { i18n::pages().mine_remove } else { i18n::pages().mine_add })
                         .id_salt(("track-mine", id, i));
                     if ui.add(b).clicked() {
                         out.push(Command::AlbumTrackMine { release, track: track_id, mine: !mine });
@@ -1425,7 +1425,7 @@ fn track_row(
                                 .add(
                                     IconButton::new(Icon::Download)
                                         .size(Size::Xs)
-                                        .tooltip("Скачать — в «Хочу скачать»")
+                                        .tooltip(i18n::pages().dl_tip)
                                         .id_salt(("track-dl", id, i)),
                                 )
                                 .clicked()
@@ -1450,9 +1450,9 @@ fn track_row(
                 let variant = Theme::get(ui.ctx()).scheme.on_surface_variant;
                 ui.label(TypeRole::BodyMedium.style().rich(dur, variant));
                 if !has_local && !streams {
-                    ui.label(TypeRole::LabelSmall.style().rich("нет файла", variant));
+                    ui.label(TypeRole::LabelSmall.style().rich(i18n::pages().no_file, variant));
                 } else if !has_local && opts.mark_missing {
-                    ui.label(TypeRole::LabelSmall.style().rich("стрим", variant));
+                    ui.label(TypeRole::LabelSmall.style().rich(i18n::pages().stream, variant));
                 }
             });
         })
@@ -1579,13 +1579,13 @@ pub const OPEN_WISHLIST: &str = "md3e-open-wishlist";
 pub fn wish_mark(ui: &mut Ui, st: WishlistStatus, torrents: bool, salt: impl std::hash::Hash + std::fmt::Debug) -> Response {
     use WishlistStatus as St;
     let (icon, tip) = match st {
-        St::Waiting | St::New | St::Searching if !torrents => (Icon::HourglassEmpty, "Ждёт торренты — «Хочу скачать»"),
-        St::Waiting => (Icon::HourglassEmpty, "Ждёт в «Хочу скачать»"),
-        St::New | St::Searching => (Icon::Search, "Ищу, где скачать"),
-        St::Confirm => (Icon::Info, "Нужно выбрать, что скачать — «Хочу скачать»"),
-        St::Downloading => (Icon::CloudDownload, "Качается"),
-        St::NoTorrent | St::Failed => (Icon::Error, "Не нашёл, где скачать — «Хочу скачать»"),
-        St::Done | St::Dismissed => (Icon::Check, "Скачано"),
+        St::Waiting | St::New | St::Searching if !torrents => (Icon::HourglassEmpty, i18n::pages().wish_wait_torrents),
+        St::Waiting => (Icon::HourglassEmpty, i18n::pages().wish_wait),
+        St::New | St::Searching => (Icon::Search, i18n::pages().wish_searching),
+        St::Confirm => (Icon::Info, i18n::pages().wish_confirm),
+        St::Downloading => (Icon::CloudDownload, i18n::pages().wish_downloading),
+        St::NoTorrent | St::Failed => (Icon::Error, i18n::pages().wish_not_found),
+        St::Done | St::Dismissed => (Icon::Check, i18n::pages().wish_done),
     };
     ui.add(IconButton::new(icon).size(Size::Xs).tooltip(tip).id_salt(Id::new(salt)))
 }
@@ -1598,7 +1598,7 @@ pub(crate) fn playlist_track_rows(track: &TrackRow, playlist: PlaylistId, of: su
     if !matches!(rows.last(), Some(Row::Item(super::TrackAct::Apart, _))) {
         rows.push(Row::Divider);
     }
-    let remove = if playlist == LIKED_PLAYLIST { super::UNLIKE } else { "Убрать из плейлиста" };
+    let remove = if playlist == LIKED_PLAYLIST { i18n::menus().unlike } else { i18n::menus().remove_from_playlist };
     rows.push(Row::Item(super::TrackAct::Remove, MenuItem::new(remove).icon(Icon::Delete)));
     rows
 }
@@ -1892,15 +1892,15 @@ pub fn edition_offers(ui: &mut Ui, state: &ViewState, artist: Option<&str>, out:
     for o in offers {
         crate::components::Card::filled().id_salt(("edition", o.id)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(TypeRole::TitleMedium.style().rich("Похоже, это один альбом", s.on_surface));
+            ui.label(TypeRole::TitleMedium.style().rich(i18n::pages().ed_title, s.on_surface));
             ui.add_space(4.0);
-            let names = std::iter::once(&o.keep).chain(&o.others).map(|t| format!("«{t}»")).collect::<Vec<_>>().join(" и ");
-            let mut what = format!("{names} — издания одного альбома ({}).", o.artist);
+            let names = std::iter::once(&o.keep).chain(&o.others).map(|t| format!("«{t}»")).collect::<Vec<_>>().join(i18n::pages().ed_and);
+            let mut what = i18n::pages::fmt_ed_what(&names, &o.artist);
             if o.same_songs > 0 {
-                what.push_str(&format!(" Одинаковых песен: {} — останется по одной, файл получше будет играть.", o.same_songs));
+                what.push_str(&i18n::pages::fmt_ed_same(o.same_songs));
             }
             if o.new_songs > 0 {
-                what.push_str(&format!(" Ещё {} добавится в «{}».", o.new_songs, o.keep));
+                what.push_str(&i18n::pages::fmt_ed_new(o.new_songs, &o.keep));
             }
             ui.label(TypeRole::BodyMedium.style().rich_para(what, s.on_surface_variant));
             ui.add_space(8.0);
@@ -1909,15 +1909,15 @@ pub fn edition_offers(ui: &mut Ui, state: &ViewState, artist: Option<&str>, out:
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
                     if ui
-                        .add(crate::components::Button::new("Объединить").style(Style::Filled).id_salt(("ed-merge", o.id)))
-                        .on_hover_text(format!("Всё окажется в «{}»; файлы на диске не трогаются", o.keep))
+                        .add(crate::components::Button::new(i18n::pages().ed_merge).style(Style::Filled).id_salt(("ed-merge", o.id)))
+                        .on_hover_text(i18n::pages::fmt_ed_merge_tip(&o.keep))
                         .clicked()
                     {
                         out.push(Command::MergeEditions(o.id));
                     }
                     if ui
-                        .add(crate::components::Button::new("Оставить раздельно").style(Style::Text).id_salt(("ed-keep", o.id)))
-                        .on_hover_text("Больше не спрашивать про эти альбомы")
+                        .add(crate::components::Button::new(i18n::pages().ed_keep).style(Style::Text).id_salt(("ed-keep", o.id)))
+                        .on_hover_text(i18n::pages().ed_keep_tip)
                         .clicked()
                     {
                         out.push(Command::KeepEditionsApart(o.id));
