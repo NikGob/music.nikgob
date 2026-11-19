@@ -28,7 +28,7 @@ pub fn version() -> &'static str {
 /// The version as the foot of Настройки names it: «Версия 0.1.0»,
 /// «Версия admin».
 pub fn version_label() -> String {
-    format!("Версия {}", version())
+    nikgob_core::i18n::pages::fmt_version(version())
 }
 
 /// A developer build (`--features dev`): developer rows show.

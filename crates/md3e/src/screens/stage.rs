@@ -34,6 +34,7 @@ use super::{
     pages::{self, PageState, home::Section},
 };
 use crate::{ColorScheme, Contrast, SchemeVariant, Theme, components::anim};
+use nikgob_core::i18n;
 
 /// The width the stage lays its screens out at (at least).
 pub const CANVAS_W: f32 = 960.0;
@@ -236,10 +237,10 @@ impl Scene {
     /// Its name on the group of buttons under the stage.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Track => "Трек",
-            Self::Lyrics => "Текст",
-            Self::Home => "Главная",
-            Self::Album => "Альбом",
+            Self::Track => i18n::pages().scene_track,
+            Self::Lyrics => i18n::pages().scene_lyrics,
+            Self::Home => i18n::nav().home,
+            Self::Album => i18n::pages().scene_album,
         }
     }
 }
@@ -706,9 +707,9 @@ fn today() -> ReleaseDay {
 fn placeholder(id: TrackId) -> TrackRow {
     TrackRow {
         id,
-        title: "Название песни".into(),
-        artist: "Исполнитель".into(),
-        album: Some("Альбом".into()),
+        title: i18n::pages().placeholder_title.into(),
+        artist: i18n::sound_facts().tag_artist.into(),
+        album: Some(i18n::sound_facts().tag_album.into()),
         release_id: None,
         artists: Default::default(),
         disc_no: 1,
@@ -963,7 +964,7 @@ fn queue_album(v: &ViewState, seed: TrackId) -> ReleaseDetail {
     }
     tracks.sort_by_key(|r| (r.disc_no, r.track_no));
     let id = t.release_id.unwrap_or_else(|| ReleaseId::from_uuid(made_up(seed, 0)));
-    let title = t.album.clone().unwrap_or_else(|| "Альбом".into());
+    let title = t.album.clone().unwrap_or_else(|| i18n::pages().scene_album.to_owned());
     let card = card_of(id, title, t.artist.clone(), ReleaseType::Album, t.cover.clone(), &tracks);
     let total = tracks.iter().filter_map(|r| r.duration).sum();
     plain_album(card, tracks, total, None, false)

@@ -5,30 +5,32 @@
 //! drawn.
 
 use egui::Ui;
+use nikgob_core::i18n;
 use nikgob_view::{Command, RecTarget, Route, TrackId, ViewState};
 
 use super::{PageState, widgets};
 use crate::components::{Button, ListItem, Style};
 
 /// The page's title (and its button's name in Settings).
+// i18n: use pages().marks_title
 pub const TITLE: &str = "Не нравится и скорость";
 
 pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
-    super::detail::with_bar(ui, TITLE, pages, |ui, _| {
+    super::detail::with_bar(ui, i18n::pages().marks_title, pages, |ui, _| {
         let d = &state.dislikes;
         if !d.tracks.is_empty() {
-            widgets::section_header(ui, "Треки с «Не нравится»", false);
+            widgets::section_header(ui, i18n::pages().marks_disliked, false);
             for t in &d.tracks {
-                if mark(ui, ("marks-track", t.id), &t.title, Some(&t.artist), "Снять") {
+                if mark(ui, ("marks-track", t.id), &t.title, Some(&t.artist), i18n::pages().take_back) {
                     out.push(Command::Dislike { track: t.id, dislike: false, sure: false, relike: false });
                 }
             }
             ui.add_space(widgets::SECTION_GAP);
         }
         if !d.artists.is_empty() {
-            widgets::section_header(ui, "Не рекомендовать исполнителей", false);
+            widgets::section_header(ui, i18n::pages().marks_banned, false);
             for (id, name) in &d.artists {
-                if mark(ui, ("marks-artist", *id), name, None, "Снять") {
+                if mark(ui, ("marks-artist", *id), name, None, i18n::pages().take_back) {
                     out.push(Command::RecFeedback { target: RecTarget::Artist(*id), dislike: false });
                 }
             }
@@ -36,9 +38,9 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         }
         let speeds = speed_rows(state);
         if !speeds.is_empty() {
-            widgets::section_header(ui, "Своя скорость", false);
+            widgets::section_header(ui, i18n::pages().marks_speed, false);
             for (id, title, sub) in &speeds {
-                if mark(ui, ("marks-speed", *id), title, Some(sub), "Сбросить") {
+                if mark(ui, ("marks-speed", *id), title, Some(sub), i18n::common().reset) {
                     out.push(Command::ResetTrackSpeed(*id));
                 }
             }

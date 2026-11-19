@@ -550,7 +550,7 @@ impl MediaCard {
                 child.set_opacity(k);
                 menu = Some(child.add_enabled(
                     k > 0.5,
-                    IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt((id, "more-btn")),
+                    IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip(nikgob_core::i18n::common().more).id_salt((id, "more-btn")),
                 ));
             }
         }
@@ -607,8 +607,8 @@ fn status_chip(ui: &Ui, painter: &egui::Painter, left_center: egui::Pos2, status
         _ => (s.secondary_container, s.on_secondary_container),
     };
     let text = match status {
-        CoverStatus::Queued => Some("в очереди"),
-        CoverStatus::Done => Some(text.unwrap_or("у тебя")),
+        CoverStatus::Queued => Some(nikgob_core::i18n::pages().in_queue),
+        CoverStatus::Done => Some(text.unwrap_or(nikgob_core::i18n::pages().you_have)),
         _ => text,
     };
     let galley = text.map(|t| painter.layout_no_wrap(t.to_owned(), TypeRole::LabelSmall.font_id(), fg));

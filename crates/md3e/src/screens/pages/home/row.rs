@@ -550,13 +550,13 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
         let button = |icon: Icon, tip: &'static str, salt: &'static str| IconButton::new(icon).size(Size::S).style(Style::Tonal).tooltip(tip).id_salt(id.with(salt));
         let on = hovered && !state.dragging();
         let back = Rect::from_min_size(pos2(view.left() + ARROW_INSET, y), Vec2::splat(d));
-        let clicked = arrow(ui, id.with("back"), on && state.can_back(), back, button(Icon::ChevronLeft, "Назад", "home-row-back"));
+        let clicked = arrow(ui, id.with("back"), on && state.can_back(), back, button(Icon::ChevronLeft, nikgob_core::i18n::common().back, "home-row-back"));
         if clicked.is_some_and(|r| r.clicked()) {
             state.end_turn();
             state.page(false, per, pitch, max);
         }
         let forward = Rect::from_min_size(pos2(view.right() - ARROW_INSET - d, y), Vec2::splat(d));
-        let clicked = arrow(ui, id.with("forward"), on && state.can_forward(max), forward, button(Icon::ChevronRight, "Дальше", "home-row-forward"));
+        let clicked = arrow(ui, id.with("forward"), on && state.can_forward(max), forward, button(Icon::ChevronRight, nikgob_core::i18n::pages().forward, "home-row-forward"));
         if clicked.is_some_and(|r| r.clicked()) {
             state.end_turn();
             state.page(true, per, pitch, max);

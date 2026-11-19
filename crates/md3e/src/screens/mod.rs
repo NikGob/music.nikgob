@@ -565,7 +565,7 @@ impl Md3eUi {
                         let mut pui = ui.new_child(UiBuilder::new().max_rect(inner).id_salt("compact-page"));
                         pui.set_clip_rect(full);
                         if pui.add(crate::components::IconButton::new(crate::Icon::ExpandMore)
-                            .tooltip("Вернуться к плееру").id_salt("compact-settings-close")).clicked() {
+                            .tooltip(nikgob_core::i18n::pages().back_to_player).id_salt("compact-settings-close")).clicked() {
                             self.navigate(ctx, Route::Home, out);
                         }
                         let route = self.route().clone();
@@ -1032,7 +1032,7 @@ impl Md3eUi {
                 .add(
                     crate::components::IconButton::new(if expanded { Icon::ChevronLeft } else { Icon::ChevronRight })
                         .size(crate::components::Size::S)
-                        .tooltip(if expanded { "Свернуть меню" } else { "Развернуть меню" }),
+                        .tooltip(if expanded { nikgob_core::i18n::pages().collapse_menu } else { nikgob_core::i18n::pages().expand_menu }),
                 )
                 .clicked()
             {
@@ -1604,18 +1604,18 @@ impl Md3eUi {
             .map_or_else(|| of(self.route()), of);
         let pending = state.downloads.confirm.iter().filter(|c| c.answerable()).count() as u32;
         let items = [
-            RailItem { icon: Icon::Home, label: "Главная", badge: None },
-            RailItem { icon: Icon::LibraryMusic, label: "Библиотека", badge: None },
-            RailItem { icon: Icon::Download, label: "Загрузки", badge: Some(pending) },
+            RailItem { icon: Icon::Home, label: nikgob_core::i18n::nav().home, badge: None },
+            RailItem { icon: Icon::LibraryMusic, label: nikgob_core::i18n::nav().library, badge: None },
+            RailItem { icon: Icon::Download, label: nikgob_core::i18n::nav().downloads, badge: Some(pending) },
         ];
-        let bottom = [RailItem { icon: Icon::Settings, label: "Настройки", badge: None }];
+        let bottom = [RailItem { icon: Icon::Settings, label: nikgob_core::i18n::nav().settings, badge: None }];
         let rail_out = ui
             .scope_builder(UiBuilder::new().max_rect(rail_rect), |ui| {
                 ui.set_clip_rect(rail_rect);
                 NavRail {
                     id: egui::Id::new("md3e-rail"),
                     expansion,
-                    fab: Some((Icon::Add, "Добавить")),
+                    fab: Some((Icon::Add, nikgob_core::i18n::common().add)),
                     items: &items,
                     bottom: &bottom,
                     selected,

@@ -17,6 +17,7 @@
 use std::time::Duration;
 
 use egui::{Align, Align2, Context, Id, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
+use nikgob_core::i18n;
 use nikgob_view::{Command, Prefs, SPEED_MAX, SPEED_MIN, SPEED_STEP, SpeedVariant, TrackId, ViewState, slider_to_speed, speed_text, speed_to_slider};
 
 use super::equalizer;
@@ -219,10 +220,10 @@ fn header(ui: &mut Ui, tabs: bool, tab: &mut Tab, eq_on: &mut bool) -> bool {
         UiBuilder::new().max_rect(row).layout(Layout::right_to_left(Align::Center)).id_salt("sound-header-right"),
     );
     right.spacing_mut().item_spacing.x = 8.0;
-    let close = IconButton::new(Icon::Close).size(Size::S).style(Style::Standard).tooltip("Закрыть (Esc)").id_salt("sound-close");
+    let close = IconButton::new(Icon::Close).size(Size::S).style(Style::Standard).tooltip(i18n::pages().close_esc).id_salt("sound-close");
     let closed = right.add(close).clicked();
     if *tab == Tab::Equalizer {
-        right.add(Switch::new(eq_on).label("Эквалайзер").id_salt("sound-eq-on"));
+        right.add(Switch::new(eq_on).label(i18n::pages().equalizer).id_salt("sound-eq-on"));
     }
     let left = Rect::from_min_max(row.min, pos2((right.min_rect().left() - 12.0).max(row.left()), row.bottom()));
     let mut left = ui.new_child(
@@ -230,11 +231,11 @@ fn header(ui: &mut Ui, tabs: bool, tab: &mut Tab, eq_on: &mut bool) -> bool {
     );
     if tabs {
         let at = usize::from(*tab == Tab::Equalizer);
-        if let Some(picked) = ConnectedGroup::new("sound-tabs", &["Скорость", "Эквалайзер"]).show(&mut left, at) {
+        if let Some(picked) = ConnectedGroup::new("sound-tabs", &[i18n::pages().speed_tab, i18n::pages().equalizer]).show(&mut left, at) {
             *tab = if picked == 0 { Tab::Speed } else { Tab::Equalizer };
         }
     } else {
-        left.label(TypeRole::TitleLarge.style().rich("Эквалайзер", s.on_surface));
+        left.label(TypeRole::TitleLarge.style().rich(i18n::pages().equalizer, s.on_surface));
     }
     closed
 }
@@ -310,7 +311,7 @@ fn speed(
 
     ui.add_space(12.0);
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), SWITCH_ROW_H), Sense::hover());
-    let name = "Сохранять тембр голоса";
+    let name = i18n::pages().keep_timbre;
     ui.painter().text(row.left_center(), Align2::LEFT_CENTER, name, TypeRole::BodyLarge.font_id(), s.on_surface);
     let mut end = ui.new_child(
         UiBuilder::new().max_rect(row).layout(Layout::right_to_left(Align::Center)).id_salt("sound-keep-timbre-row"),

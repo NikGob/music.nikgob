@@ -45,7 +45,13 @@ const HALO_R: f32 = 16.0;
 /// names (one row of chips; a narrow window wraps them and takes more).
 pub(super) const EDITOR_H: f32 = 32.0 + 12.0 + FIELD_H + 24.0;
 
+// i18n: use band_names()
 pub(super) const BAND_NAMES: [&str; EQ_BANDS] = ["32", "64", "125", "250", "500", "1к", "2к", "4к", "8к", "16к"];
+
+/// The bands' names under the rails in the active locale.
+pub(super) fn band_names() -> [&'static str; EQ_BANDS] {
+    nikgob_core::i18n::pages::band_names()
+}
 
 /// Where band `band` (fractional: between two bands, or past the ends) is
 /// across a field from `left` to `right`.
@@ -82,12 +88,13 @@ fn y_db(top: f32, bottom: f32, y: f32) -> f32 {
 }
 
 fn db_text(db: f32) -> String {
+    let unit = nikgob_core::i18n::pages().db_unit;
     if db == 0.0 {
-        "0 дБ".to_owned()
+        format!("0 {unit}")
     } else {
         let sign = if db > 0.0 { "+" } else { "−" };
         let abs = db.abs();
-        if abs.fract() == 0.0 { format!("{sign}{abs:.0} дБ") } else { format!("{sign}{abs:.1} дБ") }
+        if abs.fract() == 0.0 { format!("{sign}{abs:.0} {unit}") } else { format!("{sign}{abs:.1} {unit}") }
     }
 }
 
@@ -175,7 +182,7 @@ fn field(ui: &mut Ui, on: &mut bool, gains: &mut [f32; EQ_BANDS]) {
         if r.hovered() {
             hovered = Some(band);
         }
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, format!("{} Гц", BAND_NAMES[band])));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, format!("{} {}", band_names()[band], nikgob_core::i18n::pages().hz_unit)));
     }
 
     let p = ui.painter_at(rect.expand(8.0));
@@ -230,7 +237,7 @@ fn field(ui: &mut Ui, on: &mut bool, gains: &mut [f32; EQ_BANDS]) {
         p.text(
             pos2(x, rect.top() + FIELD_H + 4.0),
             Align2::CENTER_TOP,
-            BAND_NAMES[band],
+            band_names()[band],
             TypeRole::LabelSmall.font_id(),
             s.on_surface_variant,
         );

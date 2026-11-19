@@ -3,6 +3,7 @@
 //! how an artist without a photo looks.
 
 use nikgob_shapes::MaterialShape;
+use nikgob_core::i18n;
 use nikgob_view::{ArtistCard, PlaylistCard, ReleaseCard, ReleaseSort};
 
 /// The query, folded: lowercase, «ё» as «е», split into words.
@@ -56,17 +57,17 @@ pub fn group_key(sort: ReleaseSort, r: &ReleaseCard, now: i64) -> String {
         ReleaseSort::Artist => letter(&r.artist),
         ReleaseSort::Title => letter(&r.title),
         ReleaseSort::Year => match r.year {
-            Some(y) if y > 0 => format!("{}-е", y - y.rem_euclid(10)),
-            _ => "Без года".to_owned(),
+            Some(y) if y > 0 => i18n::pages::fmt_decade(y),
+            _ => i18n::pages().no_year.to_owned(),
         },
         ReleaseSort::Added => {
             let days = (now - r.added_at).max(0) / DAY_MS;
             match days {
-                0 => "Сегодня",
-                1..7 => "За неделю",
-                7..31 => "За месяц",
-                31..365 => "За год",
-                _ => "Раньше",
+                0 => i18n::pages().today.to_owned(),
+                1..7 => i18n::pages().week.to_owned(),
+                7..31 => i18n::pages().month.to_owned(),
+                31..365 => i18n::pages().year.to_owned(),
+            _ => i18n::pages().earlier.to_owned(),
             }
             .to_owned()
         }
