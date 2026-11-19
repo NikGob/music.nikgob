@@ -1857,7 +1857,7 @@ fn plain(ui: &mut Ui, rect: Rect, state: &ViewState) -> Option<f32> {
             ui.add_space(16.0);
         });
     } else {
-        let text = if state.lyrics.loading { "Ищу текст…" } else { "Текста нет" };
+        let text = if state.lyrics.loading { nikgob_core::i18n::lyrics().searching } else { nikgob_core::i18n::lyrics().no_text };
         child.painter().text(rect.center(), Align2::CENTER_CENTER, text, style_at(MEGA.small).font_id(), s.on_surface_variant);
     }
     let text = state.lyrics.plain.as_deref().is_some_and(|t| !t.trim().is_empty());

@@ -42,8 +42,8 @@ pub fn show(
     let tabs: Vec<&str> = parts
         .iter()
         .map(|t| match t {
-            PaneTab::Lyrics => "Текст",
-            PaneTab::Info => "Инфо",
+            PaneTab::Lyrics => nikgob_core::i18n::screens().pane_lyrics_tab,
+            PaneTab::Info => nikgob_core::i18n::screens().pane_info_tab,
         })
         .collect();
     let idx = parts.iter().position(|t| t == tab).unwrap_or(0);
@@ -79,7 +79,7 @@ pub fn show(
             .id_salt("pane-close-slot"),
     );
     if cui
-        .add(IconButton::new(Icon::Close).size(Size::S).tooltip("Закрыть").id_salt("pane-close"))
+        .add(IconButton::new(Icon::Close).size(Size::S).tooltip(nikgob_core::i18n::common().close).id_salt("pane-close"))
         .clicked()
     {
         closed = true;
@@ -155,7 +155,7 @@ enum QueueAct {
 fn queue_menu_rows(ctx: &egui::Context, e: &QueueEntry, state: &ViewState) -> Vec<Row<QueueAct>> {
     use super::pages as p;
     let t = &e.track;
-    let mut rows = vec![Row::Item(QueueAct::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow))];
+    let mut rows = vec![Row::Item(QueueAct::Play, MenuItem::new(nikgob_core::i18n::common().play).icon(Icon::PlayArrow))];
     let first = state.queue.next.first().map(|n| n.entry) == Some(e.entry);
     if state.queue.current_entry.is_some_and(|c| c != e.entry) && !first {
         rows.push(Row::Item(QueueAct::Next, MenuItem::new(p::PLAY_NEXT).icon(Icon::QueueMusic)));
@@ -172,7 +172,7 @@ fn queue_menu_rows(ctx: &egui::Context, e: &QueueEntry, state: &ViewState) -> Ve
     if !matches!(rows.last(), Some(Row::Item(QueueAct::Track(TrackAct::Apart), _))) {
         rows.push(Row::Divider);
     }
-    rows.push(Row::Item(QueueAct::Remove, MenuItem::new("Убрать из очереди").icon(Icon::Close)));
+    rows.push(Row::Item(QueueAct::Remove, MenuItem::new(nikgob_core::i18n::screens().remove_from_queue).icon(Icon::Close)));
     rows
 }
 
@@ -225,14 +225,14 @@ fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, state: &ViewState, chrom
                     .add(
                         IconButton::new(Icon::Close)
                             .size(Size::Xs)
-                            .tooltip("Убрать из очереди")
+                            .tooltip(nikgob_core::i18n::screens().remove_from_queue)
                             .id_salt(("q-x", entry)),
                     )
                     .clicked()
                 {
                     out.push(Command::RemoveFromQueue(entry));
                 }
-                more = Some(ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("q-more", entry))));
+                more = Some(ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip(nikgob_core::i18n::common().more).id_salt(("q-more", entry))));
             })
             .show(ui);
         if let Some(r) = o.link_clicked.and_then(|k| links.get(k).cloned()) {
@@ -397,7 +397,7 @@ fn queue_ghosts(ui: &mut Ui, q: &nikgob_view::QueueView, lm: &ListMotion, anchor
         gui.multiply_opacity(if g.played { alpha * 0.6 } else { alpha });
         match (g.entry, at) {
             (PREV_LABEL, _) => {
-                common::label(&mut gui, "Ранее", TypeRole::TitleSmall, s.on_surface_variant);
+                common::label(&mut gui, nikgob_core::i18n::screens().played_section, TypeRole::TitleSmall, s.on_surface_variant);
             }
             (_, Some((prev, i))) => {
                 let e = if *prev { &q.prev[*i] } else { &q.next[*i] };
@@ -492,14 +492,14 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         if ui
-            .add(Button::new("Очистить").style(Style::Tonal).id_salt("q-clear"))
+            .add(Button::new(nikgob_core::i18n::player().clear).style(Style::Tonal).id_salt("q-clear"))
             .clicked()
         {
             out.push(Command::ClearQueue);
         }
         if ui
             .add(
-                Button::new("Сохранить как плейлист")
+                Button::new(nikgob_core::i18n::player().save_as_playlist)
                     .style(Style::Tonal)
                     .id_salt("q-save"),
             )
@@ -557,7 +557,7 @@ fn queue_list(
         let n = q.prev.len();
         let rel = -(PREV_GAP + n as f32 * step + *head);
         lm.place(ui, 20.0, PREV_LABEL, rel, n + 1, false, false, |ui| {
-            common::label(ui, "Ранее", TypeRole::TitleSmall, s.on_surface_variant)
+            common::label(ui, nikgob_core::i18n::screens().played_section, TypeRole::TitleSmall, s.on_surface_variant)
         });
         ui.add_space(4.0);
         queue_rows(ui, "prev", &q.prev, held, true, None, lm, &mut rows, |ui, e, slot, rows| {
@@ -568,7 +568,7 @@ fn queue_list(
     if let Some(t) = &q.current {
         let top = ui.cursor().min.y;
         anchor = Some(top);
-        common::label(ui, "Сейчас играет", TypeRole::TitleSmall, s.on_surface_variant);
+        common::label(ui, nikgob_core::i18n::player().now_playing, TypeRole::TitleSmall, s.on_surface_variant);
         ui.add_space(4.0);
         let (item, links) = queue_item(t, q.current_guest, "q-current");
         let o = item.selected(true).show(ui);
@@ -596,9 +596,9 @@ fn queue_list(
     let after = anchor.unwrap_or_else(|| ui.cursor().top());
     let extending = q.radio.as_ref().is_some_and(|r| r.extending);
     if q.next.is_empty() && !extending {
-        common::label(ui, "Дальше ничего нет", TypeRole::BodyMedium, s.on_surface_variant);
+        common::label(ui, nikgob_core::i18n::screens().nothing_next, TypeRole::BodyMedium, s.on_surface_variant);
     } else if !q.next.is_empty() {
-        common::label(ui, "Далее", TypeRole::TitleSmall, s.on_surface_variant);
+        common::label(ui, nikgob_core::i18n::screens().next_section, TypeRole::TitleSmall, s.on_surface_variant);
         ui.add_space(4.0);
         queue_rows(ui, "next", &q.next, held, false, Some(after), lm, &mut rows, |ui, e, slot, rows| {
             row(ui, e, false, slot, rows)
@@ -680,8 +680,8 @@ fn autoplay_block(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut
     let p = &state.prefs;
     ui.add_space(12.0);
     let head = Header {
-        title: "Автовоспроизведение",
-        hover: if p.autoplay { "Когда очередь кончится, она продолжится похожим" } else { "Очередь закончится на последнем треке" },
+        title: nikgob_core::i18n::screens().autoplay,
+        hover: if p.autoplay { nikgob_core::i18n::screens().autoplay_on_hover } else { nikgob_core::i18n::screens().autoplay_off_hover },
         switch: Some(p.autoplay),
         source: p.autoplay.then_some(nikgob_view::RadioKind::Autoplay),
         salt: "q-autoplay",
@@ -736,7 +736,7 @@ fn header(ui: &mut Ui, h: Header<'_>, state: &ViewState, chrome: &mut Chrome, ou
     if let Some(on) = &mut switched {
         let slot = Rect::from_min_max(egui::pos2(right - 52.0, row.top()), egui::pos2(right, row.bottom()));
         ui.put(slot, Switch::new(on).id_salt((h.salt, "switch")))
-            .md3_tooltip("Автовоспроизведение", None);
+            .md3_tooltip(nikgob_core::i18n::screens().autoplay, None);
         right = slot.left() - 12.0;
     }
     let w = (right - text_x).max(1.0);
@@ -796,7 +796,7 @@ fn source_menu(salt: &str, chosen: usize) -> Menu {
     for (i, c) in super::pages::SettingId::RadioSource.choices().iter().enumerate() {
         menu = menu.item(MenuItem::new(c.label).selected(i == chosen));
     }
-    menu.divider().item(MenuItem::new("Настроить автовоспроизведение…").icon(Icon::Settings))
+    menu.divider().item(MenuItem::new(nikgob_core::i18n::screens().configure_autoplay).icon(Icon::Settings))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -827,9 +827,9 @@ fn radio_header(
     out: &mut Vec<Command>,
 ) -> bool {
     let (title, hover) = if r.autoplay {
-        (r.title_text.as_str(), "Автовоспроизведение: дописывается, пока играет")
+        (r.title_text.as_str(), nikgob_core::i18n::screens().autoplay_running)
     } else {
-        (r.header_text.as_str(), "Дописывается сама, пока играет")
+        (r.header_text.as_str(), nikgob_core::i18n::screens().radio_running)
     };
     let head = Header {
         title,
@@ -847,7 +847,7 @@ fn radio_header(
 /// rebuilds the tail, the track playing goes on.
 fn wave_header(ui: &mut Ui, r: &nikgob_view::RadioView, w: &nikgob_view::WaveView, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
     use nikgob_view::{WaveCharacter, WaveFilter, WaveNovelty, WaveScene};
-    let head = Header { title: r.title_text.as_str(), hover: "Подстраивается под тебя, пока играет", switch: None, source: None, salt: "q-wave", edge: true };
+    let head = Header { title: r.title_text.as_str(), hover: nikgob_core::i18n::screens().wave_hover, switch: None, source: None, salt: "q-wave", edge: true };
     header(ui, head, state, chrome, out);
     let f = w.filter;
     let mut picked: Option<WaveFilter> = None;
@@ -872,8 +872,8 @@ fn wave_header(ui: &mut Ui, r: &nikgob_view::RadioView, w: &nikgob_view::WaveVie
         if let Some(i) = chip(ui, "q-wave-character", f.character.title(), character) {
             picked = Some(WaveFilter { character: WaveCharacter::ALL[i], ..f });
         }
-        let scene_title = w.scenes.iter().find(|c| c.scene == f.scene).map_or("Все", |c| c.title.as_str());
-        let mut scenes: Vec<(&str, bool)> = vec![("Все", f.scene == WaveScene::All)];
+        let scene_title = w.scenes.iter().find(|c| c.scene == f.scene).map_or(nikgob_core::i18n::common().all, |c| c.title.as_str());
+        let mut scenes: Vec<(&str, bool)> = vec![(nikgob_core::i18n::common().all, f.scene == WaveScene::All)];
         scenes.extend(w.scenes.iter().map(|c| (c.title.as_str(), c.scene == f.scene)));
         if let Some(i) = chip(ui, "q-wave-scene", scene_title, scenes) {
             let scene = if i == 0 { WaveScene::All } else { w.scenes.get(i - 1).map_or(WaveScene::All, |c| c.scene) };
@@ -896,7 +896,7 @@ fn extending_row(ui: &mut Ui) {
     ui.painter().text(
         egui::pos2(row.left() + 16.0 + 56.0 + 12.0, row.center().y),
         egui::Align2::LEFT_CENTER,
-        "Подбираю ещё…",
+        nikgob_core::i18n::screens().picking_more,
         TypeRole::BodyMedium.font_id(),
         s.on_surface_variant,
     );
@@ -913,12 +913,12 @@ pub(super) fn lyrics(ui: &mut Ui, state: &ViewState, bass: f32, out: &mut Vec<Co
             ui.add_space(32.0);
             ui.add(LoadingIndicator::new());
             ui.add_space(8.0);
-            common::label(ui, "Ищу текст…", TypeRole::BodyMedium, s.on_surface_variant);
+            common::label(ui, nikgob_core::i18n::lyrics().searching, TypeRole::BodyMedium, s.on_surface_variant);
         });
         return configure;
     }
     if l.lines.is_empty() {
-        let text = l.plain.as_deref().unwrap_or("Текста нет");
+        let text = l.plain.as_deref().unwrap_or(nikgob_core::i18n::lyrics().no_text);
         egui::ScrollArea::vertical().id_salt("lyrics-plain").show(ui, |ui| {
             ui.label(TypeRole::BodyLarge.style().rich_para(text, s.on_surface_variant));
         });
@@ -940,14 +940,14 @@ pub(super) fn info_sheet(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>)
             .layout(egui::Layout::left_to_right(egui::Align::Center))
             .id_salt("info-sheet-title"),
     );
-    common::label(&mut tui, "Источник и качество", TypeRole::TitleMedium, s.on_surface);
+    common::label(&mut tui, nikgob_core::i18n::screens().info_title, TypeRole::TitleMedium, s.on_surface);
     let mut cui = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(Rect::from_min_size(egui::pos2(row.right() - close_w, row.top()), egui::vec2(close_w, close_w)))
             .id_salt("info-sheet-close-slot"),
     );
     let closed = cui
-        .add(IconButton::new(Icon::Close).size(Size::S).tooltip("Закрыть (Esc)").id_salt("info-sheet-close"))
+        .add(IconButton::new(Icon::Close).size(Size::S).tooltip(nikgob_core::i18n::screens().close_esc).id_salt("info-sheet-close"))
         .clicked();
     ui.advance_cursor_after_rect(row);
     ui.add_space(12.0);
@@ -961,7 +961,7 @@ pub(super) fn info_sheet(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>)
 pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     if state.player.current.is_none() {
         let s = Theme::get(ui.ctx()).scheme;
-        common::label(ui, "Ничего не играет", TypeRole::BodyMedium, s.on_surface_variant);
+        common::label(ui, nikgob_core::i18n::player().nothing_playing, TypeRole::BodyMedium, s.on_surface_variant);
         return;
     }
     info_scroll(ui, "info", state.info.track, |ui| {
@@ -1041,25 +1041,25 @@ fn about(ui: &mut Ui, i: &TrackInfo, track: Option<&TrackRow>, out: &mut Vec<Com
         ui.add_space(6.0);
     };
     if let Some(src) = &i.source {
-        row(ui, "Источник", src);
+        row(ui, nikgob_core::i18n::screens().source_row, src);
     }
     // A line like the others: there is nothing to press.
     if let Some(q) = &i.quality {
-        row(ui, "Качество", q);
+        row(ui, nikgob_core::i18n::screens().quality, q);
     }
     if let Some(p) = &i.path {
-        ui.label(TypeRole::LabelMedium.style().rich("Файл", s.on_surface_variant));
+        ui.label(TypeRole::LabelMedium.style().rich(nikgob_core::i18n::screens().file_row, s.on_surface_variant));
         ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich(p.display().to_string(), s.on_surface)).selectable(true));
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add(Button::new("Показать в папке").icon(Icon::Folder).style(Style::Tonal).size(Size::Xs).id_salt("info-reveal"))
+                .add(Button::new(nikgob_core::i18n::screens().show_in_folder).icon(Icon::Folder).style(Style::Tonal).size(Size::Xs).id_salt("info-reveal"))
                 .clicked()
             {
                 reveal(p);
             }
             if ui
-                .add(Button::new("Скопировать путь").style(Style::Text).size(Size::Xs).id_salt("info-copy-path"))
+                .add(Button::new(nikgob_core::i18n::screens().copy_path).style(Style::Text).size(Size::Xs).id_salt("info-copy-path"))
                 .clicked()
             {
                 ui.ctx().copy_text(p.display().to_string());
@@ -1078,7 +1078,7 @@ fn about(ui: &mut Ui, i: &TrackInfo, track: Option<&TrackRow>, out: &mut Vec<Com
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-        let (label, icon) = if file { ("Редактировать теги…", Icon::Edit) } else { ("Скачать", Icon::Download) };
+        let (label, icon) = if file { (nikgob_core::i18n::screens().edit_tags, Icon::Edit) } else { (nikgob_core::i18n::screens().download, Icon::Download) };
         if ui
             .add(Button::new(label).icon(icon).style(Style::Outlined).size(Size::S).id_salt("info-tags"))
             .clicked()

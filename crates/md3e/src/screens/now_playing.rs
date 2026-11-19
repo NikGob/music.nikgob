@@ -989,7 +989,7 @@ pub fn show_on(
     );
     if !embedded
         && hui
-            .add(IconButton::new(Icon::ExpandMore).tooltip("Свернуть (Esc)").id_salt("np-close"))
+            .add(IconButton::new(Icon::ExpandMore).tooltip(nikgob_core::i18n::player().collapse_tooltip).id_salt("np-close"))
             .clicked()
     {
         closed = true;
@@ -997,7 +997,7 @@ pub fn show_on(
     let (ctx_text, ctx_link) = p.cached_context();
     let left_used = hui.min_rect().right() - header.left();
     let right_used = hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        let more = ui.add(IconButton::new(Icon::MoreVert).tooltip("Ещё").id_salt("np-more"));
+        let more = ui.add(IconButton::new(Icon::MoreVert).tooltip(nikgob_core::i18n::common().more).id_salt("np-more"));
         if let Some(t) = p.current.as_ref() {
             // The track's one list, the visualizer before it, the delete
             // last.
@@ -1018,7 +1018,7 @@ pub fn show_on(
             IconButton::new(Icon::QueueMusic)
                 .style(Style::Tonal)
                 .selected(chrome.np_slot == NpSlot::Queue)
-                .tooltip("Очередь (Q)")
+                .tooltip(nikgob_core::i18n::player().queue_tooltip)
                 .id_salt("np-queue-btn"),
         ).clicked() {
             chrome.np_slot.toggle(NpSlot::Queue);
@@ -1027,7 +1027,7 @@ pub fn show_on(
             IconButton::new(Icon::Lyrics)
                 .style(Style::Tonal)
                 .selected(chrome.np_slot == NpSlot::Lyrics)
-                .tooltip("Текст песни (L)")
+                .tooltip(nikgob_core::i18n::player().lyrics_tooltip)
                 .id_salt("np-lyrics-btn"),
         ).clicked() {
             chrome.np_slot.toggle(NpSlot::Lyrics);
@@ -1433,7 +1433,7 @@ fn volume_pop(ui: &mut Ui, area: Rect, state: &ViewState, chrome: &mut Chrome, s
                 .id_salt("np-vol-pop-row"),
         );
         if row
-            .add(IconButton::new(super::output::volume_icon(state, volume, p.muted)).tooltip("Звук").id_salt("np-vol-pop-mute"))
+            .add(IconButton::new(super::output::volume_icon(state, volume, p.muted)).tooltip(nikgob_core::i18n::player().sound_tip).id_salt("np-vol-pop-mute"))
             .clicked()
         {
             out.push(Command::ToggleMute);
@@ -1786,7 +1786,7 @@ fn info(
                 });
             }
             None => {
-                tui.label(title_role.style().rich("Ничего не играет", s.on_surface));
+                tui.label(title_role.style().rich(nikgob_core::i18n::player().nothing_playing, s.on_surface));
             }
         }
         y += title_h + 4.0 + 24.0 + if compact { 16.0 } else { 24.0 };
@@ -1819,7 +1819,7 @@ fn info(
             if let Some(line) = common::sound_line(state) {
                 ui.add_space(8.0);
                 ui.label(TypeRole::LabelMedium.style().rich(line, s.on_surface_variant))
-                    .on_hover_text("Откуда идёт звук и в каком качестве");
+                    .on_hover_text(nikgob_core::i18n::player().sound_line_hint);
             }
             // With the content open there is no row for the output button:
             // another device's pill stands here, by the quality (the
@@ -1894,20 +1894,20 @@ fn info(
             content: s.on_primary,
             border: Color32::TRANSPARENT,
         })
-        .tooltip("Играть / пауза (Space)");
+        .tooltip(nikgob_core::i18n::player().play_tip);
     let mut items = Vec::with_capacity(5);
     // «Моя волна» turns to another cluster in the shuffle's slot.
     let wave = super::wave_plays(state);
     if buttons.shuffle && wave {
-        items.push(Item::from(tonal(Icon::Refresh).tooltip("Сменить направление волны")));
+        items.push(Item::from(tonal(Icon::Refresh).tooltip(nikgob_core::i18n::player().wave_direction)));
     } else if buttons.shuffle {
-        items.push(Item::from(tonal(Icon::Shuffle).selected(p.shuffle).tooltip("Перемешать")));
+        items.push(Item::from(tonal(Icon::Shuffle).selected(p.shuffle).tooltip(nikgob_core::i18n::common().shuffle)));
     }
     // Where «Назад» stands; play and «Далее» follow it.
     let prev = items.len();
-    items.push(Item::from(tonal(Icon::SkipPrevious).tooltip("Назад (Ctrl+←)")));
+    items.push(Item::from(tonal(Icon::SkipPrevious).tooltip(nikgob_core::i18n::player().prev_tooltip)));
     items.push(Item::from(hero));
-    items.push(Item::from(tonal(Icon::SkipNext).tooltip("Далее (Ctrl+→)")));
+    items.push(Item::from(tonal(Icon::SkipNext).tooltip(nikgob_core::i18n::player().next_tooltip)));
     if buttons.repeat {
         items.push(Item::from(
             tonal(repeat_icon)
@@ -1952,7 +1952,7 @@ fn info(
             let mut dui = ui.new_child(
                 UiBuilder::new().max_rect(ends).layout(egui::Layout::right_to_left(egui::Align::Center)).id_salt("np-compact-dislike"),
             );
-            if dui.add(IconButton::new(Icon::ThumbDown).selected(disliked).tooltip("Не нравится").id_salt("np-dislike-compact")).clicked() {
+            if dui.add(IconButton::new(Icon::ThumbDown).selected(disliked).tooltip(nikgob_core::i18n::player().dislike_tip).id_salt("np-dislike-compact")).clicked() {
                 out.push(Command::Dislike { track: t.id, dislike: !disliked, sure: false, relike: false });
             }
         }
@@ -1985,7 +1985,7 @@ fn info(
             out.push(Command::Like(LikeTarget::Track(t.id), !t.liked));
         }
         if buttons.add_to_playlist {
-            let add = aui.add(IconButton::new(Icon::PlaylistAdd).tooltip("В плейлист…").id_salt("np-add"));
+            let add = aui.add(IconButton::new(Icon::PlaylistAdd).tooltip(nikgob_core::i18n::player().add_playlist_tip).id_salt("np-add"));
             pages.playlist_menu(&add, vec![t.id]);
         }
     }
@@ -2024,7 +2024,7 @@ fn info(
         if ui
             .add(
                 IconButton::new(Icon::volume(volume, p.muted))
-                    .tooltip("Звук (колесо мыши — громкость)")
+                    .tooltip(nikgob_core::i18n::player().volume_wheel_tip)
                     .id_salt("np-mute"),
             )
             .clicked()
@@ -2035,7 +2035,7 @@ fn info(
             super::output::button(ui, state, "np-output", output_look, output_on, chrome);
         }
         if let Some(changed) = sound_changed {
-            let button = ui.add(IconButton::new(Icon::Tune).selected(changed).tooltip("Скорость и эквалайзер").id_salt("np-sound"));
+            let button = ui.add(IconButton::new(Icon::Tune).selected(changed).tooltip(nikgob_core::i18n::screens().sound_window).id_salt("np-sound"));
             if button.clicked() {
                 // The window grows out of its button.
                 sound::open_from(ui.ctx(), sound::first_tab(state), None, button.rect);
@@ -2043,7 +2043,7 @@ fn info(
         }
         if let Some((track, disliked)) = dislike
             && ui
-                .add(IconButton::new(Icon::ThumbDown).selected(disliked).tooltip("Не нравится").id_salt("np-dislike"))
+                .add(IconButton::new(Icon::ThumbDown).selected(disliked).tooltip(nikgob_core::i18n::player().dislike_tip).id_salt("np-dislike"))
                 .clicked()
         {
             out.push(Command::Dislike { track, dislike: !disliked, sure: false, relike: false });
@@ -2094,8 +2094,8 @@ fn speed_mark(ui: &mut Ui, text: &str) -> egui::Response {
     paint::state_layer(p, rect, Radii::all(SPEED_MARK_H * 0.5), s.on_surface_variant, layer);
     p.rect_stroke(rect, SPEED_MARK_H * 0.5, Stroke::new(1.0, s.outline_variant), egui::StrokeKind::Inside);
     p.galley(rect.center() - galley.size() * 0.5, galley, s.on_surface_variant);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Скорость: {text}")));
-    crate::components::tooltip(response.on_hover_cursor(egui::CursorIcon::PointingHand), "Скорость", Some("S"))
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, nikgob_core::i18n::player::fmt_speed_mark(text)));
+    crate::components::tooltip(response.on_hover_cursor(egui::CursorIcon::PointingHand), nikgob_core::i18n::player().speed_tip, Some("S"))
 }
 
 /// Background: soft colour clouds drifting over the window, breathing with

@@ -97,16 +97,16 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
     let (row, _) = ui.allocate_exact_size(vec2(inner.width(), HEAD_H), egui::Sense::hover());
     let mut right = ui.new_child(UiBuilder::new().max_rect(row).layout(Layout::right_to_left(Align::Center)).id_salt("lyrics-dialog-head-right"));
     right.spacing_mut().item_spacing.x = 4.0;
-    if right.add(IconButton::new(Icon::Close).size(Size::S).style(Style::Standard).tooltip("Закрыть (Esc)").id_salt("lyrics-dialog-close")).clicked() {
+    if right.add(IconButton::new(Icon::Close).size(Size::S).style(Style::Standard).tooltip(nikgob_core::i18n::screens().close_esc).id_salt("lyrics-dialog-close")).clicked() {
         close(right.ctx());
     }
-    if right.add(IconButton::new(Icon::Settings).size(Size::S).style(Style::Standard).tooltip("Настройки текста").id_salt("lyrics-dialog-settings")).clicked() {
+    if right.add(IconButton::new(Icon::Settings).size(Size::S).style(Style::Standard).tooltip(nikgob_core::i18n::lyrics().settings).id_salt("lyrics-dialog-settings")).clicked() {
         close(right.ctx());
         super::request(right.ctx(), super::Request::Settings);
     }
     let left = Rect::from_min_max(row.min + vec2(CARD_PAD, 0.0), pos2((right.min_rect().left() - 12.0).max(row.left()), row.bottom()));
     let mut left = ui.new_child(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)).id_salt("lyrics-dialog-head-left"));
-    left.label(TypeRole::TitleLarge.style().rich("Текст песни", s.on_surface));
+    left.label(TypeRole::TitleLarge.style().rich(nikgob_core::i18n::lyrics().title, s.on_surface));
     ui.add_space(HEAD_GAP);
     // The card: the sources, the text, its timing and keeping it.
     let card = Rect::from_min_max(ui.cursor().min, pos2(inner.right(), inner.bottom().max(ui.cursor().min.y)));
@@ -126,7 +126,7 @@ fn on_card(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) 
     if let Some(track) = l.track.filter(|_| !l.sources.is_empty()) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-            if ui.add(FilterChip::new("Автоматически", !l.picked).id_salt("lyrics-dialog-auto")).clicked() && l.picked {
+            if ui.add(FilterChip::new(nikgob_core::i18n::lyrics().auto, !l.picked).id_salt("lyrics-dialog-auto")).clicked() && l.picked {
                 out.push(Command::PickLyricsSource(track, None));
             }
             for o in &l.sources {
@@ -189,7 +189,7 @@ fn on_card(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) 
                 ui.spacing_mut().item_spacing.x = 8.0;
                 super::progress(ui, b, (inner.width() - 160.0).min(360.0));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(Button::new("Отменить").style(Style::Tonal).size(Size::S).id_salt("lyrics-dialog-cancel")).clicked() {
+                    if ui.add(Button::new(nikgob_core::i18n::common().cancel).style(Style::Tonal).size(Size::S).id_salt("lyrics-dialog-cancel")).clicked() {
                         out.push(Command::CancelCraft);
                     }
                 });

@@ -114,16 +114,16 @@ impl TagEditorUi {
                         Layout::left_to_right(Align::Center),
                         |ui| {
                             if ui
-                                .add(IconButton::new(Icon::Close).tooltip("Закрыть (Esc)").id_salt("tag-close"))
+                                .add(IconButton::new(Icon::Close).tooltip(nikgob_core::i18n::screens().close_esc).id_salt("tag-close"))
                                 .clicked()
                             {
                                 close = true;
                             }
-                            ui.label(TypeRole::TitleLarge.style().rich("Теги", s.on_surface));
+                            ui.label(TypeRole::TitleLarge.style().rich(nikgob_core::i18n::screens().tags_title, s.on_surface));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 let ok = !self.fields.title.trim().is_empty() && !loading;
                                 if ui
-                                    .add(Button::new("Сохранить").size(Size::S).enabled(ok).id_salt("tag-save"))
+                                    .add(Button::new(nikgob_core::i18n::common().save).size(Size::S).enabled(ok).id_salt("tag-save"))
                                     .clicked()
                                 {
                                     save = true;
@@ -133,7 +133,7 @@ impl TagEditorUi {
                     );
                     ui.add_space(16.0);
                 } else {
-                    ui.label(TypeRole::HeadlineSmall.style().rich("Теги", s.on_surface));
+                    ui.label(TypeRole::HeadlineSmall.style().rich(nikgob_core::i18n::screens().tags_title, s.on_surface));
                     ui.add_space(16.0);
                 }
                 egui::ScrollArea::vertical()
@@ -150,13 +150,13 @@ impl TagEditorUi {
                         ui.spacing_mut().item_spacing.x = 8.0;
                         let ok = !self.fields.title.trim().is_empty() && !loading;
                         if ui
-                            .add(Button::new("Сохранить").size(Size::S).enabled(ok).id_salt("tag-save"))
+                            .add(Button::new(nikgob_core::i18n::common().save).size(Size::S).enabled(ok).id_salt("tag-save"))
                             .clicked()
                         {
                             save = true;
                         }
                         if ui
-                            .add(Button::new("Отмена").style(Style::Text).size(Size::S).id_salt("tag-cancel"))
+                            .add(Button::new(nikgob_core::i18n::common().cancel).style(Style::Text).size(Size::S).id_salt("tag-cancel"))
                             .clicked()
                         {
                             close = true;
@@ -220,18 +220,18 @@ impl TagEditorUi {
                 ui.add(LoadingIndicator::new());
             });
         }
-        field(ui, &mut f.title, "Название", "tag-title", first);
-        field(ui, &mut f.artist, "Исполнитель", "tag-artist", false);
-        field(ui, &mut f.album, "Альбом", "tag-album", false);
-        field(ui, &mut f.album_artist, "Исполнитель альбома", "tag-album-artist", false);
+        field(ui, &mut f.title, nikgob_core::i18n::sound_facts().tag_title, "tag-title", first);
+        field(ui, &mut f.artist, nikgob_core::i18n::sound_facts().tag_artist, "tag-artist", false);
+        field(ui, &mut f.album, nikgob_core::i18n::sound_facts().tag_album, "tag-album", false);
+        field(ui, &mut f.album_artist, nikgob_core::i18n::screens().tag_album_artist, "tag-album-artist", false);
         ui.add_space(12.0);
         let w = ((ui.available_width() - 24.0) / 3.0).floor();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
             for (text, label, salt) in [
-                (&mut f.year, "Год", "tag-year"),
-                (&mut f.track_no, "Трек №", "tag-track"),
-                (&mut f.disc_no, "Диск №", "tag-disc"),
+                (&mut f.year, nikgob_core::i18n::screens().tag_year, "tag-year"),
+                (&mut f.track_no, nikgob_core::i18n::screens().tag_track_no, "tag-track"),
+                (&mut f.disc_no, nikgob_core::i18n::screens().tag_disc_no, "tag-disc"),
             ] {
                 ui.scope(|ui| {
                     TextField::new(text, label)
@@ -244,13 +244,13 @@ impl TagEditorUi {
                 });
             }
         });
-        field(ui, &mut f.genre, "Жанр", "tag-genre", false);
+        field(ui, &mut f.genre, nikgob_core::i18n::screens().tag_genre, "tag-genre", false);
 
         ui.add_space(20.0);
         ui.horizontal(|ui| {
             if ui
                 .add(
-                    Button::new("Найти в MusicBrainz")
+                    Button::new(nikgob_core::i18n::screens().tag_lookup)
                         .icon(Icon::Search)
                         .style(Style::Outlined)
                         .size(Size::S)
@@ -274,7 +274,7 @@ impl TagEditorUi {
         }
         if !ed.suggestions.is_empty() {
             ui.add_space(20.0);
-            ui.label(TypeRole::TitleSmall.style().rich("Варианты из MusicBrainz", s.on_surface_variant));
+            ui.label(TypeRole::TitleSmall.style().rich(nikgob_core::i18n::screens().tag_suggestions, s.on_surface_variant));
             ui.add_space(8.0);
             let n = ed.suggestions.len();
             let rows = crate::components::segmented_list(ui, n, |i| {

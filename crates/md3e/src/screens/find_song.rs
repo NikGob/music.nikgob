@@ -27,12 +27,13 @@ const DEBOUNCE: Duration = Duration::from_millis(400);
 /// What the ⋮ menus call the dialog for `t`, if it applies: a clip gets
 /// its song, another stream track that plays from YouTube another version.
 pub fn label(t: &TrackRow) -> Option<&'static str> {
+    let s = nikgob_core::i18n::screens();
     if t.has_local {
         None
     } else if t.clip {
-        Some("Найти песню…")
+        Some(s.find_song_hint)
     } else if t.source == Some(SourceKind::Youtube) {
-        Some("Другая версия…")
+        Some(s.other_version_hint)
     } else {
         None
     }
@@ -92,18 +93,18 @@ impl FindSongUi {
         let mut open = open_now;
         let mut replace = false;
         let mut cancel = false;
-        let headline = if f.clip { "Найти песню" } else { "Другая версия" };
+        let headline = if f.clip { nikgob_core::i18n::screens().find_song_title } else { nikgob_core::i18n::screens().other_version_title };
         let r = Dialog::new("md3e-find-song", headline).max_width(560.0).show_with(ctx, &mut open, |ui| {
             ui.add_space(4.0);
             // What is replaced, with its length to compare.
-            let what = if f.clip { "Клип" } else { "Сейчас" };
+            let what = if f.clip { nikgob_core::i18n::screens().clip_cap } else { nikgob_core::i18n::screens().current_word };
             let mut line = format!("{what}: {} · {}", f.title, f.artist);
             if let Some(d) = f.duration {
                 line.push_str(&format!(" · {}", common::fmt_time(d)));
             }
             ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich(line, s.on_surface_variant)).truncate());
             ui.add_space(16.0);
-            let field = TextField::new(&mut self.text, "Поиск")
+            let field = TextField::new(&mut self.text, nikgob_core::i18n::common().search)
                 .leading_icon(Icon::Search)
                 .request_focus(std::mem::take(&mut self.focus))
                 .id_salt("find-song-query")
@@ -118,9 +119,9 @@ impl FindSongUi {
             ui.add_space(12.0);
             self.results(ui, &f, state, out);
             ui.add_space(16.0);
-            ui.label(TypeRole::TitleSmall.style().rich("Где заменить", s.on_surface));
+            ui.label(TypeRole::TitleSmall.style().rich(nikgob_core::i18n::screens().where_replace, s.on_surface));
             ui.add_space(8.0);
-            let labels = ["Только здесь", "И в YouTube Music"];
+            let labels = [nikgob_core::i18n::screens().scope_here, nikgob_core::i18n::screens().scope_youtube];
             let enabled = [true, f.youtube_off.is_none()];
             if let Some(i) = ConnectedGroup::new("find-song-scope", &labels)
                 .size(Size::S)
@@ -133,19 +134,19 @@ impl FindSongUi {
             let hint = match (&f.youtube_off, youtube) {
                 (Some(why), _) => why.clone(),
                 (None, true) => if f.clip {
-                    "Клип уйдёт из лайков YouTube Music, лайк получит песня"
+                    nikgob_core::i18n::screens().hint_clip_youtube
                 } else {
-                    "Лайк в YouTube Music перейдёт на эту песню"
+                    nikgob_core::i18n::screens().hint_song_youtube
                 }
                 .to_owned(),
-                (None, false) => if f.clip { "Лайк в YouTube Music останется на клипе" } else { "В YouTube Music ничего не изменится" }.to_owned(),
+                (None, false) => if f.clip { nikgob_core::i18n::screens().hint_clip_here } else { nikgob_core::i18n::screens().hint_song_here }.to_owned(),
             };
             ui.add(egui::Label::new(TypeRole::BodySmall.style().rich_para(hint, s.on_surface_variant)).wrap());
             ui.add_space(24.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let can = self.picked.is_some() && !f.busy && open_now;
-                let label = if f.busy { "Заменяю…" } else { "Заменить" };
+                let label = if f.busy { nikgob_core::i18n::screens().replacing } else { nikgob_core::i18n::screens().replace };
                 if ui
                     .add(Button::new(label).style(Style::Filled).size(Size::S).enabled(can).id_salt("find-song-replace"))
                     .clicked()
@@ -153,7 +154,7 @@ impl FindSongUi {
                 {
                     replace = true;
                 }
-                if ui.add(Button::new("Отмена").style(Style::Text).size(Size::S).id_salt("find-song-cancel")).clicked() {
+                if ui.add(Button::new(nikgob_core::i18n::common().cancel).style(Style::Text).size(Size::S).id_salt("find-song-cancel")).clicked() {
                     cancel = true;
                 }
             });
@@ -182,14 +183,14 @@ impl FindSongUi {
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 72.0), Layout::left_to_right(Align::Center), |ui| {
                     ui.add(LoadingIndicator::new().size(32.0));
                     ui.add_space(8.0);
-                    ui.label(TypeRole::BodyMedium.style().rich("Ищу песни…", s.on_surface_variant));
+                    ui.label(TypeRole::BodyMedium.style().rich(nikgob_core::i18n::screens().searching_songs, s.on_surface_variant));
                 });
             } else if let Some(e) = &f.error {
                 quiet(ui, e, s.error);
             } else if f.query.is_empty() {
-                quiet(ui, "Напиши название и исполнителя", s.on_surface_variant);
+                quiet(ui, nikgob_core::i18n::screens().write_query, s.on_surface_variant);
             } else {
-                quiet(ui, "Ничего не нашлось — попробуй иначе", s.on_surface_variant);
+                quiet(ui, nikgob_core::i18n::screens().nothing_found, s.on_surface_variant);
             }
             return;
         }
@@ -219,7 +220,7 @@ impl FindSongUi {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.spacing_mut().item_spacing.x = 8.0;
                                 let icon = if previewing { Icon::Pause } else { Icon::PlayArrow };
-                                let tip = if previewing { "Пауза" } else { "Послушать" };
+                                let tip = if previewing { nikgob_core::i18n::screens().pause_tip } else { nikgob_core::i18n::screens().preview_tip };
                                 play = ui
                                     .add(IconButton::new(icon).size(Size::Xs).tooltip(tip).id_salt(("find-song-play", i)))
                                     .clicked();
@@ -236,7 +237,7 @@ impl FindSongUi {
                             out.push(Command::PlayStreamTracks {
                                 tracks: vec![t.remote.clone()],
                                 start: 0,
-                                context: "Найти песню".into(),
+                                context: nikgob_core::i18n::screens().find_song_context.into(),
                             });
                         }
                     } else if o.response.clicked() {

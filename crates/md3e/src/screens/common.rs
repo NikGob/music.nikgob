@@ -22,26 +22,15 @@ pub fn fmt_time(d: Duration) -> String {
 
 /// "42 сек" / "47 мин" / "1 ч 12 мин".
 pub fn fmt_total(d: Duration) -> String {
-    let m = d.as_secs() / 60;
-    if m == 0 {
-        format!("{} сек", d.as_secs())
-    } else if m >= 60 {
-        format!("{} ч {} мин", m / 60, m % 60)
-    } else {
-        format!("{m} мин")
-    }
+    nikgob_core::i18n::fmt_total(d)
 }
 
 /// An album's release date as [`AlbumDate`] says: «2026», «Октябрь 2026»
 /// or «23 октября 2026». What is not known falls back to what is (no day:
 /// the month and year; no month: the year); `None` without even a year.
 pub fn fmt_album_date(released: Option<ReleaseDay>, year: Option<i32>, how: AlbumDate) -> Option<String> {
-    const OF: [&str; 12] = [
-        "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря",
-    ];
-    const MONTH: [&str; 12] = [
-        "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
-    ];
+    let of = nikgob_core::i18n::screens::months_gen();
+    let month = nikgob_core::i18n::screens::months_nom();
     let Some(d) = released else { return year.map(|y| y.to_string()) };
     let m = usize::from(d.month.clamp(1, 12) - 1);
     Some(match (how, d.day) {
@@ -120,7 +109,7 @@ pub fn sound_line(state: &nikgob_view::ViewState) -> Option<String> {
         nikgob_view::Service::Youtube | nikgob_view::Service::Deezer => "YouTube",
         nikgob_view::Service::Soundcloud => "SoundCloud",
     });
-    let service = service.map(|s| if clip { format!("{s} · клип") } else { s.to_owned() });
+    let service = service.map(|s| if clip { format!("{s} · {}", nikgob_core::i18n::screens().clip_word) } else { s.to_owned() });
     match (service, quality) {
         (Some(s), Some(q)) => Some(format!("{s} · {q}")),
         (Some(s), None) => Some(s),

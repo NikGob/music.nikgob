@@ -66,7 +66,9 @@ pub struct Viz {
     pointer: Option<egui::Pos2>,
 }
 
-const NAMES: [&str; 4] = ["Обложка", "Спектр", "Фигуры", "Спокойно"];
+fn names() -> [&'static str; 4] {
+    nikgob_core::i18n::screens::viz_names()
+}
 const GLYPHS: [Glyph; 4] = [glyph_cover, glyph_spectrum, glyph_shapes, glyph_calm];
 
 fn index(c: VizConcept) -> usize {
@@ -236,7 +238,7 @@ impl Viz {
                     floating_toolbar(&mut tui, bar, ToolbarColor::Standard, |ui| {
                         let picked = ui
                             .allocate_ui(vec2(GROUP_W, 40.0), |ui| {
-                                ConnectedGroup::new("viz-concept", &NAMES).glyphs(&GLYPHS).show(ui, index(concept))
+                                ConnectedGroup::new("viz-concept", &names()).glyphs(&GLYPHS).show(ui, index(concept))
                             })
                             .inner;
                         if let Some(i) = picked {
@@ -251,7 +253,7 @@ impl Viz {
                                 IconButton::new(Icon::Fullscreen)
                                     .size(Size::S)
                                     .selected(fullscreen)
-                                    .tooltip("Во весь экран (F11)")
+                                    .tooltip(nikgob_core::i18n::screens().viz_fullscreen)
                                     .id_salt("viz-fullscreen"),
                             )
                             .clicked()
@@ -259,7 +261,7 @@ impl Viz {
                             action = VizAction::ToggleFullscreen;
                         }
                         if ui
-                            .add(IconButton::new(Icon::Close).size(Size::S).tooltip("Закрыть (Esc, F12)").id_salt("viz-close"))
+                            .add(IconButton::new(Icon::Close).size(Size::S).tooltip(nikgob_core::i18n::screens().viz_close).id_salt("viz-close"))
                             .clicked()
                         {
                             action = VizAction::Close;

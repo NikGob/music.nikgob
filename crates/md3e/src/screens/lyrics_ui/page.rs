@@ -24,9 +24,9 @@ pub(crate) fn show(ui: &mut Ui, state: &ViewState, bottom: f32, out: &mut Vec<Co
     ui.set_max_width(ui.available_width().min(1120.0));
     ui.add_space(8.0);
     ui.allocate_ui_with_layout(vec2(ui.available_width(), 44.0), Layout::left_to_right(Align::Center), |ui| {
-        ui.label(TypeRole::HeadlineMedium.style().rich("Текст песни", s.on_surface));
+        ui.label(TypeRole::HeadlineMedium.style().rich(nikgob_core::i18n::lyrics().title, s.on_surface));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let b = Button::new("Настройки текста").icon(Icon::Settings).style(Style::Text).size(Size::S).id_salt("lyrics-page-settings");
+            let b = Button::new(nikgob_core::i18n::lyrics().settings).icon(Icon::Settings).style(Style::Text).size(Size::S).id_salt("lyrics-page-settings");
             if ui.add(b).clicked() {
                 super::request(ui.ctx(), super::Request::Settings);
             }
@@ -38,7 +38,7 @@ pub(crate) fn show(ui: &mut Ui, state: &ViewState, bottom: f32, out: &mut Vec<Co
         }
         None => {
             ui.add_space(16.0);
-            ui.label(TypeRole::BodyLarge.style().rich("Ничего не играет", s.on_surface_variant));
+            ui.label(TypeRole::BodyLarge.style().rich(nikgob_core::i18n::player().nothing_playing, s.on_surface_variant));
             return None;
         }
     }
@@ -76,7 +76,7 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
         segmented_list(ui, n, |i| {
             if i == 0 {
                 let auto = l.source.filter(|_| !l.picked).map(|src| super::source_name(l, src).to_owned());
-                let item = ListItem::new("Автоматически").selected(!l.picked).id_salt("lyrics-page-auto");
+                let item = ListItem::new(nikgob_core::i18n::lyrics().auto).selected(!l.picked).id_salt("lyrics-page-auto");
                 return match auto {
                     Some(a) => item.supporting(a),
                     None => item,
@@ -125,7 +125,7 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
     if let Some(b) = &busy {
         super::progress(ui, b, w);
         ui.add_space(12.0);
-        if ui.add(Button::new("Отменить").style(Style::Tonal).size(Size::S).id_salt("lyrics-page-cancel")).clicked() {
+        if ui.add(Button::new(nikgob_core::i18n::common().cancel).style(Style::Tonal).size(Size::S).id_salt("lyrics-page-cancel")).clicked() {
             out.push(Command::CancelCraft);
         }
         return;

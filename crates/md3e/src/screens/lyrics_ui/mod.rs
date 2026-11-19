@@ -175,31 +175,27 @@ pub fn control(ui: &mut Ui, state: &ViewState, left: Option<f32>, out: &mut Vec<
 /// player's («плеер синхронизировал по словам»). Worded apart from how the
 /// lyrics light up (by letters, by words), so the two are not confused.
 pub(crate) fn timed(sync: LyricsSync, by_player: bool) -> String {
-    let by = match sync {
-        LyricsSync::Plain => return "без синхронизации".to_owned(),
-        LyricsSync::Line => "по строкам",
-        LyricsSync::Word => "по словам",
-        LyricsSync::Syllable => "по слогам",
-    };
-    if by_player { format!("плеер синхронизировал {by}") } else { format!("синхронизирован {by}") }
+    let loc = nikgob_core::i18n::locale();
+    if sync == LyricsSync::Plain {
+        return sync.label_in(loc).to_owned();
+    }
+    nikgob_core::i18n::lyrics::fmt_timed_in(loc, sync.label_in(loc), by_player)
 }
 
 /// A source's name where texts are listed.
 pub(crate) fn name(source: LyricsSource) -> &'static str {
+    let t = nikgob_core::i18n::lyrics();
     match source {
-        LyricsSource::File => "Файл трека",
-        LyricsSource::Recognized => "Расслышал плеер",
+        LyricsSource::File => t.name_file,
+        LyricsSource::Recognized => t.name_recognized,
         s => s.label(),
     }
 }
 
-/// What a song without a file calls the text it kept in its artist's
-/// folder (it has no file to say it comes from).
-const KEPT: &str = "Сохранённый текст";
 
 /// [`name`] for the shown track.
 pub(crate) fn source_name(l: &LyricsView, source: LyricsSource) -> &'static str {
-    if source == LyricsSource::File && l.stream { KEPT } else { name(source) }
+    if source == LyricsSource::File && l.stream { nikgob_core::i18n::lyrics().kept } else { name(source) }
 }
 
 /// «Текст с Genius»: where the shown text came from, in plain words. How
@@ -207,16 +203,18 @@ pub(crate) fn source_name(l: &LyricsView, source: LyricsSource) -> &'static str 
 /// wonder); a text the player heard itself says so, so it is taken as a
 /// guess.
 pub(crate) fn chip_label(l: &LyricsView) -> String {
+    let loc = nikgob_core::i18n::locale();
+    let t = nikgob_core::i18n::lyrics_in(loc);
     let from = match l.source {
-        Some(LyricsSource::Own) => LyricsSource::Own.label().to_owned(),
-        Some(LyricsSource::Recognized) => "Текст расслышан плеером".to_owned(),
-        Some(LyricsSource::File) if l.stream => KEPT.to_owned(),
-        Some(LyricsSource::File) => "Текст из файла трека".to_owned(),
-        Some(src) => format!("Текст с {}", src.label()),
-        None if l.loading || l.sources.iter().any(|o| o.state == LyricsAvail::Loading) => return "Ищу текст…".to_owned(),
-        None => return "Текста нет".to_owned(),
+        Some(LyricsSource::Own) => LyricsSource::Own.label_in(loc).to_owned(),
+        Some(LyricsSource::Recognized) => t.from_recognized.to_owned(),
+        Some(LyricsSource::File) if l.stream => t.kept.to_owned(),
+        Some(LyricsSource::File) => t.from_file.to_owned(),
+        Some(src) => nikgob_core::i18n::lyrics::fmt_from_source_in(loc, src.label_in(loc)),
+        None if l.loading || l.sources.iter().any(|o| o.state == LyricsAvail::Loading) => return t.searching.to_owned(),
+        None => return t.no_text.to_owned(),
     };
-    if l.lines.is_empty() { format!("{from} · без подсветки") } else { from }
+    if l.lines.is_empty() { format!("{from} · {}", t.without_highlight) } else { from }
 }
 
 /// How `source`'s text lights up as shown: the player's own timing when
@@ -238,9 +236,9 @@ fn kind(l: &LyricsView, source: LyricsSource) -> Option<LyricsSync> {
 pub(crate) fn source_state(l: &LyricsView, source: LyricsSource) -> String {
     let Some(o) = l.sources.iter().find(|o| o.source == source) else { return String::new() };
     match o.state {
-        LyricsAvail::Loading => return "ищу…".to_owned(),
-        LyricsAvail::Missing => return "нет текста".to_owned(),
-        LyricsAvail::Ready(_) if o.fits == Some(false) => return "текст другой песни или версии".to_owned(),
+        LyricsAvail::Loading => return nikgob_core::i18n::lyrics().state_loading.to_owned(),
+        LyricsAvail::Missing => return nikgob_core::i18n::lyrics().state_missing.to_owned(),
+        LyricsAvail::Ready(_) if o.fits == Some(false) => return nikgob_core::i18n::lyrics().state_mismatch.to_owned(),
         LyricsAvail::Ready(_) => {}
     }
     let kinds: Vec<LyricsSync> = l.sources.iter().filter_map(|o| kind(l, o.source)).collect();
@@ -266,12 +264,9 @@ pub(crate) struct Action {
     pub button: &'static str,
     /// Word timing can also be made deep, for this song only: that row in the control's menu,
     /// right after this one. Under «Подсветка» it is the split button's
-    /// menu ([`DEEP`]).
+    /// menu (the deep label).
     pub deep: Option<&'static str>,
 }
-
-/// The deep variant in the split button's menu.
-pub(crate) const DEEP: &str = "Глубокая подсветка";
 
 /// The timing that can be made for the shown text, coarsest first: lines
 /// for a plain text, words for a text without them, and the words again
@@ -283,16 +278,15 @@ pub(crate) fn actions(state: &ViewState) -> Vec<Action> {
     if l.craft != LyricsCraft::Ready || l.source.is_none_or(|s| s == LyricsSource::Recognized) {
         return Vec::new();
     }
-    const LINES: Action = Action { target: LyricsSync::Line, label: "Подсветить по строкам", button: "Подсветить по строкам", deep: None };
-    const WORDS: Action =
-        Action { target: LyricsSync::Word, label: "Подсветить по словам", button: "Подсветить по словам", deep: Some("Подсветить по словам глубоко") };
-    const AGAIN: Action =
-        Action { target: LyricsSync::Word, label: "Сделать подсветку заново", button: "Сделать заново", deep: Some("Сделать глубокую подсветку") };
+    let t = nikgob_core::i18n::lyrics();
+    let lines = Action { target: LyricsSync::Line, label: t.action_line, button: t.action_line, deep: None };
+    let words = Action { target: LyricsSync::Word, label: t.action_word, button: t.action_word, deep: Some(t.action_word_deep) };
+    let again = Action { target: LyricsSync::Word, label: t.action_again, button: t.action_again_button, deep: Some(t.action_deep) };
     // The finest timing the text has, however it is seen now.
     match l.shows.first().copied().or_else(|| LyricsSync::of(&l.lines)).unwrap_or(LyricsSync::Plain) {
-        LyricsSync::Plain => vec![LINES, WORDS],
-        LyricsSync::Line => vec![WORDS],
-        _ => vec![AGAIN],
+        LyricsSync::Plain => vec![lines, words],
+        LyricsSync::Line => vec![words],
+        _ => vec![again],
     }
 }
 
@@ -321,7 +315,7 @@ pub(crate) fn make_row(ui: &mut Ui, state: &ViewState, salt: &str, leads: bool, 
             let style = if i == 0 && leads { Style::Filled } else { Style::Tonal };
             let (normal, deep) = match a.deep {
                 Some(_) => {
-                    let o = SplitButton::new((salt, "make", a.button), a.button).size(Size::S).style(style).item(MenuItem::new(DEEP)).show(ui);
+                    let o = SplitButton::new((salt, "make", a.button), a.button).size(Size::S).style(style).item(MenuItem::new(nikgob_core::i18n::lyrics().deep)).show(ui);
                     (o.main.clicked(), o.picked == Some(0))
                 }
                 None => (ui.add(Button::new(a.button).style(style).size(Size::S).id_salt((salt, "make", a.button))).clicked(), false),
@@ -365,10 +359,11 @@ pub(crate) fn shows(state: &ViewState) -> Vec<(LyricsSync, &'static str)> {
 }
 
 fn show_label(sync: LyricsSync) -> &'static str {
+    let t = nikgob_core::i18n::lyrics();
     match sync {
-        LyricsSync::Word | LyricsSync::Syllable => "По словам",
-        LyricsSync::Line => "По строкам",
-        LyricsSync::Plain => "Без подсветки",
+        LyricsSync::Word | LyricsSync::Syllable => t.show_word,
+        LyricsSync::Line => t.show_line,
+        LyricsSync::Plain => t.show_plain,
     }
 }
 
@@ -399,7 +394,8 @@ pub(crate) fn show_as(state: &ViewState, sync: LyricsSync, out: &mut Vec<Command
 /// (a clip keeps only its text).
 pub(crate) fn save_label(state: &ViewState) -> &'static str {
     let l = &state.lyrics;
-    if l.stream && l.craft == LyricsCraft::Ready && state.prefs.lyrics_stream_keep == 1 { "Сохранить песню и текст" } else { "Сохранить текст" }
+    let t = nikgob_core::i18n::lyrics();
+    if l.stream && l.craft == LyricsCraft::Ready && state.prefs.lyrics_stream_keep == 1 { t.save_song_text } else { t.save_text }
 }
 
 /// «Сохранить текст» is the primary action: for timing the player made
@@ -457,25 +453,18 @@ fn overall(stage: AlignStage, f: f32) -> f32 {
 }
 
 fn stage_label(stage: AlignStage, bytes: Option<(u64, u64)>) -> String {
+    let loc = nikgob_core::i18n::locale();
+    let t = nikgob_core::i18n::lyrics_in(loc);
     match (stage, bytes) {
-        (AlignStage::Download, Some((done, total))) => format!("Скачиваю модели · {}", amount(done, total)),
-        (AlignStage::Download, None) => "Скачиваю модели".to_owned(),
-        (AlignStage::Decode, _) => "Читаю песню".to_owned(),
-        (AlignStage::Separate, _) => "Отделяю голос".to_owned(),
-        (AlignStage::Listen, _) => "Слушаю голос".to_owned(),
-        (AlignStage::Align, _) => "Расставляю слова".to_owned(),
-        (AlignStage::Recognise, _) => "Распознаю слова".to_owned(),
-    }
-}
-
-/// «296 из 709 МБ», «0,4 из 1,8 ГБ»: both in the unit of the whole.
-fn amount(done: u64, total: u64) -> String {
-    let mb = |b: u64| b as f64 / 1_048_576.0;
-    if mb(total) >= 1000.0 {
-        let gb = |b: u64| format!("{:.1}", mb(b) / 1024.0).replace('.', ",");
-        format!("{} из {} ГБ", gb(done), gb(total))
-    } else {
-        format!("{:.0} из {:.0} МБ", mb(done), mb(total))
+        (AlignStage::Download, Some((done, total))) => {
+            nikgob_core::i18n::lyrics::fmt_stage_download_in(loc, Some(nikgob_core::i18n::lyrics::fmt_amount_in(loc, done, total)))
+        }
+        (AlignStage::Download, None) => nikgob_core::i18n::lyrics::fmt_stage_download_in(loc, None),
+        (AlignStage::Decode, _) => t.stage_decode.to_owned(),
+        (AlignStage::Separate, _) => t.stage_separate.to_owned(),
+        (AlignStage::Listen, _) => t.stage_listen.to_owned(),
+        (AlignStage::Align, _) => t.stage_align.to_owned(),
+        (AlignStage::Recognise, _) => t.stage_recognise.to_owned(),
     }
 }
 
@@ -673,7 +662,7 @@ pub(crate) fn text_card(ui: &mut Ui, size: egui::Vec2, state: &ViewState, out: &
             ui.label(TypeRole::BodyLarge.style().rich_para(text.trim(), s.on_surface));
         });
     } else {
-        let text = if l.loading { "Ищу текст…" } else { "Текста нет" };
+        let text = if l.loading { nikgob_core::i18n::lyrics().searching } else { nikgob_core::i18n::lyrics().no_text };
         child.label(TypeRole::BodyLarge.style().rich(text, s.on_surface_variant));
     }
 }
@@ -721,7 +710,7 @@ mod tests {
     #[test]
     fn downloads_say_how_much_in_the_unit_of_the_whole() {
         assert_eq!(stage_label(AlignStage::Download, Some((310_378_496, 743_440_384))), "Скачиваю модели · 296 из 709 МБ");
-        assert_eq!(amount(429_496_730, 1_932_735_283), "0,4 из 1,8 ГБ");
+        assert_eq!(nikgob_core::i18n::lyrics::fmt_amount(429_496_730, 1_932_735_283), "0,4 из 1,8 ГБ");
         assert_eq!(stage_label(AlignStage::Listen, None), "Слушаю голос");
     }
 
