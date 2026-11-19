@@ -26,6 +26,7 @@ mod events;
 pub mod fractional;
 mod joblog;
 mod latin;
+mod legacy_texts;
 mod lyrics;
 mod masters;
 mod migrations;
