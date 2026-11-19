@@ -2120,6 +2120,10 @@ fn stream_album_track(id: &str, title: &str, kind: ReleaseType) -> StreamTrack {
     let mut t = sp(0);
     t.id = RemoteId::new(Service::Spotify, id);
     t.title = title.into();
+    // Two hits are two songs: the fixture track's ISRC would make the second
+    // one a version of the first (the same recording on another album), so
+    // its album would never be looked up.
+    t.isrc = None;
     let mut album = t.album.clone().unwrap();
     album.id = Some(RemoteId::new(Service::Spotify, format!("{id}-album")));
     album.title = title.into();

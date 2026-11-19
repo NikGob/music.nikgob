@@ -69,7 +69,9 @@ fn now<T>(f: BoxFuture<'_, T>) -> T {
 }
 
 fn is_cold(title: &str) -> bool {
-    title.starts_with("Импорт выгрузки") || title.starts_with("Импорт из")
+    ["Импорт выгрузки", "Импорт из", "Import exported data", "Import from"]
+        .iter()
+        .any(|p| title.starts_with(p))
 }
 
 /// Runs one import and waits for its history entry; returns its subtitle.
@@ -554,12 +556,23 @@ fn stream_album(title: &str) -> StreamAlbum {
 /// Until when a kept discography is shown without the services asked.
 const REFRESH_MS: i64 = 60 * 60 * 1000;
 
+/// A release of `artist` with one track in the library: the start's repair
+/// drops an artist nothing is left of (no track, no release, no like).
+fn keep_artist(lib: &Library, artist: ArtistId, name: &str, album: &str, title: &str) {
+    let credit = ArtistCredit::single(name, Some(artist));
+    let release = lib.upsert_release(&Release::new(album, credit.clone())).unwrap();
+    let mut t = Track::new(title, credit);
+    t.release_id = Some(release.id);
+    lib.upsert_track(&t).unwrap();
+}
+
 /// A kept discography of the last ten minutes: the page shows it and the
 /// services are not asked at all.
 #[test]
 fn a_kept_discography_younger_than_an_hour_asks_nothing() {
     let lib = Library::open_in_memory().unwrap();
     let artist = lib.upsert_artist(&Artist::new("宇多田ヒカル")).unwrap();
+    keep_artist(&lib, artist.id, "宇多田ヒカル", "Своё", "Песня");
     let spotify = Arc::new(FakeService::spotify());
     let youtube = Arc::new(FakeService::youtube().logged_out());
     let rt = start(&lib, vec![spotify.clone(), youtube.clone()]);
@@ -586,8 +599,7 @@ fn a_kept_discography_younger_than_an_hour_asks_nothing() {
 fn a_discography_older_than_an_hour_is_shown_then_asked_again() {
     let lib = Library::open_in_memory().unwrap();
     let artist = lib.upsert_artist(&Artist::new("宇多田ヒカル")).unwrap();
-    let credit = ArtistCredit::single("宇多田ヒカル", Some(artist.id));
-    lib.upsert_release(&Release::new("First Love", credit)).unwrap();
+    keep_artist(&lib, artist.id, "宇多田ヒカル", "First Love", "Automatic");
     let key = format!("discography.{}", artist.id);
     let at = nikgob_library::now_ms() - 2 * REFRESH_MS;
     put_kept_discography(&lib, artist.id, vec![stream_album("Kept")], at);
@@ -620,6 +632,7 @@ fn a_discography_older_than_an_hour_is_shown_then_asked_again() {
 fn a_failed_refresh_keeps_the_kept_discography() {
     let lib = Library::open_in_memory().unwrap();
     let artist = lib.upsert_artist(&Artist::new("Кино")).unwrap();
+    keep_artist(&lib, artist.id, "Кино", "Своё", "Песня");
     let key = format!("discography.{}", artist.id);
     let old = nikgob_library::now_ms() - 2 * REFRESH_MS;
     put_kept_discography(&lib, artist.id, vec![stream_album("Kept")], old);
