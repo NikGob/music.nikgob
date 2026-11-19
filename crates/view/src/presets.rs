@@ -12,10 +12,40 @@
 
 use std::collections::BTreeMap;
 
+use nikgob_core::i18n::{Locale, locale, view_in};
+
 use crate::{Ambient, BgShapes, CoverShape, Prefs, RadioExplore, RadioKind, RadioNewShare, RadioUnheard, SourceKey};
 
-/// What the settings call the values of the user's own.
-pub const CUSTOM: &str = "Свои";
+/// What the settings call the values of the user's own, in Russian (callers
+/// outside this crate's i18n round still read this; the UI reads
+/// `view_in(loc).preset_custom`).
+pub static CUSTOM: &str = view_in(Locale::Ru).preset_custom;
+
+/// The presets' names per area and locale, from the i18n table.
+static RECS_RU: [&str; 3] = [view_in(Locale::Ru).preset_recs_0, view_in(Locale::Ru).preset_recs_1, view_in(Locale::Ru).preset_recs_2];
+static RECS_EN: [&str; 3] = [view_in(Locale::En).preset_recs_0, view_in(Locale::En).preset_recs_1, view_in(Locale::En).preset_recs_2];
+static LYRICS_RU: [&str; 4] = [
+    view_in(Locale::Ru).preset_lyrics_0,
+    view_in(Locale::Ru).preset_lyrics_1,
+    view_in(Locale::Ru).preset_lyrics_2,
+    view_in(Locale::Ru).preset_lyrics_3,
+];
+static LYRICS_EN: [&str; 4] = [
+    view_in(Locale::En).preset_lyrics_0,
+    view_in(Locale::En).preset_lyrics_1,
+    view_in(Locale::En).preset_lyrics_2,
+    view_in(Locale::En).preset_lyrics_3,
+];
+static TRACK_RU: [&str; 3] = [view_in(Locale::Ru).preset_track_0, view_in(Locale::Ru).preset_track_1, view_in(Locale::Ru).preset_track_2];
+static TRACK_EN: [&str; 3] = [view_in(Locale::En).preset_track_0, view_in(Locale::En).preset_track_1, view_in(Locale::En).preset_track_2];
+static SOURCES_RU: [&str; 2] = [view_in(Locale::Ru).preset_sources_0, view_in(Locale::Ru).preset_sources_1];
+static SOURCES_EN: [&str; 2] = [view_in(Locale::En).preset_sources_0, view_in(Locale::En).preset_sources_1];
+static SEEDING_RU: [&str; 3] =
+    [view_in(Locale::Ru).preset_seeding_0, view_in(Locale::Ru).preset_seeding_1, view_in(Locale::Ru).preset_seeding_2];
+static SEEDING_EN: [&str; 3] =
+    [view_in(Locale::En).preset_seeding_0, view_in(Locale::En).preset_seeding_1, view_in(Locale::En).preset_seeding_2];
+static LOAD_RU: [&str; 3] = [view_in(Locale::Ru).preset_load_0, view_in(Locale::Ru).preset_load_1, view_in(Locale::Ru).preset_load_2];
+static LOAD_EN: [&str; 3] = [view_in(Locale::En).preset_load_0, view_in(Locale::En).preset_load_1, view_in(Locale::En).preset_load_2];
 
 /// Which defaults of the settings the prefs were written with: 1 brought
 /// the presets (the values of the user's own were kept once, [`upgrade`]).
@@ -292,16 +322,29 @@ const LOAD: [LoadRow; 3] = [
 impl Area {
     pub const ALL: [Self; 6] = [Self::Recs, Self::Lyrics, Self::Track, Self::Sources, Self::Seeding, Self::Load];
 
-    /// The presets' names, without «Свои»; empty: the area has none yet.
-    pub fn names(self) -> &'static [&'static str] {
-        match self {
-            Self::Recs => &["Только моё", "Сбалансировано", "Больше нового"],
-            Self::Lyrics => &["Караоке", "Спокойно", "Прыжок", "Чётко"],
-            Self::Track => &["Строго", "Живо", "Максимум"],
-            Self::Sources => &["Обычно", "Всё"],
-            Self::Seeding => &["Не раздавать", "Обычно", "Щедро"],
-            Self::Load => &["Тихо", "Обычно", "Быстро"],
+    /// The presets' names in `loc`, without «Свои»; empty: the area has none
+    /// yet.
+    pub fn names_in(self, loc: Locale) -> &'static [&'static str] {
+        match (self, loc) {
+            (Self::Recs, Locale::Ru) => &RECS_RU,
+            (Self::Recs, Locale::En) => &RECS_EN,
+            (Self::Lyrics, Locale::Ru) => &LYRICS_RU,
+            (Self::Lyrics, Locale::En) => &LYRICS_EN,
+            (Self::Track, Locale::Ru) => &TRACK_RU,
+            (Self::Track, Locale::En) => &TRACK_EN,
+            (Self::Sources, Locale::Ru) => &SOURCES_RU,
+            (Self::Sources, Locale::En) => &SOURCES_EN,
+            (Self::Seeding, Locale::Ru) => &SEEDING_RU,
+            (Self::Seeding, Locale::En) => &SEEDING_EN,
+            (Self::Load, Locale::Ru) => &LOAD_RU,
+            (Self::Load, Locale::En) => &LOAD_EN,
         }
+    }
+
+    /// The presets' names in the active process locale, without «Свои";
+    /// empty: the area has none yet.
+    pub fn names(self) -> &'static [&'static str] {
+        self.names_in(locale())
     }
 
     /// The presets are live tiles (the areas with a stage), not buttons.

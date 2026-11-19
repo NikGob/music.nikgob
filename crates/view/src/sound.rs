@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use nikgob_core::i18n::{Locale, locale, view_in};
 use nikgob_core::model::TrackId;
 
 /// How a track is played: as recorded, as one of the versions people make
@@ -85,27 +86,39 @@ impl SpeedVariant {
     pub const ALL: [Self; 5] = [Self::Normal, Self::Fast, Self::Nightcore, Self::Slow, Self::SlowEcho];
 
     /// The name of a ready version (a speed of the listener's own has only
-    /// its number).
-    pub const fn label(self) -> &'static str {
+    /// its number) in `loc`.
+    pub const fn label_in(self, loc: Locale) -> &'static str {
+        let v = view_in(loc);
         match self {
-            Self::Normal => "Обычно",
-            Self::Fast => "Быстрее",
-            Self::Nightcore => "Nightcore",
-            Self::Slow => "Замедленно",
-            Self::SlowEcho => "Замедленно с эхом",
+            Self::Normal => v.speed_normal,
+            Self::Fast => v.speed_fast,
+            Self::Nightcore => v.speed_nightcore,
+            Self::Slow => v.speed_slow,
+            Self::SlowEcho => v.speed_slow_echo,
             Self::Custom(_) => "",
         }
     }
 
+    /// The name of a ready version in the active process locale.
+    pub fn label(self) -> &'static str {
+        self.label_in(locale())
+    }
+
     /// The quiet mark under the title while the track is not played as
-    /// recorded.
-    pub fn chip(self) -> Option<Cow<'static, str>> {
+    /// recorded, in `loc`.
+    pub fn chip_in(self, loc: Locale) -> Option<Cow<'static, str>> {
+        let v = view_in(loc);
         match self {
             Self::Normal => None,
-            Self::Slow => Some("замедленно".into()),
-            Self::SlowEcho => Some("замедленно · эхо".into()),
+            Self::Slow => Some(v.chip_slow.into()),
+            Self::SlowEcho => Some(v.chip_slow_echo.into()),
             Self::Fast | Self::Nightcore | Self::Custom(_) => Some(speed_text(self.percent()).into()),
         }
+    }
+
+    /// The quiet mark under the title in the active process locale.
+    pub fn chip(self) -> Option<Cow<'static, str>> {
+        self.chip_in(locale())
     }
 
     /// The name it is stored under.
@@ -278,31 +291,51 @@ pub const EQ_MAX_DB: f32 = 12.0;
 /// The farthest a band's bell is driven to hold the curve, dB.
 const EQ_BELL_MAX_DB: f64 = 24.0;
 
-/// The equalizer's ready curves, by name. The first is flat. Gains at
-/// 32, 64, 125, 250, 500 Hz, 1, 2, 4, 8 and 16 kHz. Nothing clips: the
+/// The equalizer's ready curves' gains, by index: the first is flat. Gains
+/// at 32, 64, 125, 250, 500 Hz, 1, 2, 4, 8 and 16 kHz. Nothing clips: the
 /// engine lowers the whole sound by the curve's highest point before the
 /// bands (its preamp) and a soft limiter follows, so a boost costs loudness
-/// elsewhere, not distortion.
-pub const EQ_PRESETS: [(&str, [f32; EQ_BANDS]); 8] = [
-    ("Ровно", [0.0; EQ_BANDS]),
+/// elsewhere, not distortion. The names come from the i18n table
+/// ([`eq_presets_in`]).
+pub const EQ_PRESET_GAINS: [[f32; EQ_BANDS]; 8] = [
+    [0.0; EQ_BANDS],
     // A bass you hear: +7 dB around 60 Hz, sloping gently to the low mids,
     // which dip a little so the bass stays clean.
-    ("Бас", [5.5, 7.0, 5.0, 1.5, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    [5.5, 7.0, 5.0, 1.5, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     // Deeper and stronger still, for small speakers and quiet rooms.
-    ("Мощный бас", [7.5, 9.0, 6.5, 2.0, -1.5, -0.5, 0.0, 0.0, 0.0, 0.0]),
+    [7.5, 9.0, 6.5, 2.0, -1.5, -0.5, 0.0, 0.0, 0.0, 0.0],
     // The voice forward: presence at 1–4 kHz, the boom below it down.
-    ("Вокал", [-2.0, -2.0, -1.0, 0.0, 1.0, 2.5, 3.5, 2.5, 1.0, 0.0]),
+    [-2.0, -2.0, -1.0, 0.0, 1.0, 2.5, 3.5, 2.5, 1.0, 0.0],
     // Air and detail: the highs up from 2 kHz.
-    ("Яркость", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 5.0, 6.0]),
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 5.0, 6.0],
     // Loudness for listening quietly: the lows and highs the ear loses
     // at a low volume brought back.
-    ("Ночью", [5.0, 6.0, 3.5, 0.5, -1.0, 0.0, 0.0, 1.5, 3.0, 3.5]),
+    [5.0, 6.0, 3.5, 0.5, -1.0, 0.0, 0.0, 1.5, 3.0, 3.5],
     // A light correction for most headphones: some bass, a little presence,
     // the harsh top eased.
-    ("Наушники", [3.0, 4.0, 2.5, 0.5, -1.0, 0.0, 1.0, 1.5, 0.0, -1.0]),
+    [3.0, 4.0, 2.5, 0.5, -1.0, 0.0, 1.0, 1.5, 0.0, -1.0],
     // Soft and full: the lows warm, the highs rolled off.
-    ("Тёплый", [1.5, 2.0, 2.0, 1.0, 0.0, 0.0, -1.0, -2.0, -3.0, -3.5]),
+    [1.5, 2.0, 2.0, 1.0, 0.0, 0.0, -1.0, -2.0, -3.0, -3.5],
 ];
+
+/// The equalizer's ready curves with their names in `loc`.
+pub const fn eq_presets_in(loc: Locale) -> [(&'static str, [f32; EQ_BANDS]); 8] {
+    let v = view_in(loc);
+    [
+        (v.eq_flat, EQ_PRESET_GAINS[0]),
+        (v.eq_bass, EQ_PRESET_GAINS[1]),
+        (v.eq_bass_strong, EQ_PRESET_GAINS[2]),
+        (v.eq_vocal, EQ_PRESET_GAINS[3]),
+        (v.eq_bright, EQ_PRESET_GAINS[4]),
+        (v.eq_night, EQ_PRESET_GAINS[5]),
+        (v.eq_headphones, EQ_PRESET_GAINS[6]),
+        (v.eq_warm, EQ_PRESET_GAINS[7]),
+    ]
+}
+
+/// The equalizer's ready curves with their Russian names (callers outside
+/// this crate's i18n round still read this; the UI uses [`eq_presets_in`]).
+pub static EQ_PRESETS: [(&'static str, [f32; EQ_BANDS]); 8] = eq_presets_in(Locale::Ru);
 
 /// The preset these gains are, if any.
 pub fn eq_preset_of(gains: &[f32; EQ_BANDS]) -> Option<usize> {

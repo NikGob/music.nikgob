@@ -12,6 +12,8 @@ use nikgob_md3e::screens::phone;
 use nikgob_md3e::{Icon, Theme, TypeRole};
 use nikgob_view::{Command, MeshKind, RemoteHow, Status, ViewState};
 
+use nikgob_core::i18n::{Locale, locale, mobile, mobile_in};
+
 use crate::text;
 
 const ROW_H: f32 = 72.0;
@@ -38,14 +40,14 @@ fn track_line(artist: &str, title: &str) -> String {
     if artist.trim().is_empty() { title.to_owned() } else { format!("{artist} — {title}") }
 }
 
-/// This phone, then the paired devices, those in reach first.
-pub fn places(state: &ViewState) -> Vec<Place> {
+/// This phone, then the paired devices, those in reach first, named in `loc`.
+pub fn places_in(state: &ViewState, loc: Locale) -> Vec<Place> {
     let target = state.target.as_ref();
     let attached = target.is_some_and(|t| t.how == RemoteHow::Attached);
     let parked = state.parked.as_ref().filter(|_| target.is_some()).and_then(|p| p.current.as_ref());
     let mut out = vec![Place {
         node: None,
-        name: "Этот телефон".to_owned(),
+        name: mobile_in(loc).this_phone.to_owned(),
         kind: MeshKind::Phone,
         line: parked.map(|t| track_line(&t.artist, &t.title)),
         online: true,
@@ -72,6 +74,12 @@ pub fn places(state: &ViewState) -> Vec<Place> {
         });
     }
     out
+}
+
+/// This phone, then the paired devices, those in reach first, in the active
+/// process locale.
+pub fn places(state: &ViewState) -> Vec<Place> {
+    places_in(state, locale())
 }
 
 /// What a tap on a place does (`None`: nothing).
@@ -107,7 +115,7 @@ impl OutputSheet {
 
     /// Draws the sheet; «Карта сети» asked: true.
     pub fn show(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) -> bool {
-        let places = places(state);
+        let places = places_in(state, locale());
         let screen = ctx.content_rect();
         let h = (40.0 + places.len() as f32 * ROW_H + 64.0 + 24.0).min(screen.height() * 0.8);
         let mut picked: Option<Command> = None;
@@ -124,7 +132,7 @@ impl OutputSheet {
             }
             if !state.mesh.nodes.is_empty() {
                 ui.add_space(8.0);
-                if ui.add(nikgob_md3e::components::Button::new("Карта сети").icon(Icon::SpeakerGroup).style(nikgob_md3e::components::Style::Text).id_salt("phone-output-map")).clicked() {
+                if ui.add(nikgob_md3e::components::Button::new(mobile().network_map).icon(Icon::SpeakerGroup).style(nikgob_md3e::components::Style::Text).id_salt("phone-output-map")).clicked() {
                     map = true;
                 }
             }

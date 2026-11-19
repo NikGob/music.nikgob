@@ -11,6 +11,7 @@ use nikgob_md3e::components::paint::{self, Radii};
 use nikgob_md3e::components::{Menu, MenuItem, anim};
 use nikgob_md3e::screens::phone;
 use nikgob_md3e::{Icon, Theme, TypeRole};
+use nikgob_core::i18n::{common, mobile};
 use nikgob_view::{
     ArtistId, Command, LIKED_PLAYLIST, LikeTarget, MeshPins, PlaylistId, RadioSeed, ReleaseDetail, ReleaseId, Route, ViewState,
 };
@@ -235,8 +236,8 @@ pub fn album(ui: &mut Ui, frame: PageFrame, id: ReleaseId, state: &ViewState, ou
         let year = c.year.map(|y| y.to_string());
         let count = format!("{} • {}", text::tracks(d.tracks.len() as u64), text::total(d.total_duration));
         let menu = Menu::new(("album-menu", id))
-            .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
-            .item(MenuItem::new("Следующим").icon(Icon::QueueMusic));
+            .item(MenuItem::new(common().shuffle).icon(Icon::Shuffle))
+            .item(MenuItem::new(mobile().tile_play_next).icon(Icon::QueueMusic));
         let head = collection_head(
             ui,
             frame.top,
@@ -311,9 +312,9 @@ pub fn playlist(ui: &mut Ui, frame: PageFrame, id: PlaylistId, state: &ViewState
         let empty = d.tracks.is_empty();
         let pins = &state.mesh.this.pins;
         let kept = pinned(pins, id);
-        let mut menu = Menu::new(("pl-menu", id)).item(MenuItem::new("Следующим").icon(Icon::QueueMusic).enabled(!empty));
+        let mut menu = Menu::new(("pl-menu", id)).item(MenuItem::new(mobile().tile_play_next).icon(Icon::QueueMusic).enabled(!empty));
         if state.mesh.paired {
-            menu = menu.item(MenuItem::new("Избранное").icon(if kept { Icon::DownloadDone } else { Icon::Download }).selected(kept));
+            menu = menu.item(MenuItem::new(mobile().group_favorites).icon(if kept { Icon::DownloadDone } else { Icon::Download }).selected(kept));
         }
         let head = collection_head(
             ui,
@@ -372,8 +373,8 @@ pub fn artist(ui: &mut Ui, frame: PageFrame, id: ArtistId, state: &ViewState, ou
         };
         parts::head(ui, frame.top, &head);
         let menu = Menu::new(("ar-menu", id))
-            .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
-            .item(MenuItem::new("Радио исполнителя").icon(Icon::Radio));
+            .item(MenuItem::new(common().shuffle).icon(Icon::Shuffle))
+            .item(MenuItem::new(mobile().artist_radio).icon(Icon::Radio));
         let row = circles(ui, Id::new(("ar-circles", id)), Icon::Favorite, d.liked, true, menu);
         if row.play {
             out.push(Command::PlayArtist { id, shuffle: false });
@@ -388,13 +389,14 @@ pub fn artist(ui: &mut Ui, frame: PageFrame, id: ArtistId, state: &ViewState, ou
         }
         let here = Route::Artist(id);
         if !d.top_tracks.is_empty() {
-            parts::section_head(ui, "Популярные треки");
+            parts::section_head(ui, mobile().popular_tracks);
             let top = &d.top_tracks[..d.top_tracks.len().min(5)];
             let ids: Vec<nikgob_view::TrackId> = top.iter().map(|t| t.id).collect();
             let context = nikgob_view::QueueOrigin::Artist(c.name.clone());
             track_list(ui, "ar-top", top, false, &here, state, |i| Command::PlayTracks { tracks: ids.clone(), start: i, context: context.clone() }, out, &mut inner);
         }
-        for (name, releases) in [("Альбомы", &d.albums), ("Синглы и EP", &d.singles_eps)] {
+        let m = mobile();
+        for (name, releases) in [(m.chip_albums, &d.albums), (m.singles_eps, &d.singles_eps)] {
             if releases.is_empty() {
                 continue;
             }

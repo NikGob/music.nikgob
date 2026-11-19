@@ -48,6 +48,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use nikgob_core::i18n::{Locale, locale, view_in};
+use nikgob_core::i18n::view::{fmt_cookies_unreadable_in, fmt_window_error_in};
 use nikgob_runtime::{WebLogin, WebLoginError};
 
 pub const EXIT_OK: i32 = 0;
@@ -92,11 +94,17 @@ impl Site {
         }
     }
 
-    pub const fn title(self) -> &'static str {
+    /// The window's title in `loc`.
+    pub const fn title_in(self, loc: Locale) -> &'static str {
         match self {
-            Self::Youtube => "Вход в YouTube Music",
-            Self::Soundcloud => "Вход в SoundCloud",
+            Self::Youtube => view_in(loc).sign_in_youtube,
+            Self::Soundcloud => view_in(loc).sign_in_soundcloud,
         }
+    }
+
+    /// The window's title in the active process locale.
+    pub fn title(self) -> &'static str {
+        self.title_in(locale())
     }
 
     pub const fn start_url(self) -> &'static str {
@@ -368,6 +376,9 @@ pub struct WindowLogin {
     profile: PathBuf,
     /// Where the child writes the cookies.
     out: PathBuf,
+    /// The UI locale taken at construction (this runs on the app's main
+    /// thread); the sign-in's own thread never reads the global locale.
+    loc: Locale,
 }
 
 impl WindowLogin {
@@ -379,12 +390,16 @@ impl WindowLogin {
             exe,
             profile: dir.join("webview"),
             out: dir.join("signin-cookies.txt"),
+            loc: locale(),
         })
     }
 }
 
-/// What the user is told when the child finds no webview to show.
-const NO_WEBVIEW: &str = if cfg!(windows) { "в системе нет WebView2" } else { "в системе нет WebKitGTK" };
+/// What the user is told when the child finds no webview to show, in `loc`.
+fn no_webview_in(loc: Locale) -> &'static str {
+    let v = view_in(loc);
+    if cfg!(windows) { v.no_webview2 } else { v.no_webkitgtk }
+}
 
 /// How long the child gets to close by itself after «Отмена».
 const CANCEL_GRACE: Duration = Duration::from_secs(3);
@@ -458,17 +473,17 @@ impl WebLogin for WindowLogin {
         match code {
             Some(EXIT_OK) => match read() {
                 Ok(t) if !t.trim().is_empty() => Ok(t),
-                Ok(_) => Err(WebLoginError::Failed("окно не отдало cookies".into())),
-                Err(e) => Err(WebLoginError::Failed(format!("cookies не читаются: {e}"))),
+                Ok(_) => Err(WebLoginError::Failed(view_in(self.loc).window_no_cookies.into())),
+                Err(e) => Err(WebLoginError::Failed(fmt_cookies_unreadable_in(self.loc, &e.to_string()))),
             },
             Some(EXIT_CLOSED) => Err(WebLoginError::Closed),
             Some(EXIT_TIMEOUT) => Err(WebLoginError::TimedOut),
             Some(EXIT_REFUSED) => Err(WebLoginError::Refused),
-            Some(EXIT_NO_WEBVIEW) => Err(WebLoginError::Failed(NO_WEBVIEW.into())),
+            Some(EXIT_NO_WEBVIEW) => Err(WebLoginError::Failed(no_webview_in(self.loc).into())),
             other => {
                 Err(WebLoginError::Failed(match other {
-                    Some(c) => format!("ошибка {c}"),
-                    None => "окно упало".into(),
+                    Some(c) => fmt_window_error_in(self.loc, c),
+                    None => view_in(self.loc).window_crashed.into(),
                 }))
             }
         }

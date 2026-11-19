@@ -5,6 +5,7 @@
 //! artists, and the lists of tracks.
 
 use egui::{Id, Rect, Response, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
+use nikgob_core::i18n::{common, mobile};
 use nikgob_md3e::components::paint::{self, Radii};
 use nikgob_md3e::components::{IconButton, LoadingIndicator, anim};
 use nikgob_md3e::screens::phone;
@@ -58,7 +59,7 @@ pub fn search_bar(ui: &mut Ui, rect: Rect, id: Id) -> bool {
     let c = pos2(rect.left() + 28.0, rect.center().y);
     Icon::Search.widget(false, s.on_surface, 24.0).paint_at(ui, Rect::from_center_size(c, vec2(24.0, 24.0)));
     let style = TypeRole::BodyLarge.style();
-    text::paint_line(ui, pos2(rect.left() + 56.0, rect.center().y - style.line_height * 0.5), "Поиск", style, s.on_surface_variant, rect.width() - 72.0);
+    text::paint_line(ui, pos2(rect.left() + 56.0, rect.center().y - style.line_height * 0.5), common().search, style, s.on_surface_variant, rect.width() - 72.0);
     resp.clicked()
 }
 
@@ -108,7 +109,7 @@ pub fn nothing(ui: &mut Ui) {
     let s = theme.scheme;
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 160.0), Sense::hover());
     Icon::Search.widget(false, s.on_surface_variant, 48.0).paint_at(ui, Rect::from_center_size(pos2(r.center().x, r.top() + 56.0), vec2(48.0, 48.0)));
-    let g = text::centred(ui, "Ничего не нашлось", TypeRole::TitleMedium.style(), s.on_surface_variant, r.width() - 32.0, 1);
+    let g = text::centred(ui, mobile().nothing_found, TypeRole::TitleMedium.style(), s.on_surface_variant, r.width() - 32.0, 1);
     ui.painter().galley(pos2(r.center().x, r.top() + 96.0), g, s.on_surface_variant);
 }
 

@@ -10,6 +10,7 @@ use nikgob_md3e::components::paint::{self, Radii};
 use nikgob_md3e::components::{BottomSheet, TextInputDialog, TextInputResult, anim};
 use nikgob_md3e::screens::phone::{self, PhonePages, TrackAct, TrackMenuEntry};
 use nikgob_md3e::{Icon, Theme, TypeRole};
+use nikgob_core::i18n::{common, mobile, nav};
 use nikgob_view::{Command, LIKED_PLAYLIST, LikeTarget, Route, ShareTarget, TrackRow, ViewState};
 
 use crate::text;
@@ -67,10 +68,12 @@ impl TrackMenu {
         let mut nav = None;
         if self.naming {
             let mut open = true;
-            let r = TextInputDialog::new("phone-new-playlist", "Новый плейлист", "Название")
+            let m = mobile();
+            let c = common();
+            let r = TextInputDialog::new("phone-new-playlist", m.new_playlist, m.name_placeholder)
                 .icon(Icon::PlaylistAdd)
-                .buttons("Создать", "Отмена")
-                .validate(|t| t.trim().is_empty().then(|| "Введи название".to_owned()))
+                .buttons(m.create, c.cancel)
+                .validate(|t| t.trim().is_empty().then(|| m.enter_name.to_owned()))
                 .show(ctx, &mut open, &mut self.name);
             if matches!(r, Some(TextInputResult::Confirmed))
                 && let Some(t) = &self.track
@@ -181,9 +184,10 @@ fn body(ui: &mut Ui, track: &TrackRow, entries: &[TrackMenuEntry], playlists: &[
     }
     let mut y = head.bottom();
     if picker {
-        let mut items: Vec<(Icon, String, Act)> = vec![(Icon::Favorite, "Любимые".to_owned(), Act::Into(LIKED_PLAYLIST))];
+        let m = mobile();
+        let mut items: Vec<(Icon, String, Act)> = vec![(Icon::Favorite, nav().liked.to_owned(), Act::Into(LIKED_PLAYLIST))];
         items.extend(playlists.iter().map(|(id, name)| (Icon::QueueMusic, name.clone(), Act::Into(*id))));
-        items.push((Icon::Add, "Новый плейлист".to_owned(), Act::NewPlaylist));
+        items.push((Icon::Add, m.new_playlist.to_owned(), Act::NewPlaylist));
         let list = Rect::from_min_max(pos2(full.left(), y), full.max);
         let mut lui = ui.new_child(egui::UiBuilder::new().max_rect(list));
         let n = items.len();
@@ -197,7 +201,8 @@ fn body(ui: &mut Ui, track: &TrackRow, entries: &[TrackMenuEntry], playlists: &[
         return act;
     }
     // The three connected tiles.
-    let tiles = [("Следующим", Icon::QueueMusic, Act::Next), ("В очередь", Icon::Add, Act::Queue), ("В плейлист", Icon::PlaylistAdd, Act::Picker)];
+    let m = mobile();
+    let tiles = [(m.tile_play_next, Icon::QueueMusic, Act::Next), (m.tile_to_queue, Icon::Add, Act::Queue), (m.tile_to_playlist, Icon::PlaylistAdd, Act::Picker)];
     let tw = (full.width() - JOIN * 2.0) / 3.0;
     for (i, (label, icon, a)) in tiles.into_iter().enumerate() {
         let r = Rect::from_min_size(pos2(full.left() + i as f32 * (tw + JOIN), y + 12.0), vec2(tw, TILE_H));

@@ -1,6 +1,12 @@
 //! «Загрузки»: how much space the music takes and what is left of the
 //! disks it is on (the page's header line).
 
+use nikgob_core::i18n::{Locale, locale};
+use nikgob_core::i18n::view::{
+    fmt_disk_full_in, fmt_free_disk_in, fmt_free_phrase_in, fmt_free_size_in, fmt_library_line_in, fmt_music_line_in,
+    fmt_originals_line_in, fmt_size_in,
+};
+
 /// The music's files and their disks, as last counted.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StorageView {
@@ -43,75 +49,71 @@ impl StorageView {
     }
 
     /// «Музыка 41,2 ГБ · свободно 62 ГБ», with each disk's free space
-    /// when the music is on several («свободно 62 ГБ (C:) · 410 ГБ (D:)»).
-    pub fn line(&self) -> Option<String> {
+    /// when the music is on several («свободно 62 ГБ (C:) · 410 ГБ (D:)»),
+    /// in `loc`.
+    pub fn line_in(&self, loc: Locale) -> Option<String> {
         if !self.known {
             return None;
         }
-        let mut line = format!("Музыка {}", size_ru(self.music()));
+        let mut line = fmt_music_line_in(loc, self.music());
         match self.disks.as_slice() {
             [] => {}
-            [one] => line.push_str(&format!(" · свободно {}", free_ru(one.free))),
+            [one] => line.push_str(&format!(" · {}", fmt_free_phrase_in(loc, one.free))),
             [first, rest @ ..] => {
-                line.push_str(&format!(" · свободно {} ({})", free_ru(first.free), first.name));
+                line.push_str(&format!(" · {}", fmt_free_disk_in(loc, first.free, &first.name)));
                 for d in rest {
-                    line.push_str(&format!(" · {} ({})", free_ru(d.free), d.name));
+                    line.push_str(&format!(" · {} ({})", fmt_free_size_in(loc, d.free), d.name));
                 }
             }
         }
         Some(line)
     }
 
-    /// The hover text: the parts of the music and each disk in full.
-    pub fn details(&self) -> String {
-        let mut lines = vec![format!("Библиотека: {}", size_ru(self.library))];
+    /// The header line in the active process locale.
+    pub fn line(&self) -> Option<String> {
+        self.line_in(locale())
+    }
+
+    /// The hover text in `loc`: the parts of the music and each disk in full.
+    pub fn details_in(&self, loc: Locale) -> String {
+        let mut lines = vec![fmt_library_line_in(loc, self.library)];
         if self.masters > 0 {
-            lines.push(format!("Оригиналы без потерь: {}", size_ru(self.masters)));
+            lines.push(fmt_originals_line_in(loc, self.masters));
         }
         for d in &self.disks {
-            lines.push(format!("{}: свободно {} из {}", d.name, size_ru(d.free), size_ru(d.total)));
+            lines.push(fmt_disk_full_in(loc, &d.name, d.free, d.total));
         }
         lines.join("\n")
     }
+
+    /// The hover text in the active process locale.
+    pub fn details(&self) -> String {
+        self.details_in(locale())
+    }
 }
 
-const UNITS: [&str; 5] = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
-
-/// `bytes` in binary units (as the system's file managers count them) and
-/// the unit: 41,2 ГБ.
-fn scaled(bytes: u64) -> (f64, usize) {
-    let mut v = bytes as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < UNITS.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    (v, i)
+/// A size as `loc` writes it: «41,2 ГБ» / "41.2 GB", «820 МБ» / "820 MB",
+/// «1,4 ТБ» / "1.4 TB" (a decimal below 100).
+pub fn size_in(loc: Locale, bytes: u64) -> String {
+    fmt_size_in(loc, bytes)
 }
 
-/// With a decimal comma, `decimals` places, no «,0».
-fn number_ru(v: f64, decimals: usize) -> String {
-    let s = format!("{v:.decimals$}");
-    match s.split_once('.') {
-        Some((whole, frac)) if frac.bytes().all(|b| b == b'0') => whole.to_owned(),
-        Some((whole, frac)) => format!("{whole},{frac}"),
-        None => s.clone(),
-    }
+/// Free space, rounder, in `loc`: «62 ГБ» / "62 GB", «7,5 ГБ» / "7.5 GB"
+/// (a decimal below 10).
+pub fn free_in(loc: Locale, bytes: u64) -> String {
+    fmt_free_size_in(loc, bytes)
 }
 
 /// A size as Russian writes it: «41,2 ГБ», «820 МБ», «1,4 ТБ» (a decimal
 /// below 100).
 pub fn size_ru(bytes: u64) -> String {
-    let (v, i) = scaled(bytes);
-    let decimals = if i == 0 || v >= 100.0 { 0 } else { 1 };
-    format!("{} {}", number_ru(v, decimals), UNITS[i])
+    size_in(Locale::Ru, bytes)
 }
 
-/// Free space, rounder: «62 ГБ», «7,5 ГБ» (a decimal below 10).
+/// Free space as Russian writes it, rounder: «62 ГБ», «7,5 ГБ» (a decimal
+/// below 10).
 pub fn free_ru(bytes: u64) -> String {
-    let (v, i) = scaled(bytes);
-    let decimals = if i == 0 || v >= 10.0 { 0 } else { 1 };
-    format!("{} {}", number_ru(v, decimals), UNITS[i])
+    free_in(Locale::Ru, bytes)
 }
 
 #[cfg(test)]

@@ -20,6 +20,9 @@ pub use nikgob_core::streaming::{
 
 use crate::{ArtistId, PlaylistId, ReleaseDay, ReleaseId, ReleaseType, StreamArtistLinks, TrackId};
 
+use nikgob_core::i18n::{Locale, locale, view_in};
+use nikgob_core::i18n::view::{fmt_have_of_in, fmt_have_of_yours_in, fmt_songs_yours_in};
+
 // ---------------------------------------------------------------- accounts
 
 /// One streaming service as the settings show it.
@@ -161,48 +164,48 @@ impl AlbumHave {
         self.total > 0 && self.local >= self.total
     }
 
-    /// The badge of a service's album card: "у тебя", "3 из 12", "в
-    /// библиотеке", «2 песни у тебя» of an album only some songs of which
+    /// The badge of a service's album card in `loc`: "у тебя", "3 из 12",
+    /// "в библиотеке", «2 песни у тебя» of an album only some songs of which
     /// are the user's, or nothing.
-    pub fn label(&self) -> Option<String> {
+    pub fn label_in(&self, loc: Locale) -> Option<String> {
+        let v = view_in(loc);
         if let Some(n) = self.mine {
-            (n > 0).then(|| songs_yours(n))
+            (n > 0).then(|| fmt_songs_yours_in(loc, n))
         } else if self.complete() {
-            Some("у тебя".to_owned())
+            Some(v.have_yours.to_owned())
         } else if self.local > 0 {
-            Some(format!("{} из {}", self.local, self.total))
+            Some(fmt_have_of_in(loc, self.local, self.total))
         } else if self.in_library > 0 {
-            Some("в библиотеке".to_owned())
+            Some(v.have_in_library.to_owned())
         } else {
             None
         }
     }
 
-    /// The chip of a service's album page: "у тебя", "3 из 12 у тебя", or
-    /// nothing (files only; "В библиотеке" is a chip of its own).
-    pub fn files_label(&self) -> Option<String> {
+    /// The badge of a service's album card in the active process locale.
+    pub fn label(&self) -> Option<String> {
+        self.label_in(locale())
+    }
+
+    /// The chip of a service's album page in `loc`: "у тебя", "3 из 12 у
+    /// тебя", or nothing (files only; "В библиотеке" is a chip of its own).
+    pub fn files_label_in(&self, loc: Locale) -> Option<String> {
+        let v = view_in(loc);
         if let Some(n) = self.mine {
-            (n > 0).then(|| songs_yours(n))
+            (n > 0).then(|| fmt_songs_yours_in(loc, n))
         } else if self.complete() {
-            Some("у тебя".to_owned())
+            Some(v.have_yours.to_owned())
         } else if self.local > 0 {
-            Some(format!("{} из {} у тебя", self.local, self.total))
+            Some(fmt_have_of_yours_in(loc, self.local, self.total))
         } else {
             None
         }
     }
-}
 
-/// «1 песня у тебя», «2 песни у тебя», «5 песен у тебя».
-fn songs_yours(n: u32) -> String {
-    let word = if n % 10 == 1 && n % 100 != 11 {
-        "песня"
-    } else if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) {
-        "песни"
-    } else {
-        "песен"
-    };
-    format!("{n} {word} у тебя")
+    /// The chip of a service's album page in the active process locale.
+    pub fn files_label(&self) -> Option<String> {
+        self.files_label_in(locale())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -640,12 +643,18 @@ impl UpgradeBar {
         }
     }
 
-    /// What is looked for, in words: «lossless», «MP3 320 или лучше».
-    pub const fn wanted(self) -> &'static str {
+    /// What is looked for, in words, in `loc`: «lossless», «MP3 320 или
+    /// лучше».
+    pub const fn wanted_in(self, loc: Locale) -> &'static str {
         match self {
-            Self::Mp3_320 => "MP3 320 или лучше",
-            Self::Lossless => "lossless",
+            Self::Mp3_320 => view_in(loc).upgrade_mp3_320,
+            Self::Lossless => view_in(loc).upgrade_lossless,
         }
+    }
+
+    /// What is looked for, in words, in the active process locale.
+    pub fn wanted(self) -> &'static str {
+        self.wanted_in(locale())
     }
 }
 

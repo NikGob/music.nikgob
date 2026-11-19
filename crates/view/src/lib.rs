@@ -25,7 +25,7 @@ mod streams;
 mod transfer;
 
 pub use nikgob_core::i18n::{
-    LangPref, Locale, MixTitle, PerLocale, QueueOrigin, RadioOrigin, RadioTitle, SideMixFlavor,
+    LangPref, Locale, MixTitle, PerLocale, QueueOrigin, RadioOrigin, RadioTitle, SideMixFlavor, locale, view_in,
 };
 pub use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource, LyricsSync};
 pub use nikgob_core::model::AlbumMode;
@@ -936,11 +936,16 @@ pub enum WorldKind {
 
 impl WorldKind {
     /// «Саундтрек», «Исполнитель».
-    pub fn label(self) -> &'static str {
+    pub const fn label_in(self, loc: Locale) -> &'static str {
         match self {
-            Self::Soundtrack => "Саундтрек",
-            Self::Artist => "Исполнитель",
+            Self::Soundtrack => view_in(loc).world_soundtrack,
+            Self::Artist => view_in(loc).world_artist,
         }
+    }
+
+    /// The label in the active process locale.
+    pub fn label(self) -> &'static str {
+        self.label_in(locale())
     }
 }
 
@@ -957,12 +962,17 @@ pub enum WorldStart {
 }
 
 impl WorldStart {
-    pub fn label(self) -> &'static str {
+    pub const fn label_in(self, loc: Locale) -> &'static str {
         match self {
-            Self::Finish => "Дослушать",
-            Self::Begin => "Начать",
-            Self::Again => "С начала",
+            Self::Finish => view_in(loc).world_finish,
+            Self::Begin => view_in(loc).world_begin,
+            Self::Again => view_in(loc).world_again,
         }
+    }
+
+    /// The label in the active process locale.
+    pub fn label(self) -> &'static str {
+        self.label_in(locale())
     }
 }
 
@@ -2168,25 +2178,31 @@ impl TrackMenuItem {
         Self::Ban,
     ];
 
-    /// The item's name in the settings.
-    pub fn label(self) -> &'static str {
+    /// The item's name in the settings in `loc`.
+    pub const fn label_in(self, loc: Locale) -> &'static str {
+        let v = view_in(loc);
         match self {
-            Self::Radio => "Радио по треку",
-            Self::Album => "К альбому",
-            Self::Artist => "К исполнителю",
-            Self::Share => "Поделиться",
-            Self::Info => "Источник и качество",
-            Self::Sound => "Скорость и эквалайзер",
-            Self::Visualizer => "Визуализатор",
-            Self::Tags => "Редактировать теги…",
-            Self::LyricsEdit => "Изменить текст…",
-            Self::Download => "Скачать",
-            Self::Torrents => "Найти качество лучше",
-            Self::PickRelease => "Выбрать раздачу…",
-            Self::WrongFile => "В файле другая песня",
-            Self::Dislike => "Не нравится",
-            Self::Ban => "Не рекомендовать исполнителя",
+            Self::Radio => v.menu_radio,
+            Self::Album => v.menu_album,
+            Self::Artist => v.menu_artist,
+            Self::Share => v.menu_share,
+            Self::Info => v.menu_info,
+            Self::Sound => v.menu_sound,
+            Self::Visualizer => v.menu_visualizer,
+            Self::Tags => v.menu_tags,
+            Self::LyricsEdit => v.menu_lyrics,
+            Self::Download => v.menu_download,
+            Self::Torrents => v.menu_torrents,
+            Self::PickRelease => v.menu_pick_release,
+            Self::WrongFile => v.menu_wrong_file,
+            Self::Dislike => v.menu_dislike,
+            Self::Ban => v.menu_ban,
         }
+    }
+
+    /// The item's name in the settings in the active process locale.
+    pub fn label(self) -> &'static str {
+        self.label_in(locale())
     }
 
     /// Where the item stands until the settings say otherwise.
@@ -2313,17 +2329,23 @@ impl HomeSection {
         Self::Releases,
     ];
 
-    pub const fn label(self) -> &'static str {
+    pub const fn label_in(self, loc: Locale) -> &'static str {
+        let v = view_in(loc);
         match self {
-            Self::Shortcuts => "Быстрый доступ",
-            Self::Daily => "Миксы дня",
-            Self::Mixes => "Миксы для тебя",
-            Self::ListenAgain => "Слушать снова",
-            Self::OfDay => "Плитки дня",
-            Self::FromLibrary => "Из библиотеки",
-            Self::New => "Новое",
-            Self::Releases => "Релизы",
+            Self::Shortcuts => v.home_shortcuts,
+            Self::Daily => v.home_daily,
+            Self::Mixes => v.home_mixes,
+            Self::ListenAgain => v.home_listen_again,
+            Self::OfDay => v.home_of_day,
+            Self::FromLibrary => v.home_from_library,
+            Self::New => v.home_new,
+            Self::Releases => v.home_releases,
         }
+    }
+
+    /// The section's name in the active process locale.
+    pub fn label(self) -> &'static str {
+        self.label_in(locale())
     }
 }
 
@@ -3010,29 +3032,35 @@ impl CoverShape {
         &Self::ALL[2..]
     }
 
-    pub fn label(self) -> &'static str {
+    pub const fn label_in(self, loc: Locale) -> &'static str {
+        let v = view_in(loc);
         match self {
-            Self::Original => "Оригинал (квадрат)",
-            Self::Random => "Случайная",
-            Self::Cookie12 => "Печенье, 12 волн",
-            Self::Cookie9 => "Печенье, 9 волн",
-            Self::Cookie7 => "Печенье, 7 волн",
-            Self::Cookie6 => "Печенье, 6 волн",
-            Self::Cookie4 => "Печенье, 4 волны",
-            Self::Sunny => "Солнце",
-            Self::VerySunny => "Яркое солнце",
-            Self::Flower => "Цветок",
-            Self::Clover4 => "Клевер, 4 листа",
-            Self::Clover8 => "Клевер, 8 листьев",
-            Self::SoftBurst => "Вспышка",
-            Self::SoftBoom => "Взрыв",
-            Self::Puffy => "Облако",
-            Self::PuffyDiamond => "Пухлый ромб",
-            Self::Circle => "Круг",
-            Self::Pentagon => "Пятиугольник",
-            Self::Gem => "Самоцвет",
-            Self::Heart => "Сердце",
+            Self::Original => v.shape_original,
+            Self::Random => v.shape_random,
+            Self::Cookie12 => v.shape_cookie12,
+            Self::Cookie9 => v.shape_cookie9,
+            Self::Cookie7 => v.shape_cookie7,
+            Self::Cookie6 => v.shape_cookie6,
+            Self::Cookie4 => v.shape_cookie4,
+            Self::Sunny => v.shape_sunny,
+            Self::VerySunny => v.shape_very_sunny,
+            Self::Flower => v.shape_flower,
+            Self::Clover4 => v.shape_clover4,
+            Self::Clover8 => v.shape_clover8,
+            Self::SoftBurst => v.shape_soft_burst,
+            Self::SoftBoom => v.shape_soft_boom,
+            Self::Puffy => v.shape_puffy,
+            Self::PuffyDiamond => v.shape_puffy_diamond,
+            Self::Circle => v.shape_circle,
+            Self::Pentagon => v.shape_pentagon,
+            Self::Gem => v.shape_gem,
+            Self::Heart => v.shape_heart,
         }
+    }
+
+    /// The shape's name in the active process locale.
+    pub fn label(self) -> &'static str {
+        self.label_in(locale())
     }
 }
 

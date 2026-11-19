@@ -6,6 +6,7 @@
 //! «Избранное») and the rest of the settings as the desktop draws them.
 
 use egui::{Id, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
+use nikgob_core::i18n::{common, errors, mobile, nav};
 use nikgob_core::streaming::{Account, LoginInput, Service};
 use nikgob_md3e::components::paint::{self, Radii};
 use nikgob_md3e::components::{Button, ConnectedGroup, LoadingIndicator, Menu, MenuItem, Size, Style, Switch, TextField, anim};
@@ -77,7 +78,7 @@ impl Settings {
         let s = theme.scheme;
         let head = Rect::from_min_size(pos2(rect.left(), rect.top() + frame.top), vec2(rect.width(), parts::BAR_H));
         let style = TypeRole::TitleLarge.style();
-        text::paint_line(ui, pos2(head.left() + 16.0, head.center().y - style.line_height * 0.5), "Настройки", style, s.on_surface, head.width() - 32.0);
+        text::paint_line(ui, pos2(head.left() + 16.0, head.center().y - style.line_height * 0.5), nav().settings, style, s.on_surface, head.width() - 32.0);
         let body = Rect::from_min_max(pos2(rect.left(), head.bottom()), rect.max);
         let mut bui = ui.new_child(UiBuilder::new().max_rect(body).id_salt("phone-settings"));
         bui.set_clip_rect(body.intersect(ui.clip_rect()));
@@ -85,8 +86,8 @@ impl Settings {
             self.look(ui, state, out);
             self.youtube(ui, state, out);
             self.mesh(ui, state, out, &mut page);
-            group_title(ui, "Ещё");
-            if link(ui, "set-all", (0, 1), Icon::Settings, "Все настройки", None) {
+            group_title(ui, common().more);
+            if link(ui, "set-all", (0, 1), Icon::Settings, mobile().all_settings, None) {
                 page.nav = Some(Route::Settings);
             }
             ui.add_space(16.0);
@@ -97,7 +98,8 @@ impl Settings {
     }
 
     fn look(&mut self, ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
-        group_title(ui, "Вид");
+        let m = mobile();
+        group_title(ui, m.group_look);
         let p = &state.prefs;
         let loc = p.resolved_locale();
         let lang_label = nikgob_core::i18n::settings_in(loc).language_label;
@@ -112,12 +114,12 @@ impl Settings {
         let modes = [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light];
         let at = modes.iter().position(|m| *m == p.theme).unwrap_or(0);
         let w = (inner.width() - 2.0 * 2.0) / 3.0;
-        if let Some(i) = ConnectedGroup::new("set-theme", &["Системная", "Тёмная", "Светлая"]).size(Size::S).equal_width(w).show(&mut cui, at) {
+        if let Some(i) = ConnectedGroup::new("set-theme", &[m.theme_system, m.theme_dark, m.theme_light]).size(Size::S).equal_width(w).show(&mut cui, at) {
             let mut next = p.clone();
             next.theme = modes[i];
             out.push(Command::SetPrefs(Box::new(next)));
         }
-        if let Some(on) = switch(ui, "set-motion", (2, 3), Icon::AutoAwesome, "Меньше движения", p.reduced_motion) {
+        if let Some(on) = switch(ui, "set-motion", (2, 3), Icon::AutoAwesome, m.reduced_motion, p.reduced_motion) {
             let mut next = p.clone();
             next.reduced_motion = on;
             out.push(Command::SetPrefs(Box::new(next)));
@@ -129,7 +131,7 @@ impl Settings {
         group_title(ui, "YouTube Music");
         match &acc.account {
             Account::LoggedIn { name, .. } => {
-                if link(ui, "set-yt-out", (0, 1), Icon::Logout, name, Some("Выйти")) {
+                if link(ui, "set-yt-out", (0, 1), Icon::Logout, name, Some(mobile().sign_out)) {
                     out.push(Command::StreamLogout(Service::Youtube));
                 }
             }
@@ -138,7 +140,7 @@ impl Settings {
                 crate::parts::put(ui, Rect::from_center_size(r.center(), vec2(32.0, 32.0)), LoadingIndicator::new().size(32.0));
             }
             _ => {
-                if link(ui, "set-yt-in", (0, 1), Icon::Login, "Войти", None) {
+                if link(ui, "set-yt-in", (0, 1), Icon::Login, errors().sign_in, None) {
                     out.push(Command::StreamLogin { service: Service::Youtube, input: LoginInput::Browser });
                 }
             }
@@ -150,11 +152,11 @@ impl Settings {
 
     fn mesh(&mut self, ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>, page: &mut PageOut) {
         let m = &state.mesh;
-        group_title(ui, "Межсеть");
+        group_title(ui, mobile().group_mesh);
         // The switch, this phone and, in a ring, the owner's other devices
         // as one group.
         let n = if !m.enabled { 1 } else if m.paired { 2 + m.nodes.len() } else { 2 };
-        if let Some(on) = switch(ui, "set-mesh", (0, n), Icon::Sync, "Мои устройства", m.enabled) {
+        if let Some(on) = switch(ui, "set-mesh", (0, n), Icon::Sync, mobile().my_devices, m.enabled) {
             out.push(Command::MeshSetEnabled(on));
         }
         if m.enabled {
@@ -191,11 +193,11 @@ impl Settings {
             return;
         }
         // What this phone keeps.
-        group_title(ui, "Избранное");
+        group_title(ui, mobile().group_favorites);
         let pins = &m.this.pins;
         let kept: Vec<&nikgob_view::PlaylistCard> = state.library.playlists.iter().filter(|p| p.id != LIKED_PLAYLIST && !p.pinned).collect();
         let n = 1 + kept.len();
-        if let Some(on) = switch(ui, "set-pin-liked", (0, n), Icon::Favorite, "Любимые", pins.liked) {
+        if let Some(on) = switch(ui, "set-pin-liked", (0, n), Icon::Favorite, nav().liked, pins.liked) {
             let mut p = pins.clone();
             p.liked = on;
             out.push(Command::MeshSetPins { node_id: m.this.id.clone(), pins: p });
@@ -234,11 +236,11 @@ impl Settings {
         }
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());
         let mut fui = ui.new_child(UiBuilder::new().max_rect(r.shrink2(vec2(16.0, 0.0))));
-        TextField::new(&mut self.ticket, "Приглашение").leading_icon(Icon::Link).width(r.width() - 32.0).id_salt("set-ticket").show(&mut fui);
+        TextField::new(&mut self.ticket, mobile().invitation).leading_icon(Icon::Link).width(r.width() - 32.0).id_salt("set-ticket").show(&mut fui);
         let ticket = ticket_of(&self.ticket);
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
         let mut bui = ui.new_child(UiBuilder::new().max_rect(r.shrink2(vec2(16.0, 0.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
-        if bui.add(Button::new("Подключить").icon(Icon::Link).style(Style::Filled).size(Size::S).enabled(ticket.is_some()).id_salt("set-join")).clicked()
+        if bui.add(Button::new(mobile().connect).icon(Icon::Link).style(Style::Filled).size(Size::S).enabled(ticket.is_some()).id_salt("set-join")).clicked()
             && let Some(t) = ticket
         {
             out.push(Command::MeshJoin { ticket: t });

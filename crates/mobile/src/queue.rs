@@ -11,6 +11,8 @@ use nikgob_md3e::tokens::Elevation;
 use nikgob_md3e::{Icon, Theme, TypeRole};
 use nikgob_view::{Command, Route, TrackRow, ViewState};
 
+use nikgob_core::i18n::{common, mobile};
+
 use crate::gesture::Sprung;
 use crate::rows::{self, Look, ROW_H};
 use crate::text;
@@ -96,10 +98,12 @@ impl QueueSheet {
     pub fn show(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) -> Option<(TrackRow, Route)> {
         if self.naming {
             let mut open = true;
-            let r = TextInputDialog::new("phone-save-queue", "Сохранить как плейлист", "Название")
+            let m = mobile();
+            let c = common();
+            let r = TextInputDialog::new("phone-save-queue", m.save_queue_title, m.name_placeholder)
                 .icon(Icon::PlaylistAdd)
-                .buttons("Сохранить", "Отмена")
-                .validate(|t| t.trim().is_empty().then(|| "Введи название".to_owned()))
+                .buttons(c.save, c.cancel)
+                .validate(|t| t.trim().is_empty().then(|| m.enter_name.to_owned()))
                 .show(ctx, &mut open, &mut self.name);
             if matches!(r, Some(TextInputResult::Confirmed)) {
                 out.push(Command::SaveQueueAsPlaylist(self.name.trim().to_owned()));
