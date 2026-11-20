@@ -1,31 +1,10 @@
-use rand::Rng;
-use rand_distr::Alphanumeric;
-use vergen_gitcl::{BuildBuilder, Emitter, GitclBuilder};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let gitcl = GitclBuilder::default()
-        .sha(true) // outputs 'VERGEN_GIT_SHA', and sets the 'short' flag true
-        .commit_date(true) // outputs 'VERGEN_GIT_COMMIT_DATE'
-        .build()?;
-
-    let build = BuildBuilder::default()
-        .build_date(true) // outputs 'VERGEN_BUILD_DATE'
-        .build()?;
-
-    Emitter::default()
-        .add_instructions(&build)?
-        .add_instructions(&gitcl)?
-        .emit()
-        .expect("Unable to generate the cargo keys!");
-    let build_id = match std::env::var("SOURCE_DATE_EPOCH") {
-        Ok(val) => val,
-        Err(_) => rand::rng()
-            .sample_iter(Alphanumeric)
-            .take(8)
-            .map(char::from)
-            .collect(),
-    };
-
-    println!("cargo:rustc-env=LIBRESPOT_BUILD_ID={build_id}");
-    Ok(())
+// Fixed version values: a git hash and a random id made fresh on every
+// commit and every build rebuilt librespot and everything above it each
+// time, for constants that only go into the login packet's version text.
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rustc-env=VERGEN_GIT_SHA=0000000");
+    println!("cargo:rustc-env=VERGEN_GIT_COMMIT_DATE=2025-01-01");
+    println!("cargo:rustc-env=VERGEN_BUILD_DATE=2025-01-01");
+    println!("cargo:rustc-env=LIBRESPOT_BUILD_ID=00000000");
 }

@@ -46,8 +46,21 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 all = { level = "warn", priority = -1 }
 dbg_macro = "warn"
 
+# Line tables only: panics and backtraces keep file and line, while the
+# full debug info (which no one steps through) made a build folder several
+# times bigger and every link slower. Dependencies carry none at all.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.build-override]
+debug = false
+
+[profile.test]
+incremental = false
+
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
 
 # The audio engine's per-sample loops (decoder thread and the realtime
 # callback) run 2-4x slower unoptimised, which eats into the decoded-audio
