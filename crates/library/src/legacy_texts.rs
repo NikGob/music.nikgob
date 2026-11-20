@@ -170,17 +170,22 @@ fn note_line(text: &str, loc: Locale) -> Option<StoredLine> {
     // A torrent's line ends with its name; an offer's, with the provider
     // and then the item's name.
     let with_provider = text.splitn(4, " · ").nth(3).is_some_and(|tail| tail.contains(" · "));
-    let found = if with_provider {
-        offer_in(text, loc).or_else(|| torrent_found_in(text, loc))
-    } else {
-        torrent_found_in(text, loc).or_else(|| offer_in(text, loc))
+    let found = || {
+        if with_provider {
+            offer_in(text, loc).or_else(|| torrent_found_in(text, loc))
+        } else {
+            torrent_found_in(text, loc).or_else(|| offer_in(text, loc))
+        }
     };
-    found
-        .or_else(|| search_again_in(text, loc))
+    // An offer takes any words as its provider («Скачано · Opus», «Qobuz
+    // просит подождать до 04:40 · …»), so the lines of a fixed shape go
+    // first.
+    search_again_in(text, loc)
         .or_else(|| done_count_in(text, loc))
         .or_else(|| done_quality_in(text, loc))
         .or_else(|| replaced_in(text, loc))
         .or_else(|| later_in(text, loc))
+        .or_else(found)
 }
 
 /// The key a job's field stands for, when every word of it was written by
@@ -1333,6 +1338,23 @@ mod tests {
             let key = note_key(text).unwrap_or_else(|| panic!("not recognized: «{text}»"));
             assert_ne!(key, text);
             assert_eq!(line_words_in(Locale::En, &key), text, "«{text}» became «{key}»");
+        }
+    }
+
+    /// Lines of a fixed shape are read as that shape, not as an offer with
+    /// any words for its provider (they would stay Russian in English).
+    #[test]
+    fn fixed_note_lines_are_no_offers() {
+        for text in [
+            "Скачано · Opus",
+            "Скачано · FLAC из MP3 ~192",
+            "Qobuz просит подождать до 04:40 · в 04:40 спрошу Qobuz",
+            "Есть 1 из 4 · Qobuz просит подождать до 04:40 · в 04:40 спрошу Qobuz",
+        ] {
+            let key = note_key(text).unwrap_or_else(|| panic!("not recognized: «{text}»"));
+            let line = StoredLine::decode(&key).unwrap_or_else(|| panic!("not a line: «{key}»"));
+            assert!(!matches!(line, StoredLine::Offer { .. }), "«{text}» became an offer: «{key}»");
+            assert_eq!(line.words_in(Locale::Ru), text);
         }
     }
 
