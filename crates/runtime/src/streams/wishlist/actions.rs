@@ -76,6 +76,13 @@ impl Worker {
             w.upgrade_dups.remove(&id);
             w.from.remove(&id);
             w.live.lock().remove(&id);
+            w.yt_queue.retain(|q| *q != id);
+            // A saved copy the importer is still taking goes with it.
+            let saved: Vec<PathBuf> = w.saving.iter().filter(|(_, v)| *v == &id).map(|(p, _)| p.clone()).collect();
+            for p in saved {
+                w.saving.remove(&p);
+                let _ = std::fs::remove_file(&p);
+            }
             // A download of another source stops (a Soulseek peer is told);
             // its folder goes once it has.
             let stopped = self.stop_run(id);
@@ -307,7 +314,7 @@ impl Worker {
         let run = self.streaming.wish.runs.reserve();
         let task = self.streaming.spawn(async move {
             let result = yt.save_audio(&source.locator, &dir).await;
-            Msg::Wish(WishMsg::Saved { item: id, track, run, result })
+            Msg::Wish(WishMsg::Saved { item: id, track, run, quiet: false, result })
         });
         self.streaming.wish.from.insert(id, "YouTube".into());
         let title = self.item_title(id);
@@ -316,38 +323,47 @@ impl Worker {
         self.publish_running();
     }
 
-    pub(super) fn wish_saved(&mut self, id: WishlistId, track: TrackId, run: u64, result: Result<PathBuf, StreamError>) {
+    pub(super) fn wish_saved(&mut self, id: WishlistId, track: TrackId, run: u64, quiet: bool, result: Result<PathBuf, StreamError>) {
         // Stopped (✕, «Не качать») or started again since: what it saved
         // goes, the item stays as it is now.
         if !self.streaming.wish.runs.is_current(id, run) {
             log::info!("wishlist: a save from YouTube of {id} came after it was stopped, dropped");
-            let _ = super::yt_fallback::take_fallback_run(run);
             if let Ok(path) = result {
                 let _ = std::fs::remove_file(path);
             }
             return;
         }
         self.streaming.wish.runs.end(id);
-        // A save the fallback started by itself is quiet: no toast, and a
-        // failure just leaves the item «не нашёл» as it would have been.
-        let quiet = super::yt_fallback::take_fallback_run(run);
         match result {
             Ok(path) => {
-                self.streaming.wish.saving.insert(path.clone(), id);
                 let targets = ImportTargets {
                     tracks: vec![track],
                     force: true,
+                    wishlist: Some(id),
                     ..ImportTargets::default()
                 };
-                if !self.import_for(vec![path], StoredLine::SavingFromYoutube.encode(), SourceOrigin::Stream, targets) {
-                    self.set_item(id, |i| i.status = WishlistStatus::NoTorrent);
+                if self.import_for(vec![path.clone()], StoredLine::SavingFromYoutube.encode(), SourceOrigin::Stream, targets) {
+                    self.streaming.wish.saving.insert(path, id);
+                } else {
+                    // The import did not take it: the copy goes, the item is
+                    // «не нашёл» (searched again in a week).
+                    let _ = std::fs::remove_file(&path);
+                    self.set_item(id, |i| {
+                        i.status = WishlistStatus::NoTorrent;
+                        i.next_try_at = Some(Self::now() + RETRY_AFTER.as_millis() as i64);
+                        i.note = Some(note_code(if quiet { WishNote::NotFound } else { WishNote::SaveFailed }));
+                    });
+                    self.publish_wishlist();
                 }
             }
             Err(e) => {
                 log::warn!("saving from YouTube: {e}");
+                // A save the fallback started by itself is quiet: no toast,
+                // and the item just stays «не нашёл» as it would have been.
                 if quiet {
                     self.set_item(id, |i| {
                         i.status = WishlistStatus::NoTorrent;
+                        i.next_try_at = Some(Self::now() + RETRY_AFTER.as_millis() as i64);
                         i.note = Some(note_code(WishNote::NotFound));
                     });
                 } else {
@@ -356,12 +372,15 @@ impl Worker {
                     self.toast_err(msg, None);
                     self.set_item(id, |i| {
                         i.status = WishlistStatus::NoTorrent;
+                        i.next_try_at = Some(Self::now() + RETRY_AFTER.as_millis() as i64);
                         i.note = Some(note_code(WishNote::SaveFailed));
                     });
                 }
                 self.publish_wishlist();
             }
         }
+        // A slot freed: the next queued fallback save may start.
+        self.yt_fallback_next();
     }
 
     pub(crate) fn wish_attach(&mut self, id: WishlistId, what: v::WishlistAttach) {

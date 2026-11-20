@@ -118,6 +118,7 @@ impl Worker {
             want.title.as_deref().or(want.album.as_deref()).unwrap_or("?")
         );
         self.streaming.spawn(async move {
+            let asked = sources.len();
             let asks = sources.iter().map(|s| {
                 let s = s.clone();
                 let want = &want;
@@ -156,12 +157,17 @@ impl Worker {
             } else {
                 Ok(offers)
             };
+            // A genuine miss only when every source that was asked answered
+            // (none sat out, errored or had nothing to fetch, none was left
+            // unconfigured).
+            let clean = down.is_empty() && answered.len() == asked;
             Msg::Wish(WishMsg::Searched {
                 item: id,
                 result,
                 answered,
                 down,
                 paused: not_asked,
+                clean,
             })
         });
         self.publish_wishlist();
@@ -175,6 +181,7 @@ impl Worker {
                 answered,
                 down,
                 paused,
+                clean,
             } => {
                 let now = Instant::now();
                 let mut kept = false;
@@ -204,11 +211,19 @@ impl Worker {
                 let turned: Vec<(SourceKey, SourceError)> = down.into_iter().filter(|(_, e)| e.is_refusal()).collect();
                 self.streaming.wish.turned.insert(item, turned);
                 self.publish_sources();
-                self.wish_searched(item, result);
+                self.wish_searched(item, result, clean);
             }
             WishMsg::Fetched { item, offer, result } if self.streaming.wish.probe.contains_key(&item) => match result {
                 Ok(Fetched::Torrent(p)) => self.wish_inspect(item, *offer, p),
-                Ok(Fetched::Files(_) | Fetched::Partial { .. }) | Err(_) => self.probe_done(item, false),
+                Ok(Fetched::Files(_) | Fetched::Partial { .. }) => self.probe_done(item, false),
+                // The probe could not fetch it: not a clean «no file», so
+                // not a genuine miss.
+                Err(_) => {
+                    if let Some(p) = self.streaming.wish.probe.get_mut(&item) {
+                        p.err = true;
+                    }
+                    self.probe_done(item, false);
+                }
             },
             WishMsg::Fetched { item, offer, result } => match result {
                 Ok(Fetched::Torrent(p)) => self.wish_inspect(item, *offer, p),
@@ -252,14 +267,14 @@ impl Worker {
                 payload,
                 result,
             } => self.wish_inspected(item, *offer, payload, result),
-            WishMsg::Saved { item, track, run, result } => self.wish_saved(item, track, run, result),
+            WishMsg::Saved { item, track, run, quiet, result } => self.wish_saved(item, track, run, quiet, result),
             WishMsg::RunStopped { item, token } => self.run_stopped(item, token),
             WishMsg::AlbumCame { item, origin, files, images } => self.album_staged(item, origin, files, images),
             WishMsg::AlbumRestored { release, done, failed, left } => self.album_restored(release, done, failed, left),
         }
     }
 
-    fn wish_searched(&mut self, id: WishlistId, result: Result<Vec<Offer>, String>) {
+    fn wish_searched(&mut self, id: WishlistId, result: Result<Vec<Offer>, String>, clean: bool) {
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
         if item.status != WishlistStatus::Searching {
             return; // dismissed meanwhile
@@ -354,7 +369,7 @@ impl Worker {
             if self.streaming.wish.turned.get(&id).is_some_and(|t| !t.is_empty()) {
                 self.wish_later(id);
             } else {
-                self.wish_nothing_found(id);
+                self.wish_nothing_found(id, clean);
             }
             return;
         }
@@ -435,7 +450,7 @@ impl Worker {
             all.push(o);
         }
         let todo: Vec<usize> = looked.iter().filter_map(|i| at.get(i).copied()).collect();
-        self.streaming.wish.probe.insert(id, Probe { all, todo, passed: HashSet::new() });
+        self.streaming.wish.probe.insert(id, Probe { all, todo, passed: HashSet::new(), err: false });
         self.probe_next(id);
     }
 
@@ -445,6 +460,8 @@ impl Worker {
         let Some(p) = self.streaming.wish.probe.get_mut(&id) else { return };
         if p.todo.is_empty() {
             let Some(p) = self.streaming.wish.probe.remove(&id) else { return };
+            // A probe that failed to fetch or list is not a clean «no file».
+            let clean = !p.err;
             let shown: Vec<Offer> = p
                 .all
                 .into_iter()
@@ -458,7 +475,7 @@ impl Worker {
                 if self.streaming.wish.turned.get(&id).is_some_and(|t| !t.is_empty()) {
                     self.wish_later(id);
                 } else {
-                    self.wish_nothing_found(id);
+                    self.wish_nothing_found(id, clean);
                 }
             } else {
                 self.ask_confirm(id, &shown);
@@ -467,7 +484,9 @@ impl Worker {
         }
         let offer = p.all[p.todo[0]].clone();
         let Some(source) = self.source_of(offer.source) else {
+            // Its source is gone: it could not be asked, not a clean «no».
             if let Some(p) = self.streaming.wish.probe.get_mut(&id) {
+                p.err = true;
                 p.todo.remove(0);
             }
             return self.probe_next(id);
@@ -701,8 +720,14 @@ impl Worker {
                     }
                     found
                 }
-                // Not listed (no peers in time): not a miss, asked again later.
-                Err(_) => false,
+                // Not listed (no peers in time): not a miss, asked again
+                // later — and not a clean one for the fallback either.
+                Err(_) => {
+                    if let Some(p) = self.streaming.wish.probe.get_mut(&id) {
+                        p.err = true;
+                    }
+                    false
+                }
             };
             log::info!("wishlist: {} {} of {:?}", offer.title, if found { "has a file" } else { "has no file" }, want.title);
             self.probe_done(id, found);
