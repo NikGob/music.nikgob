@@ -6,7 +6,7 @@ impl Worker {
     }
 
     pub(super) fn put_item(&mut self, item: &WishlistItem) {
-        let _ = self.log_err("wishlist", self.lib.put_wishlist_item(item));
+        let _ = self.log_err(nikgob_core::i18n::LibOp::Wishlist.label_in(self.locale()), self.lib.put_wishlist_item(item));
     }
 
     pub(super) fn set_item(&mut self, id: WishlistId, f: impl FnOnce(&mut WishlistItem)) -> Option<WishlistItem> {

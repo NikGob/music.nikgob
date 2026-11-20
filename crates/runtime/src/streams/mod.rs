@@ -830,7 +830,7 @@ impl Worker {
     }
 
     pub(crate) fn upsert_streams(&mut self, tracks: &[StreamTrack]) -> Vec<TrackId> {
-        self.log_err("стрим-треки", self.lib.upsert_stream_tracks(tracks))
+        self.log_err(nikgob_core::i18n::LibOp::StreamTracks.label_in(self.locale()), self.lib.upsert_stream_tracks(tracks))
             .unwrap_or_default()
     }
 

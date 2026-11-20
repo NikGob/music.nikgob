@@ -42,13 +42,16 @@ pub mod activity;
 pub mod backend;
 pub mod common;
 pub mod detail;
+pub mod dispatch_toasts;
 pub mod downloads;
 pub mod errors;
 pub mod first_run;
 pub mod home_recs;
 pub mod library;
+pub mod library_toasts;
 pub mod lyrics;
 pub mod menus;
+pub mod misc_toasts;
 pub mod mesh;
 pub mod mobile;
 pub mod nav;
@@ -58,6 +61,7 @@ pub mod screens;
 pub mod search;
 pub mod settings;
 pub mod settings_tabs;
+pub mod spotify_auth;
 pub mod status;
 pub mod streams_ui;
 pub mod view;
@@ -79,7 +83,11 @@ pub use view::{ViewStrings, view, view_in};
 pub use mobile::{MobileStrings, mobile, mobile_in};
 pub use activity::{ActivityStrings, activity, activity_in};
 pub use backend::{BackendStrings, backend, backend_in};
-pub use errors::{ErrorStrings, errors, errors_in};
+pub use errors::{ErrorStrings, LibOp, errors, errors_in};
+pub use dispatch_toasts::{DispatchToastStrings, dispatch_toasts, dispatch_toasts_in};
+pub use library_toasts::{LibraryToastStrings, library_toasts, library_toasts_in};
+pub use misc_toasts::{MiscToastStrings, misc_toasts, misc_toasts_in};
+pub use spotify_auth::{SpotifyAuthStrings, spotify_auth, spotify_auth_in};
 pub use home_recs::{
     BackgroundVariant, HomeRecsStrings, MixTitle, MoodKind, SideMixFlavor, TileStatic, WorldMixKind,
     day_part_title_in, genre_family_title_in, home_recs, home_recs_in,

@@ -32,7 +32,7 @@ impl Worker {
         }
         let only_local = self.state.read().prefs.library_only_downloaded;
         let rows: Vec<_> = self
-            .log_err("фильтр треков", self.lib.search(q, 500))
+            .log_err(nikgob_core::i18n::LibOp::TrackFilter.label_in(self.locale()), self.lib.search(q, 500))
             .map(|r| r.tracks)
             .unwrap_or_default()
             .into_iter()
@@ -58,7 +58,7 @@ impl Worker {
         self.library_load.tracks_asked += 1;
         let filter = track_filter(self.state.read().prefs.library_only_downloaded);
         let rows = self
-            .log_err("треки", self.lib.tracks_filtered(offset as u32, limit as u32, key, filter))
+            .log_err(nikgob_core::i18n::LibOp::Tracks.label_in(self.locale()), self.lib.tracks_filtered(offset as u32, limit as u32, key, filter))
             .unwrap_or_default();
         let loc = self.locale();
         let rows = rows.iter().map(|r| self.res.track_in(r, loc)).collect();
@@ -230,7 +230,7 @@ impl Worker {
             self.save_release(id, on, before);
             return;
         }
-        let Some(tracks) = self.log_err("лайк", self.lib.like_release(id, on)) else { return };
+        let Some(tracks) = self.log_err(nikgob_core::i18n::LibOp::Like.label_in(self.locale()), self.lib.like_release(id, on)) else { return };
         for &t in &tracks {
             let _ = self.lib.record_event(
                 t,
@@ -279,7 +279,7 @@ impl Worker {
     /// An album saved (or unsaved) alone: its tracks keep their likes; a
     /// saved album still downloads whole, as a like of it always did.
     fn save_release(&mut self, id: nikgob_core::model::ReleaseId, on: bool, before: Held) {
-        if self.log_err("лайк", self.lib.like_release(id, on)).is_none() {
+        if self.log_err(nikgob_core::i18n::LibOp::Like.label_in(self.locale()), self.lib.like_release(id, on)).is_none() {
             return;
         }
         let wished = if on {
@@ -325,7 +325,7 @@ impl Worker {
         }
         // Saved with its song: no choice of the whole single (its other
         // songs, an instrumental, stay out of the user's songs).
-        self.log_err("лайк", self.lib.save_release_with_song(release, on))
+        self.log_err(nikgob_core::i18n::LibOp::Like.label_in(self.locale()), self.lib.save_release_with_song(release, on))
     }
 
     /// Track likes changed: album hearts and "Любимые" follow.
@@ -361,7 +361,7 @@ impl Worker {
             nikgob_view::PlaylistCoverMode::Custom => return,
         };
         let previous = self.lib.get_playlist(id).ok().flatten().and_then(|p| p.cover);
-        if self.log_err("обложка", self.lib.set_playlist_cover(id, stored)).is_some() {
+        if self.log_err(nikgob_core::i18n::LibOp::Cover.label_in(self.locale()), self.lib.set_playlist_cover(id, stored)).is_some() {
             // The custom picture it leaves: ours to delete only when it is a
             // copy in `.musiclib/covers` (never a file of the user's).
             if let Some(old) = previous.filter(|c| playlist_cover::mode_of(Some(c)) == nikgob_view::PlaylistCoverMode::Custom) {
@@ -409,7 +409,7 @@ impl Worker {
         scope: Option<bool>,
         start: Option<TrackId>,
     ) -> (Vec<TrackId>, bool) {
-        let Some(listing) = self.log_err("альбом", self.lib.release_listing(id)).flatten() else {
+        let Some(listing) = self.log_err(nikgob_core::i18n::LibOp::Album.label_in(self.locale()), self.lib.release_listing(id)).flatten() else {
             return (Vec::new(), true);
         };
         listing.plays(self.album_rules(), scope, start)
@@ -424,7 +424,7 @@ impl Worker {
     pub(crate) fn track_in_library(&mut self, track: TrackId, on: Option<bool>, restore: Option<nikgob_library::TrackLibraryWas>) {
         let before = self.library_tracks();
         if let Some(on) = on {
-            let Some((now, was)) = self.log_err("библиотека", self.lib.set_track_in_library(track, on)) else { return };
+            let Some((now, was)) = self.log_err(nikgob_core::i18n::LibOp::Library.label_in(self.locale()), self.lib.set_track_in_library(track, on)) else { return };
             let text = match (on, now) {
                 (true, _) => "Трек в библиотеке",
                 (false, false) => "Трек убран из библиотеки",
@@ -439,7 +439,7 @@ impl Worker {
                 self.toast_info(text, undo);
             }
         } else if let Some(was) = restore
-            && self.log_err("библиотека", self.lib.restore_track_in_library(track, was)).is_none()
+            && self.log_err(nikgob_core::i18n::LibOp::Library.label_in(self.locale()), self.lib.restore_track_in_library(track, was)).is_none()
         {
             return;
         }
@@ -459,11 +459,11 @@ impl Worker {
     pub(crate) fn add_whole_album(&mut self, id: nikgob_core::model::ReleaseId, on: bool) {
         let before = self.library_tracks();
         if on {
-            let Some(undo) = self.log_err("альбом", self.lib.add_release_whole(id)) else { return };
+            let Some(undo) = self.log_err(nikgob_core::i18n::LibOp::Album.label_in(self.locale()), self.lib.add_release_whole(id)) else { return };
             let back = undo.map(|u| self.undo_action(Command::UndoWholeAlbum { id, mine: u.mine, excluded: u.excluded }));
             self.toast_ok("Альбом в библиотеке", back);
         } else {
-            if self.log_err("альбом", self.lib.set_release_whole(id, false)).is_none() {
+            if self.log_err(nikgob_core::i18n::LibOp::Album.label_in(self.locale()), self.lib.set_release_whole(id, false)).is_none() {
                 return;
             }
             let back = self.undo_action(Command::AddWholeAlbum { id, on: true });
@@ -480,16 +480,16 @@ impl Worker {
     /// it is left out (its file, like and playlists stay).
     pub(crate) fn album_track_mine(&mut self, release: nikgob_core::model::ReleaseId, track: TrackId, mine: bool) {
         let before = self.library_tracks();
-        let Some(was) = self.log_err("альбом", self.lib.track_choice(release, track)) else { return };
+        let Some(was) = self.log_err(nikgob_core::i18n::LibOp::Album.label_in(self.locale()), self.lib.track_choice(release, track)) else { return };
         let is_mine = |lib: &nikgob_library::Library| {
             lib.release_listing(release).ok().flatten().is_some_and(|l| l.wanted.contains(&track))
         };
         let step = if was == Some(!mine) { None } else { Some(mine) };
-        if self.log_err("альбом", self.lib.set_track_choice(release, track, step)).is_none() {
+        if self.log_err(nikgob_core::i18n::LibOp::Album.label_in(self.locale()), self.lib.set_track_choice(release, track, step)).is_none() {
             return;
         }
         if step.is_none() && is_mine(&self.lib) != mine {
-            let _ = self.log_err("альбом", self.lib.set_track_choice(release, track, Some(mine)));
+            let _ = self.log_err(nikgob_core::i18n::LibOp::Album.label_in(self.locale()), self.lib.set_track_choice(release, track, Some(mine)));
         }
         let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
         let text = if mine { format!("«{title}» в твоих треках альбома") } else { format!("«{title}» убран из твоих треков альбома") };
@@ -806,7 +806,7 @@ impl Worker {
         // Relative to the library folder, so the cover survives moving it and
         // the playlist export stays valid on other devices.
         let stored = format!("{COVERS}/{name}");
-        if self.log_err("обложка", self.lib.set_playlist_cover(id, Some(&stored))).is_some() {
+        if self.log_err(nikgob_core::i18n::LibOp::Cover.label_in(self.locale()), self.lib.set_playlist_cover(id, Some(&stored))).is_some() {
             if let Some(old) = previous {
                 let old = self.res.path(&old);
                 let ours = old

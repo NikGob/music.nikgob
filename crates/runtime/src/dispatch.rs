@@ -163,7 +163,7 @@ impl Worker {
             }
             Command::PlayArtist { id, shuffle } => {
                 let rows = self
-                    .log_err("исполнитель", self.lib.tracks_of_artist(id, 0, 500))
+                    .log_err(nikgob_core::i18n::LibOp::Artist.label_in(self.locale()), self.lib.tracks_of_artist(id, 0, 500))
                     .unwrap_or_default();
                 let origin = self
                     .lib
@@ -238,7 +238,7 @@ impl Worker {
             }
             Command::PlayArtistNext(id) => {
                 let rows = self
-                    .log_err("исполнитель", self.lib.tracks_of_artist(id, 0, 2000))
+                    .log_err(nikgob_core::i18n::LibOp::Artist.label_in(self.locale()), self.lib.tracks_of_artist(id, 0, 2000))
                     .unwrap_or_default();
                 let ids = self.playable(&rows, None);
                 if ids.is_empty() {
@@ -258,7 +258,7 @@ impl Worker {
             }
             Command::EnqueueArtist(id) => {
                 let rows = self
-                    .log_err("исполнитель", self.lib.tracks_of_artist(id, 0, 2000))
+                    .log_err(nikgob_core::i18n::LibOp::Artist.label_in(self.locale()), self.lib.tracks_of_artist(id, 0, 2000))
                     .unwrap_or_default();
                 let ids = self.playable(&rows, None);
                 self.command(Command::Enqueue(ids));
@@ -314,8 +314,8 @@ impl Worker {
             }
             Command::SaveTracksAsPlaylist { name, tracks } => {
                 let before = self.library_tracks();
-                if let Some(p) = self.log_err("плейлист", self.lib.create_playlist(&name)) {
-                    let _ = self.log_err("плейлист", self.lib.playlist_add_many(p.id, &tracks));
+                if let Some(p) = self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.create_playlist(&name)) {
+                    let _ = self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.playlist_add_many(p.id, &tracks));
                     self.toast_ok(format!("Плейлист «{name}» сохранён"), None);
                     self.library_edited(before, Vec::new());
                 }
@@ -335,8 +335,8 @@ impl Worker {
             Command::SaveQueueAsPlaylist(name) => {
                 let tracks = self.queue.tracks();
                 let before = self.library_tracks();
-                if let Some(p) = self.log_err("плейлист", self.lib.create_playlist(&name)) {
-                    let _ = self.log_err("плейлист", self.lib.playlist_add_many(p.id, &tracks));
+                if let Some(p) = self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.create_playlist(&name)) {
+                    let _ = self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.playlist_add_many(p.id, &tracks));
                     self.toast_ok(format!("Плейлист «{name}» сохранён"), None);
                     self.library_edited(before, Vec::new());
                 }
@@ -354,7 +354,7 @@ impl Worker {
                 } else {
                     self.lib.unlike(target)
                 };
-                if self.log_err("лайк", r).is_some() {
+                if self.log_err(nikgob_core::i18n::LibOp::Like.label_in(self.locale()), r).is_some() {
                     let mut wished = false;
                     if let LikeTarget::Track(t) = target {
                         if on {
@@ -398,19 +398,19 @@ impl Worker {
                 }
             }
             Command::CreatePlaylist(name) => {
-                if self.log_err("плейлист", self.lib.create_playlist(&name)).is_some() {
+                if self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.create_playlist(&name)).is_some() {
                     self.library_edited(Held::Same, Vec::new());
                 }
             }
             Command::RenamePlaylist(id, name) => {
-                if self.log_err("плейлист", self.lib.rename_playlist(id, &name)).is_some() {
+                if self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.rename_playlist(id, &name)).is_some() {
                     self.library_edited(Held::Same, Vec::new());
                     self.load_playlist(id);
                 }
             }
             Command::DeletePlaylist(id) => {
                 let before = self.library_tracks();
-                if self.log_err("плейлист", self.lib.delete_playlist(id)).is_some() {
+                if self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.delete_playlist(id)).is_some() {
                     self.toast_ok("Плейлист удалён", None);
                     self.library_edited(before, Vec::new());
                 }
@@ -437,7 +437,7 @@ impl Worker {
                     if !liked_ids.is_empty() {
                         self.publish_liked_state(&liked_ids, None, None, true);
                     }
-                } else if let Some(n) = self.log_err("плейлист", self.lib.playlist_add_missing(id, &tracks)) {
+                } else if let Some(n) = self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.playlist_add_missing(id, &tracks)) {
                     (added, already) = n;
                 }
                 let name = if id == LIKED_PLAYLIST {
@@ -464,13 +464,13 @@ impl Worker {
                 // The way back, in its toast.
                 let mut undo = None;
                 if id == LIKED_PLAYLIST {
-                    if self.log_err("лайк", self.lib.unlike(track)).is_some() {
+                    if self.log_err(nikgob_core::i18n::LibOp::Like.label_in(self.locale()), self.lib.unlike(track)).is_some() {
                         self.publish_liked_state(&[track], None, None, false);
                         undo = Some(("Убрано из Любимых".to_owned(), Command::Like(LikeTarget::Track(track), true)));
                     }
                 } else if let Ok(entries) = self.lib.playlist_entries(id, 0, u32::MAX)
                     && let Some(at) = entries.iter().position(|e| e.track.id == track)
-                    && self.log_err("плейлист", self.lib.playlist_remove(entries[at].entry.id)).is_some()
+                    && self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.playlist_remove(entries[at].entry.id)).is_some()
                 {
                     let name = self.lib.get_playlist(id).ok().flatten().map_or_else(String::new, |p| p.name);
                     undo = Some((format!("Убрано из «{name}»"), Command::RestoreToPlaylist { playlist: id, track, at }));
@@ -486,7 +486,7 @@ impl Worker {
             }
             Command::RestoreToPlaylist { playlist, track, at } => {
                 let before = self.library_tracks();
-                if self.log_err("плейлист", self.lib.playlist_insert(playlist, track, at)).is_some() {
+                if self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.playlist_insert(playlist, track, at)).is_some() {
                     self.load_playlist(playlist);
                     self.library_edited(before, Vec::new());
                     self.playlist_edited(playlist);
@@ -500,7 +500,7 @@ impl Worker {
                 if let Ok(entries) = self.lib.playlist_entries(playlist, 0, u32::MAX)
                     && let Some(e) = entries.iter().find(|e| e.track.id == track)
                 {
-                    let _ = self.log_err("плейлист", self.lib.playlist_move(e.entry.id, to));
+                    let _ = self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.playlist_move(e.entry.id, to));
                 }
                 self.load_playlist(playlist);
             }
@@ -514,7 +514,7 @@ impl Worker {
             Command::UndoWholeAlbum { id, mine, excluded } => {
                 let before = self.library_tracks();
                 let undo = nikgob_library::WholeUndo { mine, excluded };
-                if self.log_err("альбом", self.lib.undo_release_whole(id, &undo)).is_some() {
+                if self.log_err(nikgob_core::i18n::LibOp::Album.label_in(self.locale()), self.lib.undo_release_whole(id, &undo)).is_some() {
                     self.library_edited(before, vec![id]);
                     self.album_changed(id);
                 }
@@ -523,7 +523,7 @@ impl Worker {
                 // On is kept for the album (karaoke plays only so); off
                 // only against the setting.
                 let versions = self.album_rules().versions_choice(on);
-                if self.log_err("альбом", self.lib.set_release_versions(id, versions)).is_some() {
+                if self.log_err(nikgob_core::i18n::LibOp::Album.label_in(self.locale()), self.lib.set_release_versions(id, versions)).is_some() {
                     self.album_changed(id);
                 }
             }
@@ -534,7 +534,7 @@ impl Worker {
             Command::AlbumTrackMine { release, track, mine } => self.album_track_mine(release, track, mine),
             Command::AlbumTrackChoice { release, track, choice } => {
                 let before = self.library_tracks();
-                if self.log_err("альбом", self.lib.set_track_choice(release, track, choice)).is_some() {
+                if self.log_err(nikgob_core::i18n::LibOp::Album.label_in(self.locale()), self.lib.set_track_choice(release, track, choice)).is_some() {
                     self.library_edited(before, vec![release]);
                     self.album_changed(release);
                 }

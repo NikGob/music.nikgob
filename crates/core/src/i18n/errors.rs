@@ -537,6 +537,50 @@ impl ErrorStrings {
     }
 }
 
+/// What a failed library call was doing: the subject of «Ошибка: …» /
+/// "Error: …" in its toast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LibOp {
+    Playlist,
+    Album,
+    Like,
+    Artist,
+    Cover,
+    Library,
+    TrackFilter,
+    Tracks,
+    StreamTracks,
+    Wishlist,
+}
+
+impl LibOp {
+    /// Its name in `loc`'s words.
+    pub const fn label_in(self, loc: Locale) -> &'static str {
+        match (loc, self) {
+            (Locale::Ru, Self::Playlist) => "плейлист",
+            (Locale::Ru, Self::Album) => "альбом",
+            (Locale::Ru, Self::Like) => "лайк",
+            (Locale::Ru, Self::Artist) => "исполнитель",
+            (Locale::Ru, Self::Cover) => "обложка",
+            (Locale::Ru, Self::Library) => "библиотека",
+            (Locale::Ru, Self::TrackFilter) => "фильтр треков",
+            (Locale::Ru, Self::Tracks) => "треки",
+            (Locale::Ru, Self::StreamTracks) => "стрим-треки",
+            (Locale::Ru, Self::Wishlist) => "wishlist",
+            (Locale::En, Self::Playlist) => "playlist",
+            (Locale::En, Self::Album) => "album",
+            (Locale::En, Self::Like) => "like",
+            (Locale::En, Self::Artist) => "artist",
+            (Locale::En, Self::Cover) => "cover",
+            (Locale::En, Self::Library) => "library",
+            (Locale::En, Self::TrackFilter) => "track filter",
+            (Locale::En, Self::Tracks) => "tracks",
+            (Locale::En, Self::StreamTracks) => "stream tracks",
+            (Locale::En, Self::Wishlist) => "wishlist",
+        }
+    }
+}
+
 pub static RU: ErrorStrings = ErrorStrings {
     nothing_to_play: "Нечего играть",
     failed_save_prefs: "Не удалось сохранить настройки",
