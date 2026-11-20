@@ -166,7 +166,7 @@ fn queue_menu_rows(ctx: &egui::Context, e: &QueueEntry, state: &ViewState) -> Ve
     // Nothing that leads back to the page beside the pane.
     let also = state.also_on.get(&t.id).map(|(r, _)| *r);
     let track = p::here(ctx).trim(track, t, also, Some);
-    let track = p::placed(track, &state.prefs.track_menu, |a| a.menu_item(t.has_local));
+    let track = p::placed(track, &state.prefs.track_menu, |a| a.menu_item(t.has_local && !t.temporary));
     rows.extend(track.into_iter().filter(|r| !matches!(r, Row::Item(TrackAct::Next | TrackAct::Queue, _))).map(|r| r.map(&mut QueueAct::Track)));
     // With «Разные песни»: one last group.
     if !matches!(rows.last(), Some(Row::Item(QueueAct::Track(TrackAct::Apart), _))) {
@@ -1071,8 +1071,9 @@ fn about(ui: &mut Ui, i: &TrackInfo, track: Option<&TrackRow>, out: &mut Vec<Com
         row(ui, k, v);
     }
     let Some(id) = track.map(|t| t.id).or(i.track) else { return };
-    // A file has tags to edit; a stream can be downloaded.
-    let file = track.map_or(i.path.is_some(), |t| t.has_local);
+    // A file has tags to edit; a stream can be downloaded. A temporary
+    // copy gets the download too: it is not the file to be content with.
+    let file = track.map_or(i.path.is_some(), |t| t.has_local && !t.temporary);
     // A clip: its song by hand; a stream from YouTube: another version.
     let find = track.and_then(super::find_song::label);
     ui.add_space(6.0);

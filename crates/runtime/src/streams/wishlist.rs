@@ -113,6 +113,9 @@ pub(crate) enum WishMsg {
         down: Vec<(SourceKey, SourceError)>,
         /// Those of them sitting out, not asked (told as what set them aside).
         paused: Vec<SourceKey>,
+        /// Every source that was asked answered, none errored and none sat
+        /// out: only then is an empty answer a genuine miss.
+        clean: bool,
     },
     Fetched {
         item: WishlistId,
@@ -131,6 +134,8 @@ pub(crate) enum WishMsg {
         /// The run it was ([`crate::running::Runs::reserve`]): a save
         /// stopped or replaced meanwhile is dropped.
         run: u64,
+        /// A save the fallback started by itself: quiet, no toasts.
+        quiet: bool,
         result: Result<PathBuf, StreamError>,
     },
     /// A stopped download's task has ended ([`Worker::stop_run`]).
@@ -167,6 +172,9 @@ pub(crate) struct WishState {
     next_confirm: u64,
     /// Audio saved from YouTube that the importer is taking, by file.
     saving: HashMap<PathBuf, WishlistId>,
+    /// Items waiting for the YouTube-copy save that runs to end, to start
+    /// their own ([`yt_fallback`]).
+    yt_queue: Vec<WishlistId>,
     /// Where each item's running download is (its torrent's, its other
     /// source's, its import's), as the last poll found it: «Хочу скачать»
     /// and «Активные» both show these ([`crate::running`]).
@@ -381,6 +389,9 @@ struct Probe {
     todo: Vec<usize>,
     /// Those whose list has the file.
     passed: HashSet<usize>,
+    /// A probe fetch or inspect failed (not a clean «no file»): an empty
+    /// card then is not a genuine miss.
+    err: bool,
 }
 
 /// Torrents of a track looked into before «Подтверди», at most (each

@@ -38,6 +38,8 @@ impl Worker {
                 i.note = Some(note_code(WishNote::HasCopy));
             });
             self.publish_wishlist();
+            // The slot freed: the next queued fallback save may start.
+            self.yt_fallback_next();
             return;
         }
         let Some(src) = self.lib.active_source(track).ok().flatten() else { return };
@@ -386,6 +388,8 @@ impl Worker {
                 i.note = Some(note_code(WishNote::SaveFailed));
             });
             self.publish_wishlist();
+            // The slot freed: the next queued fallback save may start.
+            self.yt_fallback_next();
         }
     }
 
@@ -745,6 +749,8 @@ impl Worker {
             return;
         }
         self.drop_direct(item);
+        // A stopped save freed its slot: the next queued fallback may start.
+        self.yt_fallback_next();
     }
 
     fn wish_confirm_view(&mut self, item: &WishlistItem) -> v::Confirm {

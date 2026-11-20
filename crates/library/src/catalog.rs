@@ -1500,6 +1500,13 @@ macro_rules! artist_visible {
 pub(crate) const RELEASE_VISIBLE: &str = release_visible!();
 pub(crate) const ARTIST_VISIBLE: &str = artist_visible!();
 
+/// A track's file counts only when it is a real one: a copy saved from a
+/// stream (whose active quality is at most
+/// [`nikgob_core::model::score::SAVED_STREAM`], as in `crate::masters`'
+/// `has_file`) does not. The number is written out below because a `const`
+/// SQL string cannot interpolate it.
+const _: () = assert!(nikgob_core::model::score::SAVED_STREAM == 295);
+
 /// The columns of a [`ReleaseRow`] (alias `r`); deleted tracks count nowhere.
 /// The user's songs of it ([`crate::selection`]) are its page's rows in the
 /// library and not left out of it.
@@ -1518,6 +1525,7 @@ macro_rules! release_row_cols {
                                                    OR (o.disc_no = u.disc_no AND o.track_no = u.track_no)))), 0) END,
                     r.added_at,
                     (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.has_local = 1
+                                                    AND coalesce(t.active_quality, 0) > 295
                                                     AND t.deleted_at IS NULL AND t.in_library = 1),
                     (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.deleted_at IS NULL AND t.in_library = 1),
                     ",
@@ -1532,6 +1540,7 @@ macro_rules! release_row_cols {
             page_row!(),
             "),
                     (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.in_library = 1 AND t.has_local = 1
+                        AND coalesce(t.active_quality, 0) > 295
                         AND NOT ",
             excluded_expr!(),
             " AND ",

@@ -179,6 +179,7 @@ pub(crate) fn stream_row_of(lib: &nikgob_library::Library, t: &StreamTrack, trac
             .unwrap_or(false),
         liked: row.as_ref().is_some_and(|r| r.liked),
         has_local: row.as_ref().is_some_and(|r| r.has_local),
+        temporary: row.as_ref().is_some_and(|r| r.is_temporary()),
         elsewhere: None,
         track,
         also_on: Vec::new(),
@@ -415,7 +416,9 @@ impl Worker {
                 if !view.tracks.is_empty() {
                     let rows = &view.tracks;
                     view.have = v::AlbumHave {
-                        local: rows.iter().filter(|t| t.has_local).count() as u32,
+                        // A temporary copy is had as little as a stream:
+                        // the page counts files, not stand-ins.
+                        local: rows.iter().filter(|t| t.has_local && !t.temporary).count() as u32,
                         in_library: rows.iter().filter(|t| t.in_library).count() as u32,
                         total: rows.len() as u32,
                         mine: view.have.mine,

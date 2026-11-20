@@ -242,9 +242,10 @@ fn release_body(ui: &mut Ui, r: &ReleaseDetail, state: &ViewState, pages: &mut P
             ReleaseLine::Hole { .. } => None,
         })
         .collect();
-    // One line per place shown; the counts are theirs.
+    // One line per place shown; the counts are theirs. A temporary copy
+    // (saved from a stream) is not a download: it counts as lacking.
     let n = lines.len() as u32;
-    let local = shown.iter().filter(|&&i| r.tracks[i].has_local).count() as u32;
+    let local = shown.iter().filter(|&&i| r.tracks[i].has_local && !r.tracks[i].temporary).count() as u32;
     let lacking = n.saturating_sub(local);
     let length: Duration = if mine { shown.iter().filter_map(|&i| r.tracks[i].duration).sum() } else { r.total_duration };
     let head = ReleaseHeader {
@@ -272,7 +273,7 @@ fn release_body(ui: &mut Ui, r: &ReleaseDetail, state: &ViewState, pages: &mut P
     // user's songs of an album only some of which are theirs, the item
     // of one of them without a file.
     let wish = if mine {
-        shown.iter().filter(|&&i| !r.tracks[i].has_local).find_map(|&i| index.of_track(Some(r.tracks[i].id), None))
+        shown.iter().filter(|&&i| !r.tracks[i].has_local || r.tracks[i].temporary).find_map(|&i| index.of_track(Some(r.tracks[i].id), None))
     } else {
         index.of_release(id)
     };
@@ -414,7 +415,7 @@ fn release_body(ui: &mut Ui, r: &ReleaseDetail, state: &ViewState, pages: &mut P
         lines
             .into_iter()
             .filter(|l| match *l {
-                ReleaseLine::Track(i) => !r.tracks[i].has_local,
+                ReleaseLine::Track(i) => !r.tracks[i].has_local || r.tracks[i].temporary,
                 ReleaseLine::Hole { .. } => true,
             })
             .collect()

@@ -166,11 +166,16 @@ fn credit_lines(t: &TrackRow) -> Vec<String> {
 
 /// Lines of `release` with a live file, and all the lines its page has
 /// (its tracks, outside the library too, and the places none has): «13 из
-/// 14» of a «Хочу скачать» album, as its page and card count.
+/// 14» of a «Хочу скачать» album, as its page and card count. A copy saved
+/// from a stream is not a file here: the wishlist keeps looking for a real
+/// one.
 pub fn release_files(lib: &Library, release: ReleaseId) -> Result<(usize, usize)> {
     Ok(lib
         .release_listing(release)?
-        .map_or((0, 0), |l| (l.progress.local as usize, l.progress.total as usize)))
+        .map_or((0, 0), |l| {
+            let local = l.tracks().filter(|t| t.has_local && !t.is_temporary()).count();
+            (local, l.progress.total as usize)
+        }))
 }
 
 impl Importer {

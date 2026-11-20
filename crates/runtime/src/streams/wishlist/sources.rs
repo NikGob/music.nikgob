@@ -86,7 +86,7 @@ impl Worker {
                     .tracks_of_release(r.id)
                     .unwrap_or_default()
                     .into_iter()
-                    .filter(|t| t.has_local)
+                    .filter(|t| super::items::has_real_file(t))
                     .map(|t| t.title)
                     .chain(self.lib.unwanted_of_release(r.id).unwrap_or_default().into_iter().map(|u| u.title))
                     .collect(),

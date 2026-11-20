@@ -396,7 +396,7 @@ impl Worker {
         let listing = self.lib.release_listing(release).ok().flatten();
         let rules = self.album_rules();
         if let Some((l, plan)) = listing.as_ref().map(|l| (l, l.plan(rules))).filter(|(_, plan)| plan.split) {
-            let missing: Vec<TrackId> = l.tracks().filter(|t| !t.has_local && plan.mine.contains(&t.id)).map(|t| t.id).collect();
+            let missing: Vec<TrackId> = l.tracks().filter(|t| !has_real_file(t) && plan.mine.contains(&t.id)).map(|t| t.id).collect();
             self.download_tracks(&missing);
             return;
         }

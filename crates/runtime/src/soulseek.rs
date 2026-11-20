@@ -517,10 +517,25 @@ pub(crate) fn album_offers(albums: &[AlbumResult]) -> Vec<Offer> {
         .collect()
 }
 
+/// A task on the client's runtime, stopped when its caller goes: a
+/// JoinHandle alone leaves the task running, so a search stopped before
+/// its turn would still be sent (and a fetch nobody waits for costs
+/// a whole search's wait).
+struct Stop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for Stop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl SlskSource {
-    /// Runs `f` on the client's own runtime and waits for it here.
+    /// Runs `f` on the client's own runtime and waits for it here; `f` is
+    /// aborted when the caller stops waiting.
     async fn on<T: Send + 'static>(&self, f: impl Future<Output = T> + Send + 'static) -> Result<T, SourceError> {
-        self.rt.spawn(f).await.map_err(|e| SourceError::Unreachable(e.to_string()))
+        let task = self.rt.spawn(f);
+        let _abort = Stop(task.clone());
+        task.await.map_err(|e| SourceError::Unreachable(e.to_string()))
     }
 
     async fn search_text(&self, text: String, kind: QueryKind) -> Result<Vec<SearchResult>, SourceError> {

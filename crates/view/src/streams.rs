@@ -98,6 +98,10 @@ pub struct StreamTrackRow {
     pub in_library: bool,
     /// The library has a file of it.
     pub has_local: bool,
+    /// That file is a temporary copy (saved from a stream), not a real
+    /// one: the row still asks for the download.
+    #[serde(default)]
+    pub temporary: bool,
     /// On an album page: the library album the track is on when it is not
     /// the page's own («у тебя в «… (Deluxe)»»).
     pub elsewhere: Option<String>,

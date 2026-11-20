@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nikgob_core::indexer::BoxFuture;
-use nikgob_core::source::{Fetched, Offer, Progress, Source, SourceError, SourceKey, Want};
+use nikgob_core::source::{Fetched, Offer, Progress, Source, SourceError, SourceKey, Want, WantScope};
 
 use crate::matching;
 use crate::qobuz;
@@ -64,6 +64,14 @@ trait Backend: Send + Sync {
     /// The prefix of the handles this backend makes.
     fn key(&self) -> &'static str;
 
+    /// The sites it is asked at, as it was built: a list that did not
+    /// change keeps its backend, and with it the pauses of its sites.
+    fn sites(&self) -> Vec<String>;
+
+    /// Whether it has anything for `scope` at all: a backend that lists
+    /// only tracks is not asked for an album.
+    fn supports(&self, scope: WantScope) -> bool;
+
     fn search<'a>(&'a self, want: &'a Want) -> BoxFuture<'a, Result<Vec<Offer>, SourceError>>;
 
     fn fetch<'a>(
@@ -81,14 +89,16 @@ trait Backend: Send + Sync {
 struct Delegated {
     key: &'static str,
     name: &'static str,
+    /// The sites it was built with.
+    sites: Vec<String>,
     /// The key the inner source's own offers carry.
     inner_key: SourceKey,
     inner: Arc<dyn Source>,
 }
 
 impl Delegated {
-    fn new(key: &'static str, name: &'static str, inner: Arc<dyn Source>) -> Self {
-        Self { key, name, inner_key: inner.key(), inner }
+    fn new(key: &'static str, name: &'static str, sites: &[String], inner: Arc<dyn Source>) -> Self {
+        Self { key, name, sites: sites.to_vec(), inner_key: inner.key(), inner }
     }
 
     /// The offer as the inner source made it: its own key, and the handle
@@ -123,6 +133,15 @@ impl Backend for Delegated {
         self.key
     }
 
+    fn sites(&self) -> Vec<String> {
+        self.sites.clone()
+    }
+
+    /// Qobuz-DL and hifi-api list albums as well as tracks.
+    fn supports(&self, _scope: WantScope) -> bool {
+        true
+    }
+
     fn search<'a>(&'a self, want: &'a Want) -> BoxFuture<'a, Result<Vec<Offer>, SourceError>> {
         Box::pin(async move {
             let found = self.inner.search(want).await?;
@@ -144,29 +163,89 @@ impl Backend for Delegated {
     }
 }
 
+/// The kinds of backend, in the order they are asked.
+#[derive(Clone, Copy)]
+enum Kind {
+    QobuzDl,
+    Hifi,
+    Rhythmax,
+}
+
+impl Kind {
+    const ALL: [Self; 3] = [Self::QobuzDl, Self::Hifi, Self::Rhythmax];
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::QobuzDl => "qobuz-dl",
+            Self::Hifi => "hifi",
+            Self::Rhythmax => "rhythmax",
+        }
+    }
+
+    /// The sites `sites` names for this kind.
+    fn list<'a>(self, sites: &'a Sites) -> &'a [String] {
+        match self {
+            Self::QobuzDl => &sites.qobuz_dl,
+            Self::Hifi => &sites.hifi,
+            Self::Rhythmax => &sites.rhythmax,
+        }
+    }
+
+    fn build(self, urls: &[String]) -> Arc<dyn Backend> {
+        match self {
+            Self::QobuzDl => {
+                let inner = qobuz::Qobuz::from_list(urls, true, PACE);
+                Arc::new(Delegated::new("qobuz-dl", "Qobuz-DL", urls, Arc::new(inner)))
+            }
+            Self::Hifi => {
+                let inner = tidal::Tidal::from_list(urls, true, PACE);
+                Arc::new(Delegated::new("hifi", "hifi-api", urls, Arc::new(inner)))
+            }
+            Self::Rhythmax => Arc::new(rhythmax::Rhythmax::new(urls)),
+        }
+    }
+}
+
 pub struct Junkyard {
     /// Asked in this order; the first that gives a lossless offer of the
-    /// wish ends the search.
-    backends: Vec<Box<dyn Backend>>,
+    /// wish ends the search. `sources.toml` can change the list while the
+    /// app runs, so it sits behind a lock and a call works on a copy.
+    backends: std::sync::Mutex<Vec<Arc<dyn Backend>>>,
 }
 
 impl Junkyard {
     /// The backends whose list `sites` names. A kind with no address is
     /// not asked at all.
     pub fn new(sites: &Sites) -> Self {
-        let mut backends: Vec<Box<dyn Backend>> = Vec::new();
-        if !sites.qobuz_dl.is_empty() {
-            let inner = qobuz::Qobuz::from_list(&sites.qobuz_dl, true, PACE);
-            backends.push(Box::new(Delegated::new("qobuz-dl", "Qobuz-DL", Arc::new(inner))));
+        Self::of(Kind::ALL.iter().filter(|k| !k.list(sites).is_empty()).map(|k| k.build(k.list(sites))).collect())
+    }
+
+    fn of(backends: Vec<Arc<dyn Backend>>) -> Self {
+        Self { backends: std::sync::Mutex::new(backends) }
+    }
+
+    /// The backends asked now, in order.
+    fn now(&self) -> Vec<Arc<dyn Backend>> {
+        self.backends.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// The sites `sources.toml` names now. A kind whose list did not change
+    /// keeps its backend, and with it the pauses of its sites.
+    pub fn set_sites(&self, sites: &Sites) {
+        let mut backends = self.backends.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut next: Vec<Arc<dyn Backend>> = Vec::new();
+        for kind in Kind::ALL {
+            let urls = kind.list(sites);
+            if urls.is_empty() {
+                continue;
+            }
+            let kept = backends.iter().find(|b| b.key() == kind.key() && b.sites().as_slice() == urls);
+            next.push(match kept {
+                Some(b) => b.clone(),
+                None => kind.build(urls),
+            });
         }
-        if !sites.hifi.is_empty() {
-            let inner = tidal::Tidal::from_list(&sites.hifi, true, PACE);
-            backends.push(Box::new(Delegated::new("hifi", "hifi-api", Arc::new(inner))));
-        }
-        if !sites.rhythmax.is_empty() {
-            backends.push(Box::new(rhythmax::Rhythmax::new(&sites.rhythmax)));
-        }
-        Self { backends }
+        *backends = next;
     }
 }
 
@@ -176,12 +255,24 @@ impl Default for Junkyard {
     }
 }
 
-/// The error of the backend that comes back soonest: the shortest wait one
-/// asked for, else the first one that said nothing of a wait.
+/// How long the wishlist sits the whole source out for `e`: a check or a
+/// rate limit pauses it ([`crate::http::pause_for`]), an HTTP strike only
+/// counts towards one, and anything else does not pause it at all. An error
+/// that costs no pause ranks first, so one backend's quota never borrows
+/// another backend's pause for the source.
+fn pause_of(e: &SourceError) -> u64 {
+    if crate::http::is_check(e) || matches!(e, SourceError::RateLimited { .. }) {
+        return crate::http::pause_for(e, 0).as_secs();
+    }
+    0
+}
+
+/// The error of the backend that comes back soonest: the shortest pause
+/// the wishlist would take from it, else the first one that costs none.
 fn soonest(errors: Vec<SourceError>) -> SourceError {
     let mut best: Option<(u64, SourceError)> = None;
     for e in errors {
-        let rank = e.wait().map_or(u64::MAX, |d| d.as_secs());
+        let rank = pause_of(&e);
         if best.as_ref().is_none_or(|(r, _)| rank < *r) {
             best = Some((rank, e));
         }
@@ -200,13 +291,16 @@ impl Source for Junkyard {
 
     fn search<'a>(&'a self, want: &'a Want) -> BoxFuture<'a, Result<Vec<Offer>, SourceError>> {
         Box::pin(async move {
-            if self.backends.is_empty() {
+            let backends: Vec<Arc<dyn Backend>> = self.now().into_iter().filter(|b| b.supports(want.scope)).collect();
+            // Nothing that could answer this at all: not a miss, and not a
+            // pause either.
+            if backends.is_empty() {
                 return Err(SourceError::NotConfigured);
             }
             let mut offers: Vec<Offer> = Vec::new();
             let mut errors: Vec<SourceError> = Vec::new();
             let mut answered = false;
-            for backend in &self.backends {
+            for backend in &backends {
                 match backend.search(want).await {
                     Ok(found) => {
                         answered = true;
@@ -239,9 +333,28 @@ impl Source for Junkyard {
         progress: Progress,
     ) -> BoxFuture<'a, Result<Fetched, SourceError>> {
         Box::pin(async move {
+            let backends = self.now();
             let key = offer.handle.split_once(':').map_or("", |(k, _)| k);
-            let backend = self.backends.iter().find(|b| b.key() == key).ok_or(SourceError::NotConfigured)?;
-            backend.fetch(offer, want, dest, progress).await
+            let Some(at) = backends.iter().position(|b| b.key() == key) else {
+                return Err(SourceError::NotConfigured);
+            };
+            match backends[at].fetch(offer, want, dest, progress.clone()).await {
+                // One site turning the file away is not the whole source
+                // sitting out: another backend may have the same track.
+                Err(e) if e.is_refusal() => {
+                    log::info!("junkyard: {} turned the file away: {e}", backends[at].name());
+                    for other in backends.iter().filter(|b| b.key() != key && b.supports(want.scope)) {
+                        let Ok(found) = other.search(want).await else { continue };
+                        let best = found.into_iter().filter(|o| matching::judge(o, want).is_some()).max_by_key(Offer::quality);
+                        let Some(best) = best else { continue };
+                        if let Ok(got) = other.fetch(&best, want, dest, progress.clone()).await {
+                            return Ok(got);
+                        }
+                    }
+                    Err(e)
+                }
+                r => r,
+            }
         })
     }
 }
@@ -249,6 +362,7 @@ impl Source for Junkyard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -294,12 +408,33 @@ mod tests {
     struct Fake {
         key: &'static str,
         answer: Result<Vec<Offer>, SourceError>,
+        /// What a fetch of one of its offers gives, or refuses with.
+        file: Result<PathBuf, SourceError>,
         asked: Arc<AtomicUsize>,
+        /// Whether it has anything for an album.
+        albums: bool,
     }
 
     impl Fake {
         fn new(key: &'static str, answer: Result<Vec<Offer>, SourceError>) -> Self {
-            Self { key, answer, asked: Arc::new(AtomicUsize::new(0)) }
+            Self {
+                key,
+                answer,
+                file: Err(SourceError::NothingToFetch),
+                asked: Arc::new(AtomicUsize::new(0)),
+                albums: true,
+            }
+        }
+
+        /// A backend that lists tracks only, as Rhythmax does.
+        fn tracks_only(key: &'static str, answer: Result<Vec<Offer>, SourceError>) -> Self {
+            Self { albums: false, ..Self::new(key, answer) }
+        }
+
+        /// The file it gives, or the error it refuses with.
+        fn file(mut self, file: Result<&str, SourceError>) -> Self {
+            self.file = file.map(PathBuf::from);
+            self
         }
 
         fn counter(&self) -> Arc<AtomicUsize> {
@@ -316,6 +451,14 @@ mod tests {
             self.key
         }
 
+        fn sites(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn supports(&self, scope: WantScope) -> bool {
+            self.albums || scope == WantScope::Track
+        }
+
         fn search<'a>(&'a self, _want: &'a Want) -> BoxFuture<'a, Result<Vec<Offer>, SourceError>> {
             Box::pin(async move {
                 self.asked.fetch_add(1, Ordering::Relaxed);
@@ -330,7 +473,7 @@ mod tests {
             _dest: &'a Path,
             _progress: Progress,
         ) -> BoxFuture<'a, Result<Fetched, SourceError>> {
-            Box::pin(async move { Err(SourceError::NothingToFetch) })
+            Box::pin(async move { self.file.clone().map(|p| Fetched::Files(vec![p])) })
         }
     }
 
@@ -375,12 +518,10 @@ mod tests {
     /// One backend behind a check is skipped; the next one serves.
     #[tokio::test]
     async fn a_backend_that_sits_out_does_not_stop_the_others() {
-        let junkyard = Junkyard {
-            backends: vec![
-                Box::new(Fake::new("blocked", Err(SourceError::Blocked("a bot check".into())))),
-                Box::new(Fake::new("works", Ok(vec![offer("works:1", true)]))),
-            ],
-        };
+        let junkyard = Junkyard::of(vec![
+            Arc::new(Fake::new("blocked", Err(SourceError::Blocked("a bot check".into())))),
+            Arc::new(Fake::new("works", Ok(vec![offer("works:1", true)]))),
+        ]);
         let got = junkyard.search(&want()).await.unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].handle, "works:1");
@@ -390,27 +531,43 @@ mod tests {
     /// back soonest; one backend that answered with nothing is not.
     #[tokio::test]
     async fn the_error_is_told_only_when_every_backend_sits_out() {
-        let junkyard = Junkyard {
-            backends: vec![
-                Box::new(Fake::new(
-                    "long",
-                    Err(SourceError::RateLimited { retry_after: Some(Duration::from_secs(6 * 3600)) }),
-                )),
-                Box::new(Fake::new("short", Err(SourceError::RateLimited { retry_after: Some(Duration::from_secs(60)) }))),
-            ],
-        };
+        let junkyard = Junkyard::of(vec![
+            Arc::new(Fake::new(
+                "long",
+                Err(SourceError::RateLimited { retry_after: Some(Duration::from_secs(6 * 3600)) }),
+            )),
+            Arc::new(Fake::new("short", Err(SourceError::RateLimited { retry_after: Some(Duration::from_secs(60)) }))),
+        ]);
         assert_eq!(
             junkyard.search(&want()).await.unwrap_err(),
             SourceError::RateLimited { retry_after: Some(Duration::from_secs(60)) },
             "the backend that comes back soonest is the one told"
         );
-        let one_answered = Junkyard {
-            backends: vec![
-                Box::new(Fake::new("blocked", Err(SourceError::Blocked("a bot check".into())))),
-                Box::new(Fake::new("empty", Ok(Vec::new()))),
-            ],
-        };
+        let one_answered = Junkyard::of(vec![
+            Arc::new(Fake::new("blocked", Err(SourceError::Blocked("a bot check".into())))),
+            Arc::new(Fake::new("empty", Ok(Vec::new()))),
+        ]);
         assert!(one_answered.search(&want()).await.unwrap().is_empty(), "one answered: not an error");
+    }
+
+    /// An error the wishlist does not pause the source for is told ahead of
+    /// one it does: a backend that timed out must not borrow another
+    /// backend's three-hour check for the whole source.
+    #[tokio::test]
+    async fn a_transient_failure_is_told_ahead_of_a_long_pause() {
+        let junkyard = Junkyard::of(vec![
+            Arc::new(Fake::new("checked", Err(SourceError::Blocked(crate::http::BOT_CHECK.into())))),
+            Arc::new(Fake::new("timed-out", Err(SourceError::Unreachable("timed out".into())))),
+        ]);
+        assert_eq!(
+            junkyard.search(&want()).await.unwrap_err(),
+            SourceError::Unreachable("timed out".into()),
+            "the error that costs the source no pause is the one told"
+        );
+        assert_eq!(pause_of(&SourceError::Unreachable("dns".into())), 0);
+        assert_eq!(pause_of(&SourceError::Http { status: 403 }), 0, "a strike, not a pause");
+        assert_eq!(pause_of(&SourceError::Blocked(crate::http::BOT_CHECK.into())), crate::http::BLOCKED_PAUSE.as_secs());
+        assert_eq!(pause_of(&SourceError::RateLimited { retry_after: Some(Duration::from_secs(60)) }), 60);
     }
 
     /// A lossless offer of the wish ends the search; a lossy one does not.
@@ -419,7 +576,7 @@ mod tests {
         let first = Fake::new("first", Ok(vec![offer("first:1", true)]));
         let (first_asked, second) = (first.counter(), Fake::new("second", Ok(vec![offer("second:1", true)])));
         let second_asked = second.counter();
-        let junkyard = Junkyard { backends: vec![Box::new(first), Box::new(second)] };
+        let junkyard = Junkyard::of(vec![Arc::new(first), Arc::new(second)]);
         assert_eq!(junkyard.search(&want()).await.unwrap().len(), 1);
         assert_eq!(first_asked.load(Ordering::Relaxed), 1);
         assert_eq!(second_asked.load(Ordering::Relaxed), 0, "the second backend is not asked");
@@ -427,7 +584,7 @@ mod tests {
         let first = Fake::new("first", Ok(vec![offer("first:1", false)]));
         let (first_asked, second) = (first.counter(), Fake::new("second", Ok(vec![offer("second:1", true)])));
         let second_asked = second.counter();
-        let junkyard = Junkyard { backends: vec![Box::new(first), Box::new(second)] };
+        let junkyard = Junkyard::of(vec![Arc::new(first), Arc::new(second)]);
         assert_eq!(junkyard.search(&want()).await.unwrap().len(), 2, "a lossy offer is not enough");
         assert_eq!(first_asked.load(Ordering::Relaxed), 1);
         assert_eq!(second_asked.load(Ordering::Relaxed), 1);
@@ -439,15 +596,51 @@ mod tests {
     async fn an_offer_says_its_backend_and_fetches_through_it() {
         let fetched = Arc::new(Mutex::new(Vec::new()));
         let inner = Arc::new(Inner { key: SourceKey::Qobuz, fetched: fetched.clone() });
-        let backend = Delegated::new("qobuz-dl", "Qobuz-DL", inner);
+        let backend = Delegated::new("qobuz-dl", "Qobuz-DL", &["https://q.example".to_owned()], inner);
         let found = backend.search(&want()).await.unwrap();
         assert_eq!(found[0].source, SourceKey::Junkyard);
         assert_eq!(found[0].provider, "Qobuz-DL");
         assert_eq!(found[0].handle, "qobuz-dl:album:7");
         assert_eq!(found[0].id, "qobuz-dl:album:7");
-        let junkyard = Junkyard { backends: vec![Box::new(backend)] };
+        let junkyard = Junkyard::of(vec![Arc::new(backend)]);
         junkyard.fetch(&found[0], &want(), Path::new("."), progress()).await.unwrap();
         assert_eq!(*fetched.lock().unwrap(), ["album:7"], "the inner source gets its own handle back");
+    }
+
+    /// A backend that lists only tracks is not asked for an album, and a
+    /// source with nothing for albums says so instead of answering empty.
+    #[tokio::test]
+    async fn an_album_is_not_asked_of_a_backend_that_lists_only_tracks() {
+        let tracks = Fake::tracks_only("tracks", Ok(vec![offer("tracks:1", true)]));
+        let asked = tracks.counter();
+        let junkyard = Junkyard::of(vec![Arc::new(tracks)]);
+        let album = Want { scope: WantScope::Album, title: None, ..want() };
+        assert_eq!(junkyard.search(&album).await.unwrap_err(), SourceError::NotConfigured);
+        assert_eq!(asked.load(Ordering::Relaxed), 0, "it is not asked at all");
+        assert_eq!(junkyard.search(&want()).await.unwrap().len(), 1, "a track is still its");
+    }
+
+    /// A refused file is asked of the other backends before the whole
+    /// source is told it was turned away.
+    #[tokio::test]
+    async fn a_refused_file_is_asked_of_another_backend() {
+        let first = Fake::new("first", Ok(vec![offer("first:1", true)])).file(Err(SourceError::Http { status: 403 }));
+        let second = Fake::new("second", Ok(vec![offer("second:1", true)])).file(Ok("second.flac"));
+        let junkyard = Junkyard::of(vec![Arc::new(first), Arc::new(second)]);
+        let found = junkyard.search(&want()).await.unwrap();
+        assert_eq!(found.len(), 1, "the first backend's lossless offer ends the search");
+        let got = junkyard.fetch(&found[0], &want(), Path::new("."), progress()).await.unwrap();
+        let Fetched::Files(files) = got else { panic!("{got:?}") };
+        assert_eq!(files, [PathBuf::from("second.flac")], "the other backend served it");
+
+        // Every backend refusing is the refusal, as before.
+        let only = Fake::new("only", Ok(vec![offer("only:1", true)])).file(Err(SourceError::Http { status: 403 }));
+        let junkyard = Junkyard::of(vec![Arc::new(only)]);
+        let found = junkyard.search(&want()).await.unwrap();
+        assert_eq!(
+            junkyard.fetch(&found[0], &want(), Path::new("."), progress()).await.unwrap_err(),
+            SourceError::Http { status: 403 }
+        );
     }
 
     /// No site named: nothing is asked, and the source says it is not
@@ -468,14 +661,32 @@ mod tests {
     #[test]
     fn a_site_list_makes_its_backend() {
         let junkyard = Junkyard::new(&Sites { qobuz_dl: vec!["https://q.example".into()], ..Sites::default() });
-        assert_eq!(junkyard.backends.len(), 1);
-        assert_eq!(junkyard.backends[0].key(), "qobuz-dl");
+        assert_eq!(junkyard.now().len(), 1);
+        assert_eq!(junkyard.now()[0].key(), "qobuz-dl");
         let both = Junkyard::new(&Sites {
             qobuz_dl: vec!["https://q.example".into()],
             hifi: vec!["https://h.example".into()],
             rhythmax: vec!["https://r.example".into()],
         });
-        assert_eq!(both.backends.iter().map(|b| b.key()).collect::<Vec<_>>(), ["qobuz-dl", "hifi", "rhythmax"]);
+        assert_eq!(both.now().iter().map(|b| b.key()).collect::<Vec<_>>(), ["qobuz-dl", "hifi", "rhythmax"]);
+    }
+
+    /// A new list keeps the backend whose sites did not change, and with it
+    /// the pauses of its sites; a kind it drops is not asked any more.
+    #[test]
+    fn a_new_list_keeps_the_backend_whose_sites_did_not_change() {
+        let junkyard = Junkyard::new(&Sites { qobuz_dl: vec!["https://q.example".into()], ..Sites::default() });
+        let before = junkyard.now()[0].clone();
+        junkyard.set_sites(&Sites {
+            qobuz_dl: vec!["https://q.example".into()],
+            hifi: vec!["https://h.example".into()],
+            rhythmax: Vec::new(),
+        });
+        let after = junkyard.now();
+        assert_eq!(after.iter().map(|b| b.key()).collect::<Vec<_>>(), ["qobuz-dl", "hifi"]);
+        assert!(Arc::ptr_eq(&before, &after[0]), "the unchanged backend is the same one");
+        junkyard.set_sites(&Sites { hifi: vec!["https://h.example".into()], ..Sites::default() });
+        assert_eq!(junkyard.now().iter().map(|b| b.key()).collect::<Vec<_>>(), ["hifi"], "a dropped kind goes");
     }
 
     /// A Qobuz-DL answer, trimmed to what the source reads, becomes an
@@ -507,7 +718,8 @@ mod tests {
             .mount(&server)
             .await;
         let inner = qobuz::Qobuz::from_list(&[server.uri()], true, Duration::ZERO);
-        let junkyard = Junkyard { backends: vec![Box::new(Delegated::new("qobuz-dl", "Qobuz-DL", Arc::new(inner)))] };
+        let backend = Delegated::new("qobuz-dl", "Qobuz-DL", &[server.uri()], Arc::new(inner));
+        let junkyard = Junkyard::of(vec![Arc::new(backend)]);
         let got = junkyard.search(&want()).await.unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].source, SourceKey::Junkyard);

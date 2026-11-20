@@ -1,39 +1,21 @@
 //! The «Копия с YouTube» preference: a wished track that no source has is
 //! saved from YouTube Music by itself, quietly. The pipeline calls
 //! [`Worker::wish_nothing_found`] only where it concludes «nothing
-//! anywhere» — every source that was asked answered, and none had a sure
-//! offer; a source that was silent, paused, rate-limited or turned us away
-//! leads to [`Worker::wish_later`] (or «источники молчат») instead, never
-//! to a save. The save is the manual one's
-//! ([`Worker::wish_save_from_youtube`]) without its toasts: a failure just
-//! leaves the item «не нашёл», and its «История» line is the same
+//! anywhere» and every source that was asked answered — a source that was
+//! silent, paused, rate-limited, unconfigured or turned us away leads to
+//! [`Worker::wish_later`] (or «источники молчат») instead, never to a save,
+//! and so does a torrent probe that failed to fetch or list. The save is
+//! the manual one's ([`Worker::wish_save_from_youtube`]) without its toasts
+//! (`quiet` on [`WishMsg::Saved`]): a failure just leaves the item «не
+//! нашёл», and its «История» line is the same
 //! ([`nikgob_core::i18n::status::StoredLine::SavingFromYoutube`]). A music
-//! video or a short is never saved: only a source scored at least
-//! [`score::STREAM_YOUTUBE`], or a clip's song counterpart when that is all
-//! there is. At most one such save runs at a time; the rest wait for a
-//! later wishlist tick.
+//! video, an upload or a short is never saved: only a source scored at
+//! least [`score::STREAM_YOUTUBE`], or a clip's song counterpart when that
+//! is all there is. At most one such save runs at a time; the rest wait in
+//! [`WishState::yt_queue`] for the running one to end.
 
 use super::*;
-use nikgob_core::streaming::{RemoteId, StreamService, StreamTrack};
-
-/// Run tokens of the saves this module started, for [`Worker::wish_saved`]
-/// to tell them from the manual ones (quiet, no toasts). A token is never
-/// reused ([`crate::running::Runs::reserve`]).
-static FALLBACK_RUNS: parking_lot::Mutex<Vec<u64>> = parking_lot::Mutex::new(Vec::new());
-
-/// Remembers `run` as a save started by the fallback.
-fn mark_fallback_run(run: u64) {
-    FALLBACK_RUNS.lock().push(run);
-}
-
-/// Whether `run` was started by the fallback (and forgets it).
-pub(super) fn take_fallback_run(run: u64) -> bool {
-    let mut runs = FALLBACK_RUNS.lock();
-    runs.iter().position(|r| *r == run).is_some_and(|at| {
-        runs.remove(at);
-        true
-    })
-}
+use nikgob_core::streaming::{RemoteId, StreamService, StreamTrack, TrackKind};
 
 /// Under this length a video is a short, unless the wished track is about
 /// as long (a genuinely short song).
@@ -64,17 +46,17 @@ fn duration_fits(video_ms: Option<u64>, track_ms: Option<u64>) -> bool {
     }
 }
 
-/// Whether the fallback may save for `item` now: the preference is on, it
-/// is a track item that is not a better-copy lookup and has no copy yet,
-/// the YouTube service is on, and no such save runs already.
-fn gate(item: &WishlistItem, pref: bool, has_copy: bool, yt_on: bool, busy: bool) -> bool {
+/// Whether the fallback applies to `item` at all: the preference is on, it
+/// is a track item that is not a better-copy lookup and is still looking,
+/// it has no copy yet, and the YouTube service is on.
+fn gate(item: &WishlistItem, pref: bool, has_copy: bool, yt_on: bool) -> bool {
     pref
+        && matches!(item.status, WishlistStatus::Searching | WishlistStatus::NoTorrent)
         && item.scope == WishlistScope::Track
         && item.origin != WishlistOrigin::Upgrade
         && item.track_id.is_some()
         && !has_copy
         && yt_on
-        && !busy
 }
 
 /// The track's best YouTube source, as the manual save takes it: the
@@ -96,52 +78,81 @@ fn ok_to_save(t: &StreamTrack, track_ms: Option<u64>, refused: &[String]) -> boo
     !refused.iter().any(|r| *r == t.id.id) && !marks_short(&t.title) && duration_fits(t.duration_ms, track_ms)
 }
 
+/// What trying the fallback for an item did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Fallback {
+    /// The save started.
+    Started,
+    /// Everything is in place but another YouTube-copy save runs: the item
+    /// is queued for when it ends.
+    Queued,
+    /// Not applicable (preference off, not a plain track wish, a copy
+    /// exists, YouTube off, no YouTube source, ...).
+    No,
+}
+
 impl Worker {
     /// What the pipeline does when a search of `id` found nothing
-    /// anywhere: «не нашёл», told as usual, and with the «Копия с YouTube»
-    /// preference on, the YouTube copy saved by itself. Only the two
-    /// conclusions of a search call this — the ones where every source that
-    /// was asked answered and none turned the item away.
-    pub(super) fn wish_nothing_found(&mut self, id: WishlistId) {
+    /// anywhere: with the «Копия с YouTube» preference on and every asked
+    /// source answering (`clean`), the YouTube copy is saved by itself —
+    /// then without the «ничего не нашлось» toast; else «не нашёл», told as
+    /// usual. Only the two conclusions of a search call this.
+    pub(super) fn wish_nothing_found(&mut self, id: WishlistId, clean: bool) {
+        if clean {
+            match self.yt_fallback_try(id) {
+                // The copy is on its way: no «ничего не нашлось» toast.
+                Fallback::Started => return,
+                // Queued for when the running save ends: not found for now.
+                Fallback::Queued => {
+                    self.no_torrent(id, false);
+                    return;
+                }
+                Fallback::No => {}
+            }
+        }
         self.no_torrent(id, true);
-        self.yt_fallback_try(id);
     }
 
-    /// Saves the item's track from YouTube Music by itself, quietly: the
-    /// save runs like the manual one's (its run, its «История» line), only
-    /// without toasts. Nothing is started when the preference is off, the
-    /// item is not a plain track wish, it has a copy already, YouTube is
-    /// off, another such save runs, or the track has no YouTube source.
-    pub(super) fn yt_fallback_try(&mut self, id: WishlistId) {
+    /// Tries to save the item's track from YouTube Music by itself, quietly:
+    /// the save runs like the manual one's (its run, its «История» line),
+    /// only without toasts.
+    pub(super) fn yt_fallback_try(&mut self, id: WishlistId) -> Fallback {
         let pref = self.state.read().prefs.youtube_fallback;
-        let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
+        let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return Fallback::No };
         let has_copy = self.copy_quality(&item).is_some();
         let yt = self.service(Service::Youtube);
-        if !gate(&item, pref, has_copy, yt.is_some(), self.yt_save_running()) {
-            return;
+        if !gate(&item, pref, has_copy, yt.is_some()) {
+            return Fallback::No;
         }
-        let Some(yt) = yt else { return };
-        let Some(track) = item.track_id else { return };
+        let Some(yt) = yt else { return Fallback::No };
+        let Some(track) = item.track_id else { return Fallback::No };
         let sources = self.lib.sources_of_track(track).unwrap_or_default();
-        let Some((locator, clip)) = best_youtube_source(&sources) else { return };
-        let Some(t) = self.lib.get_track(track).ok().flatten() else { return };
+        let Some((locator, clip)) = best_youtube_source(&sources) else { return Fallback::No };
+        let Some(t) = self.lib.get_track(track).ok().flatten() else { return Fallback::No };
         // The raw title of the track: the title the searching uses has the
         // clip words stripped, the raw one does not.
         if marks_short(&t.title) {
-            return;
+            return Fallback::No;
         }
         let track_ms = t.duration_ms.map(u64::from);
         let refused = self.refused_videos();
         if refused.iter().any(|r| *r == locator) {
-            return;
+            return Fallback::No;
+        }
+        // At most one such save at a time: the rest wait for it to end.
+        if self.yt_save_running() {
+            let q = &mut self.streaming.wish.yt_queue;
+            if !q.contains(&id) {
+                q.push(id);
+            }
+            return Fallback::Queued;
         }
         let known = self.streaming.known.get(&RemoteId::new(Service::Youtube, locator.as_str())).cloned();
         let dir = self.save_dir();
         let run = self.streaming.wish.runs.reserve();
-        mark_fallback_run(run);
         let task = self.streaming.spawn(async move {
             let result = save_yt_copy(&yt, &locator, clip, known, track_ms, &refused, &dir).await;
-            Msg::Wish(WishMsg::Saved { item: id, track, run, result })
+            Msg::Wish(WishMsg::Saved { item: id, track, run, quiet: true, result })
         });
         self.set_item(id, |i| {
             i.status = WishlistStatus::Downloading;
@@ -152,6 +163,26 @@ impl Worker {
         self.streaming.wish.runs.start(id, run, title, "YouTube".into(), None, None, Some(task));
         self.publish_wishlist();
         self.publish_running();
+        Fallback::Started
+    }
+
+    /// Starts the next queued fallback save, if a slot freed now.
+    pub(super) fn yt_fallback_next(&mut self) {
+        loop {
+            let Some(id) = self.streaming.wish.yt_queue.first().copied() else { return };
+            match self.yt_fallback_try(id) {
+                Fallback::Started => {
+                    self.streaming.wish.yt_queue.retain(|q| *q != id);
+                    return; // one at a time
+                }
+                // Still busy: it stays queued.
+                Fallback::Queued => return,
+                // No longer applicable (a copy came, it was dismissed): drop it.
+                Fallback::No => {
+                    self.streaming.wish.yt_queue.retain(|q| *q != id);
+                }
+            }
+        }
     }
 
     /// A save from YouTube runs already (its run, or its file the importer
@@ -173,7 +204,8 @@ impl Worker {
 
 /// Saves the audio of the track's best YouTube source into `dir`: the
 /// video's own data is asked of the service when the app has not seen it
-/// yet; when the best source is only a clip, its song counterpart is used,
+/// yet; when the best source is only a clip — or the video turns out not to
+/// be a song whatever its stored score says — its song counterpart is used,
 /// and only when found. A video that is a short or a preview, or one the
 /// user marked wrong before, is not saved: `Err` then, a quiet skip.
 async fn save_yt_copy(
@@ -192,9 +224,12 @@ async fn save_yt_copy(
     if !ok_to_save(&video, track_ms, refused) {
         return Err(StreamError::Unavailable);
     }
+    // A music video or an upload is never saved directly, whatever its
+    // stored score says: only a song is.
+    let clip = clip || video.kind != TrackKind::Song;
     let save_id = if clip {
         match yt.song_for_video(&video).await? {
-            Some(song) if ok_to_save(&song, track_ms, refused) => song.id.id,
+            Some(song) if song.kind == TrackKind::Song && ok_to_save(&song, track_ms, refused) => song.id.id,
             _ => return Err(StreamError::Unavailable),
         }
     } else {
@@ -214,7 +249,7 @@ mod tests {
     }
 
     fn item(scope: WishlistScope, origin: WishlistOrigin) -> WishlistItem {
-        let mut i = WishlistItem::new(WishlistStatus::NoTorrent, 1);
+        let mut i = WishlistItem::new(WishlistStatus::Searching, 1);
         i.scope = scope;
         i.origin = origin;
         i.track_id = Some(TrackId::new());
@@ -222,20 +257,22 @@ mod tests {
     }
 
     /// The fallback runs only for a plain track wish on a genuine miss:
-    /// the preference on, no copy yet, YouTube on, nothing saving already.
+    /// the preference on, no copy yet, YouTube on.
     #[test]
     fn the_fallback_runs_only_for_a_plain_track_miss() {
         let ok = item(WishlistScope::Track, WishlistOrigin::Like);
-        assert!(gate(&ok, true, false, true, false));
-        assert!(!gate(&ok, false, false, true, false), "the preference is off");
-        assert!(!gate(&item(WishlistScope::Track, WishlistOrigin::Upgrade), true, false, true, false), "a better copy");
-        assert!(!gate(&item(WishlistScope::Album, WishlistOrigin::Like), true, false, true, false), "an album item");
+        assert!(gate(&ok, true, false, true));
+        assert!(!gate(&ok, false, false, true), "the preference is off");
+        assert!(!gate(&item(WishlistScope::Track, WishlistOrigin::Upgrade), true, false, true), "a better copy");
+        assert!(!gate(&item(WishlistScope::Album, WishlistOrigin::Like), true, false, true), "an album item");
+        let mut gone = ok.clone();
+        gone.status = WishlistStatus::Dismissed;
+        assert!(!gate(&gone, true, false, true), "dismissed meanwhile");
         let mut no_track = ok.clone();
         no_track.track_id = None;
-        assert!(!gate(&no_track, true, false, true, false), "no track");
-        assert!(!gate(&ok, true, true, true, false), "it has a copy already");
-        assert!(!gate(&ok, true, false, false, false), "the YouTube service is off");
-        assert!(!gate(&ok, true, false, true, true), "a save runs already");
+        assert!(!gate(&no_track, true, false, true), "no track");
+        assert!(!gate(&ok, true, true, true), "it has a copy already");
+        assert!(!gate(&ok, true, false, false), "the YouTube service is off");
     }
 
     /// A raw title that says a short or a preview is not saved; a word only
@@ -311,6 +348,25 @@ mod tests {
         let path = save_yt_copy(&yt, "yt-video-v", true, None, Some(240_000), &[], &dir).await.unwrap();
         assert!(path.ends_with("yt-x-s.wav"), "the song, not the video: {path:?}");
         assert!(save_yt_copy(&yt, "yt-video-v2", true, None, Some(200_000), &[], &dir).await.is_err(), "no counterpart");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A video that is not a song whatever its stored score says (an
+    /// upload, a video) is saved only as its song counterpart, never
+    /// directly.
+    #[tokio::test]
+    async fn a_non_song_video_is_saved_only_as_its_song() {
+        let yt: Arc<dyn StreamService> = Arc::new(
+            FakeService::youtube()
+                .with_song("s", "Song", "Artist", "Album", 240)
+                .with_video("v", "Artist - Song (Official Video)", "Artist", 245, Some("yt-x-s")),
+        );
+        let mut upload = yt.track("yt-video-v").await.unwrap();
+        upload.kind = TrackKind::Upload;
+        let dir = temp_dir("upload");
+        // Scored as a song (clip = false) but an upload: its song is saved.
+        let path = save_yt_copy(&yt, "yt-video-v", false, Some(upload), Some(240_000), &[], &dir).await.unwrap();
+        assert!(path.ends_with("yt-x-s.wav"), "the song, not the upload: {path:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
