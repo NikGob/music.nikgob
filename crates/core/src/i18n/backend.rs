@@ -99,6 +99,10 @@ pub fn source_display_name_in(loc: Locale, key: crate::source::SourceKey) -> &'s
         K::Bandcamp => "Bandcamp",
         K::Soundcloud => "SoundCloud",
         K::Dogmazic => "Dogmazic",
+        K::Junkyard => match loc {
+            Locale::Ru => "Барахолка",
+            Locale::En => "Junkyard",
+        },
     }
 }
 

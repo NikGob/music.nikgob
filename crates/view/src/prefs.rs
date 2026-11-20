@@ -395,6 +395,11 @@ pub struct Prefs {
     /// A better copy found replaces the file by itself. Off: it waits in
     /// «Подтверди» (a release can differ from the one the user has).
     pub upgrade_auto: bool,
+    /// A wished track no source has is saved from YouTube Music by itself
+    /// as a temporary copy (Opus); the search goes on and a real file
+    /// replaces it. Off: only «Сохранить с YouTube» saves one.
+    #[serde(default)]
+    pub youtube_fallback: bool,
     /// Size limit of the stream audio cache per service, in MB (0 = off):
     /// recently played YouTube files and Spotify's encrypted files.
     pub stream_cache_mb: u32,
@@ -1721,6 +1726,7 @@ impl Default for Prefs {
             upgrade_every: UpgradeEvery::Week,
             upgrade_below: UpgradeBar::Lossless,
             upgrade_auto: false,
+            youtube_fallback: false,
             stream_cache_mb: 500,
             spotify_personal_app: false,
             youtube_cookies_set: false,

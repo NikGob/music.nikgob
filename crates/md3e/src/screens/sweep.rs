@@ -227,8 +227,8 @@ pub const ALL: &[SettingId] = {
         Preset(Area::Sources), DownloadSource(Src::Torrents), DownloadSource(Src::Khinsider), DownloadSource(Src::Soulseek),
         DownloadSource(Src::Qobuz),
         DownloadSource(Src::Tidal), DownloadSource(Src::Squidify), DownloadSource(Src::Archive), DownloadSource(Src::Bandcamp),
-        DownloadSource(Src::Soundcloud), DownloadSource(Src::Dogmazic),
-        LikeDownload, UpgradeBar, UpgradeEvery, OpusBitrate, UpgradeAuto, FakeFlac, FakeRestore, Soulseek, SoulseekShare, Prowlarr,
+        DownloadSource(Src::Soundcloud), DownloadSource(Src::Dogmazic), DownloadSource(Src::Junkyard),
+        LikeDownload, UpgradeBar, UpgradeEvery, OpusBitrate, UpgradeAuto, YoutubeFallback, FakeFlac, FakeRestore, Soulseek, SoulseekShare, Prowlarr,
         Preset(Area::Seeding), NoSeed, SeedLimit, SeedDays, SeedRatio, DownloadLimit, UploadLimit, SoulseekUpload,
         // Межсеть.
         MeshDevices, MeshNearby, MeshKeepMasters, MeshEnabled, ApiEnabled, ApiAccess, ApiPort, ApiTokens,
@@ -284,7 +284,7 @@ fn spec(id: SettingId) -> Spec {
         S::Theme | S::Contrast | S::NpVolume | S::CoverShape | S::CoverDir | S::RingStyle | S::Ambient | S::BgColors
         | S::LyricsStyle | S::LyricsUnit | S::NpMotion | S::ToastTime | S::LyricsUi | S::LyricsGpu | S::LyricsStreamKeep
         | S::OpusBitrate | S::RadioNewShare | S::ProfileNames | S::LikeDownload | S::AlbumLike | S::SingleLike
-        | S::LikedAlbumsPlace | S::UpgradeBar | S::UpgradeAuto | S::PlaylistSync | S::AlbumDate => Spec::Choice(Segments),
+        | S::LikedAlbumsPlace | S::UpgradeBar | S::UpgradeAuto | S::YoutubeFallback | S::PlaylistSync | S::AlbumDate => Spec::Choice(Segments),
         // Swatches, picked like segments.
         S::BgHue => Spec::Choice(Segments),
         S::Language | S::Scheme | S::WaveFallback | S::LyricsGap | S::DblClickShape | S::NewShareBy(_) | S::RadioNoRepeat | S::RadioExplore
@@ -931,7 +931,7 @@ mod tests {
             | S::SpotifySoloist | S::ImportSpotify | S::YouTubeEnabled | S::YouTube | S::YouTubeCookies | S::ImportYouTube
             | S::SoundCloudEnabled | S::SoundCloud | S::SoundCloudToken | S::ImportSoundCloud | S::DeezerEnabled | S::PushLikes
             | S::AlbumLike | S::SingleLike | S::PlaylistSync | S::ImportFiles | S::ImportSavedSongs | S::StreamCache
-            | S::DownloadSource(_) | S::LikeDownload | S::UpgradeBar | S::UpgradeEvery | S::OpusBitrate | S::UpgradeAuto
+            | S::DownloadSource(_) | S::LikeDownload | S::UpgradeBar | S::UpgradeEvery | S::OpusBitrate | S::UpgradeAuto | S::YoutubeFallback
             | S::FakeFlac | S::FakeRestore | S::Soulseek | S::SoulseekShare | S::Prowlarr | S::NoSeed | S::SeedLimit | S::SeedDays
             | S::SeedRatio | S::DownloadLimit | S::UploadLimit | S::SoulseekUpload | S::UserName | S::Autostart
             | S::AutostartHidden | S::FpsLimit | S::TrayKeepWindow | S::AutoDownloads | S::StreamAnalysis | S::LyricsSeparate

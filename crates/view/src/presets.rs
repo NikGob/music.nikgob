@@ -159,7 +159,7 @@ const RECS_FIELDS: [Field; 6] = [
     Field::RadioUnheard,
 ];
 
-const SOURCE_FIELDS: [Field; 10] = [
+const SOURCE_FIELDS: [Field; 11] = [
     Field::Source(SourceKey::Torrents),
     Field::Source(SourceKey::Khinsider),
     Field::Source(SourceKey::Bandcamp),
@@ -170,6 +170,7 @@ const SOURCE_FIELDS: [Field; 10] = [
     Field::Source(SourceKey::Archive),
     Field::Source(SourceKey::Soundcloud),
     Field::Source(SourceKey::Dogmazic),
+    Field::Source(SourceKey::Junkyard),
 ];
 
 const SEED_FIELDS: [Field; 4] = [Field::NoSeed, Field::SeedLimitGb, Field::SeedDays, Field::SeedRatio];
@@ -300,7 +301,8 @@ const fn source_row(k: SourceKey) -> [bool; 2] {
         | SourceKey::Khinsider
         | SourceKey::Qobuz
         | SourceKey::Tidal
-        | SourceKey::Dogmazic => [true, true],
+        | SourceKey::Dogmazic
+        | SourceKey::Junkyard => [true, true],
         SourceKey::Soulseek | SourceKey::Squidify | SourceKey::Soundcloud => [false, true],
     }
 }

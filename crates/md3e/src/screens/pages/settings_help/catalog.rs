@@ -127,7 +127,7 @@ impl SettingId {
             | DeezerEnabled | PushLikes | AlbumLike | SingleLike | PlaylistSync | ImportFiles | ImportSavedSongs | StreamCache => {
                 TAB_SERVICES
             }
-            DownloadSource(_) | LikeDownload | UpgradeBar | UpgradeEvery | OpusBitrate | UpgradeAuto | FakeFlac | FakeRestore
+            DownloadSource(_) | LikeDownload | UpgradeBar | UpgradeEvery | OpusBitrate | UpgradeAuto | YoutubeFallback | FakeFlac | FakeRestore
             | Soulseek | SoulseekShare | Prowlarr | NoSeed | SeedLimit | SeedDays | SeedRatio | DownloadLimit | UploadLimit
             | SoulseekUpload => TAB_DOWNLOADS,
             ApiEnabled | ApiAccess | ApiPort | ApiTokens | MeshEnabled | MeshDevices | MeshNearby | MeshKeepMasters => TAB_NET,
@@ -195,7 +195,7 @@ impl SettingId {
             | PlayerButton(_) | NavRoot
             // Technical.
             | LyricsModels | SpotifyPersonal | SpotifySoloist | YouTubeCookies | SoundCloudToken | PlaylistSync
-            | ImportFiles | ImportSavedSongs | StreamCache | OpusBitrate | UpgradeAuto | FakeFlac | FakeRestore
+            | ImportFiles | ImportSavedSongs | StreamCache | OpusBitrate | UpgradeAuto | YoutubeFallback | FakeFlac | FakeRestore
             | SoulseekShare | NoSeed | SeedLimit | SeedDays | SeedRatio | DownloadLimit | UploadLimit | SoulseekUpload
             | FpsLimit | TrayKeepWindow | AutoDownloads | StreamAnalysis | LyricsSeparate | LyricsDeep | LyricsWordsAll
             | MastersDir | ExportData | ApiAccess | ApiPort | MeshEnabled | MeshKeepMasters => Level::Deep,
@@ -400,6 +400,7 @@ impl SettingId {
             UpgradeEvery => l.upgrade_every,
             UpgradeBar => l.upgrade_bar,
             UpgradeAuto => l.upgrade_auto,
+            YoutubeFallback => l.youtube_fallback,
             DownloadSource(k) => k.display_name(),
             PlaylistSync => l.playlist_sync,
             ImportFiles => l.import_files,
@@ -611,6 +612,7 @@ impl SettingId {
             UpgradeEvery => h.upgrade_every,
             UpgradeBar => h.upgrade_bar,
             UpgradeAuto => h.upgrade_auto,
+            YoutubeFallback => h.youtube_fallback,
             DownloadSource(v::SourceKey::Torrents) => h.download_torrents,
             DownloadSource(v::SourceKey::Khinsider) => h.download_khinsider,
             DownloadSource(v::SourceKey::Soulseek) => h.download_soulseek,
@@ -621,6 +623,7 @@ impl SettingId {
             DownloadSource(v::SourceKey::Bandcamp) => h.download_bandcamp,
             DownloadSource(v::SourceKey::Soundcloud) => h.download_soundcloud,
             DownloadSource(v::SourceKey::Dogmazic) => h.download_dogmazic,
+            DownloadSource(v::SourceKey::Junkyard) => h.download_junkyard,
             PlaylistSync => h.playlist_sync,
             ImportFiles => h.import_files,
             ImportSavedSongs => h.import_saved_songs,
@@ -720,6 +723,7 @@ impl SettingId {
             Self::UpgradeEvery => &c.upgrade_every,
             Self::UpgradeBar => &c.upgrade_bar,
             Self::UpgradeAuto => &c.upgrade_auto,
+            Self::YoutubeFallback => &c.youtube_fallback,
             Self::PlaylistSync => &c.playlist_sync,
             Self::RadioSource => &c.radio_source,
             Self::RadioNewShare | Self::NewShareBy(_) => &c.radio_new_share,
@@ -813,6 +817,7 @@ impl SettingId {
             Self::UpgradeEvery => v::UpgradeEvery::ALL.iter().position(|e| *e == p.upgrade_every).unwrap_or(1),
             Self::UpgradeBar => usize::from(p.upgrade_below == v::UpgradeBar::Mp3_320),
             Self::UpgradeAuto => usize::from(p.upgrade_auto),
+            Self::YoutubeFallback => usize::from(p.youtube_fallback),
             Self::PlaylistSync => sync_index(p.playlist_sync_default),
             Self::AlbumLike => usize::from(p.album_like_tracks),
             Self::AlbumOpens => match p.album_mode {
@@ -911,6 +916,7 @@ impl SettingId {
             Self::UpgradeEvery => p.upgrade_every = v::UpgradeEvery::ALL[i.min(3)],
             Self::UpgradeBar => p.upgrade_below = if i == 1 { v::UpgradeBar::Mp3_320 } else { v::UpgradeBar::Lossless },
             Self::UpgradeAuto => p.upgrade_auto = i == 1,
+            Self::YoutubeFallback => p.youtube_fallback = i == 1,
             Self::PlaylistSync => p.playlist_sync_default = v::PlaylistSyncMode::ALL[i.min(2)],
             Self::AlbumLike => p.album_like_tracks = i == 1,
             Self::AlbumOpens => {

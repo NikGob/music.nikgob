@@ -293,6 +293,8 @@ pub enum SettingId {
     UpgradeBar,
     /// «Замена файла»: asked in «Подтверди», or by itself.
     UpgradeAuto,
+    /// «Копия с YouTube»: only by hand, or by itself when no source has it.
+    YoutubeFallback,
     /// One line of «Откуда качать»: its switch and place.
     DownloadSource(v::SourceKey),
     PlaylistSync,

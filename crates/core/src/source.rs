@@ -46,12 +46,17 @@ pub enum SourceKey {
     Soundcloud,
     /// play.dogmazic.net: an archive of free (Creative Commons) music.
     Dogmazic,
+    /// «Барахолка»: the grey ripper sites of the Lucida kind (public
+    /// Qobuz/Tidal/Deezer proxies of someone else's account), one switch
+    /// for all of them. They come and go; one behind a captcha or a
+    /// Cloudflare check is skipped, never passed.
+    Junkyard,
 }
 
 impl SourceKey {
     /// Every key, in the default order of «Источники»: the cheap and
     /// reliable first, the free services last.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Torrents,
         Self::Khinsider,
         Self::Bandcamp,
@@ -62,6 +67,7 @@ impl SourceKey {
         Self::Archive,
         Self::Soundcloud,
         Self::Dogmazic,
+        Self::Junkyard,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -76,6 +82,7 @@ impl SourceKey {
             Self::Bandcamp => "bandcamp",
             Self::Soundcloud => "soundcloud",
             Self::Dogmazic => "dogmazic",
+            Self::Junkyard => "junkyard",
         }
     }
 
@@ -92,7 +99,7 @@ impl SourceKey {
     /// A free service of someone else's account (a public instance): the
     /// group that needs no account of the user's own.
     pub fn is_service(self) -> bool {
-        matches!(self, Self::Qobuz | Self::Tidal)
+        matches!(self, Self::Qobuz | Self::Tidal | Self::Junkyard)
     }
 }
 

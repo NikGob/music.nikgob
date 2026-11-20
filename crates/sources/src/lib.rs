@@ -16,6 +16,7 @@ pub mod dogmazic;
 pub mod html;
 pub mod http;
 pub mod instances;
+pub mod junkyard;
 pub mod khinsider;
 pub mod matching;
 pub mod qobuz;
@@ -67,6 +68,7 @@ pub fn web_sources(settings: &Settings, lists: &config::Lists) -> WebSources {
         Arc::new(archive::Archive::new(&s.archive_url)),
         Arc::new(bandcamp::Bandcamp::new()),
         Arc::new(dogmazic::Dogmazic::from_settings(s)),
+        Arc::new(junkyard::Junkyard::new()),
     ];
     WebSources { list, khinsider: Some(kh), qobuz: Some(q), tidal: Some(t) }
 }

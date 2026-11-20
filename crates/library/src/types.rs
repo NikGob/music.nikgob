@@ -118,6 +118,13 @@ impl TrackRow {
         self.active_kind == Some(SourceKind::Youtube)
             && self.quality == Some(nikgob_core::model::score::STREAM_YOUTUBE_CLIP)
     }
+
+    /// What plays is a local file no better than a copy saved from a
+    /// stream (`score::SAVED_STREAM`): a temporary copy the wishlist keeps
+    /// looking to replace.
+    pub fn is_temporary(&self) -> bool {
+        self.has_local && self.quality.is_some_and(|q| q <= nikgob_core::model::score::SAVED_STREAM)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

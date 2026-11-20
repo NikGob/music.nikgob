@@ -34,6 +34,7 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
     segments(ui, Id::OpusBitrate, p);
     let never = p.upgrade_every == v::UpgradeEvery::Never;
     dimmed(ui, never, |ui| segments(ui, Id::UpgradeAuto, p));
+    segments(ui, Id::YoutubeFallback, p);
     menu(ui, Id::FakeFlac, p);
     // TODO(lead): the concept moves this to the Корзина page (library.rs);
     // it stays here until that page has it, so the undo is never lost.
