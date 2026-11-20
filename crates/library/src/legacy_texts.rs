@@ -697,8 +697,10 @@ fn found_instead_in(text: &str, loc: Locale) -> Option<StoredLine> {
     if text == fmt_found_instead_in(loc, None, None, tab) {
         return Some(StoredLine::FoundInstead { found: None, have: None });
     }
-    if let Some(found) = one(text, &fmt_found_instead_in(loc, Some(MARK), None, tab)) {
-        return Some(StoredLine::FoundInstead { found: Some(format_of(&found)?), have: None });
+    // «Нашёл FLAC вместо MP3 320» also fits the one-format shape, with
+    // «FLAC вместо MP3 320» as the format: that is no format, so go on.
+    if let Some(found) = one(text, &fmt_found_instead_in(loc, Some(MARK), None, tab)).and_then(|f| format_of(&f)) {
+        return Some(StoredLine::FoundInstead { found: Some(found), have: None });
     }
     let (found, have) = two(text, &fmt_found_instead_in(loc, Some(MARK), Some(MARK2), tab))?;
     Some(StoredLine::FoundInstead { found: Some(format_of(&found)?), have: Some(quality_words(&have, loc)?) })
@@ -707,7 +709,9 @@ fn found_instead_in(text: &str, loc: Locale) -> Option<StoredLine> {
 fn better_found_in(text: &str, loc: Locale) -> Option<StoredLine> {
     let tab = downloads_in(loc).tab_confirm;
     // The word of the count changes with it («для 1 трека», «для 3 треков»).
-    for sample in [fmt_better_found_in(loc, 1, tab), fmt_better_found_in(loc, NUM as u64, tab)] {
+    // [`NUM`] takes the form of 1, so the other forms come from 2 and 5.
+    for n in [1u64, 2, 5] {
+        let sample = fmt_better_found_in(loc, n, tab).replacen(&n.to_string(), NUM_TEXT, 1);
         if let Some(count) = number(text, &sample) {
             return Some(StoredLine::BetterFound { count });
         }
