@@ -252,18 +252,11 @@ impl Worker {
         self.publish_wishlist();
         self.wish_tick();
         let n = tracks.len() as u64;
-        let what = format!("{n} {}", if n % 10 == 1 && n % 100 != 11 {
-            "трек"
-        } else if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) {
-            "трека"
+        let loc = self.locale();
+        let text = if on {
+            nikgob_core::i18n::library_toasts::fmt_album_liked_in(loc, n, wished, self.can_download())
         } else {
-            "треков"
-        });
-        let text = match (on, wished) {
-            (true, true) if self.can_download() => format!("Альбом в Любимых · {what} · скачаю в фоне"),
-            (true, true) => format!("Альбом в Любимых · {what} · скачается, когда подключишь торренты"),
-            (true, false) => format!("Альбом в Любимых · {what}"),
-            (false, _) => format!("Альбом убран из Любимых · {what}"),
+            nikgob_core::i18n::library_toasts::fmt_album_unliked_in(loc, n)
         };
         let undo = Some(self.undo_action(Command::Like(LikeTarget::Release(id), !on)));
         if on {
@@ -293,11 +286,12 @@ impl Worker {
         };
         self.publish_wishlist();
         self.wish_tick();
+        let toasts = nikgob_core::i18n::library_toasts_in(self.locale());
         let text = match (on, wished) {
-            (true, true) if self.can_download() => "В любимых альбомах · скачаю в фоне",
-            (true, true) => "В любимых альбомах · скачается, когда подключишь торренты",
-            (true, false) => "Добавлено в любимые альбомы",
-            (false, _) => "Убрано из любимых альбомов",
+            (true, true) if self.can_download() => toasts.album_saved_downloading,
+            (true, true) => toasts.album_saved_waiting_torrents,
+            (true, false) => toasts.album_saved,
+            (false, _) => toasts.album_unsaved,
         };
         let undo = Some(self.undo_action(Command::Like(LikeTarget::Release(id), !on)));
         if on {
@@ -425,11 +419,12 @@ impl Worker {
         let before = self.library_tracks();
         if let Some(on) = on {
             let Some((now, was)) = self.log_err(nikgob_core::i18n::LibOp::Library.label_in(self.locale()), self.lib.set_track_in_library(track, on)) else { return };
+            let toasts = nikgob_core::i18n::library_toasts_in(self.locale());
             let text = match (on, now) {
-                (true, _) => "Трек в библиотеке",
-                (false, false) => "Трек убран из библиотеки",
+                (true, _) => toasts.track_in_library,
+                (false, false) => toasts.track_out_of_library,
                 // A like or a playlist keeps it.
-                (false, true) => "Трек остаётся в библиотеке: он в «Любимых» или в плейлисте",
+                (false, true) => toasts.track_stays_in_library,
             };
             let undo = (on || !now)
                 .then(|| self.undo_action(Command::TrackLibraryRestore { track, put: was.put, choice: was.choice }));
@@ -461,13 +456,13 @@ impl Worker {
         if on {
             let Some(undo) = self.log_err(nikgob_core::i18n::LibOp::Album.label_in(self.locale()), self.lib.add_release_whole(id)) else { return };
             let back = undo.map(|u| self.undo_action(Command::UndoWholeAlbum { id, mine: u.mine, excluded: u.excluded }));
-            self.toast_ok("Альбом в библиотеке", back);
+            self.toast_ok(nikgob_core::i18n::library_toasts_in(self.locale()).album_in_library, back);
         } else {
             if self.log_err(nikgob_core::i18n::LibOp::Album.label_in(self.locale()), self.lib.set_release_whole(id, false)).is_none() {
                 return;
             }
             let back = self.undo_action(Command::AddWholeAlbum { id, on: true });
-            self.toast_info("В библиотеке только твои треки альбома", Some(back));
+            self.toast_info(nikgob_core::i18n::library_toasts_in(self.locale()).album_mine_only, Some(back));
         }
         self.library_edited(before, vec![id]);
         self.album_changed(id);
@@ -492,7 +487,12 @@ impl Worker {
             let _ = self.log_err(nikgob_core::i18n::LibOp::Album.label_in(self.locale()), self.lib.set_track_choice(release, track, Some(mine)));
         }
         let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
-        let text = if mine { format!("«{title}» в твоих треках альбома") } else { format!("«{title}» убран из твоих треков альбома") };
+        let loc = self.locale();
+        let text = if mine {
+            nikgob_core::i18n::library_toasts::fmt_album_track_mine_in(loc, &title)
+        } else {
+            nikgob_core::i18n::library_toasts::fmt_album_track_not_mine_in(loc, &title)
+        };
         let undo = Some(self.undo_action(Command::AlbumTrackChoice { release, track, choice: was }));
         if mine {
             self.toast_ok(text, undo);
