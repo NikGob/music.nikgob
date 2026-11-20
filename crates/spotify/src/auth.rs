@@ -69,23 +69,72 @@ const REQUEST_LINE_LIMIT: u64 = 8 * 1024;
 /// Refresh this long before the access token expires.
 const REFRESH_MARGIN: Duration = Duration::from_secs(90);
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AuthError {
     /// The callback port is taken by another program.
-    #[error("Порт {0} занят другой программой. Закрой её и попробуй снова.")]
+    #[error("Port {0} is in use by another app. Close it and try again.")]
     PortBusy(u16),
-    #[error("Вход отменён")]
+    #[error("Sign-in cancelled")]
     Cancelled,
-    #[error("Время входа истекло, попробуй снова")]
+    #[error("Sign-in timed out, try again")]
     TimedOut,
     /// Spotify refused the grant itself; only the browser can mint a new one.
-    #[error("Spotify отклонил вход ({status}): {detail}")]
-    Rejected { status: u16, detail: &'static str },
+    #[error("Spotify rejected sign-in ({status}): {detail}")]
+    Rejected { status: u16, detail: Rejection },
     /// The endpoint could not answer; the grant may still be valid.
-    #[error("Spotify недоступен: {0}")]
+    #[error("Spotify is unavailable: {0}")]
     Unreachable(String),
     #[error("{0}")]
     Callback(&'static str),
+}
+
+impl AuthError {
+    /// Formats the failure only when a display locale is available.
+    pub fn text_in(&self, loc: nikgob_core::i18n::Locale) -> String {
+        use nikgob_core::i18n::{spotify_auth, spotify_auth_in};
+
+        match self {
+            Self::PortBusy(port) => spotify_auth::fmt_port_busy_in(loc, *port),
+            Self::Cancelled => spotify_auth_in(loc).cancelled.to_owned(),
+            Self::TimedOut => spotify_auth_in(loc).timed_out.to_owned(),
+            Self::Rejected { status, detail } => {
+                spotify_auth::fmt_rejected_in(loc, *status, detail.text_in(loc))
+            }
+            Self::Unreachable(detail) => spotify_auth::fmt_unreachable_in(loc, detail),
+            Self::Callback(detail) => (*detail).to_owned(),
+        }
+    }
+}
+
+/// A safe OAuth classification, without endpoint response text or secrets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rejection {
+    BrowserDenied,
+    InvalidGrant,
+    InvalidClient,
+    InvalidScope,
+    AccessDenied,
+    Other,
+}
+
+impl Rejection {
+    fn text_in(self, loc: nikgob_core::i18n::Locale) -> &'static str {
+        let s = nikgob_core::i18n::spotify_auth_in(loc);
+        match self {
+            Self::BrowserDenied => s.browser_denied,
+            Self::InvalidGrant => s.invalid_grant,
+            Self::InvalidClient => s.invalid_client,
+            Self::InvalidScope => s.invalid_scope,
+            Self::AccessDenied => s.access_denied,
+            Self::Other => s.retry_sign_in,
+        }
+    }
+}
+
+impl std::fmt::Display for Rejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.text_in(nikgob_core::i18n::Locale::En))
+    }
 }
 
 /// One OAuth application identity and what it is asked for.
@@ -208,12 +257,29 @@ pub async fn wait_for_code(
             _ => continue,
         }
         let outcome = parse_request_line(&line, expected_state);
+        // This listener has no UI preferences; show both supported languages.
+        use nikgob_core::i18n::{Locale, common_in, spotify_auth_in};
+        let ru = spotify_auth_in(Locale::Ru);
+        let en = spotify_auth_in(Locale::En);
         let (status, body) = match &outcome {
             Ok(_) => (
                 "200 OK",
-                page("Готово", "Вход выполнен. Вкладку можно закрыть."),
+                page(
+                    common_in(Locale::Ru).done,
+                    common_in(Locale::En).done,
+                    ru.signed_in,
+                    en.signed_in,
+                ),
             ),
-            Err(e) => ("400 Bad Request", page("Вход не удался", &e.to_string())),
+            Err(e) => (
+                "400 Bad Request",
+                page(
+                    ru.sign_in_failed,
+                    en.sign_in_failed,
+                    &e.text_in(Locale::Ru),
+                    &e.text_in(Locale::En),
+                ),
+            ),
         };
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
@@ -256,7 +322,7 @@ pub(crate) fn parse_request_line(line: &str, expected_state: &str) -> Result<Str
     if error.is_some() {
         return Err(AuthError::Rejected {
             status: 400,
-            detail: "вход отклонён в браузере",
+            detail: Rejection::BrowserDenied,
         });
     }
     code.ok_or(AuthError::Callback("no authorization code"))
@@ -334,11 +400,11 @@ pub(crate) fn decode_token_response(status: u16, text: &str) -> Result<TokenResp
     if (400..500).contains(&status) {
         let value = serde_json::from_str::<serde_json::Value>(text).ok();
         let detail = match value.as_ref().and_then(|v| v["error"].as_str()) {
-            Some("invalid_grant") => "разрешение истекло или отозвано, войди снова",
-            Some("invalid_client") => "проверь Client ID приложения",
-            Some("invalid_scope") => "Spotify не принял запрошенные права",
-            Some("access_denied") => "доступ не разрешён",
-            _ => "войди снова и проверь настройки приложения",
+            Some("invalid_grant") => Rejection::InvalidGrant,
+            Some("invalid_client") => Rejection::InvalidClient,
+            Some("invalid_scope") => Rejection::InvalidScope,
+            Some("access_denied") => Rejection::AccessDenied,
+            _ => Rejection::Other,
         };
         return Err(AuthError::Rejected { status, detail });
     }
@@ -397,12 +463,12 @@ pub(crate) fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn page(heading: &str, body: &str) -> String {
+fn page(heading_ru: &str, heading_en: &str, body_ru: &str, body_en: &str) -> String {
     format!(
-        "<!doctype html><html lang=\"ru\"><meta charset=\"utf-8\"><title>{heading}</title>\
+        "<!doctype html><html lang=\"ru\"><meta charset=\"utf-8\"><title>{heading_ru} / {heading_en}</title>\
 <style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#111;color:#eee;font-family:system-ui,sans-serif}}\
 main{{max-width:28rem;padding:2rem;text-align:center}}</style>\
-<main><h1>{heading}</h1><p>{body}</p></main><script>setTimeout(function(){{window.close()}},1500)</script></html>"
+<main><h1>{heading_ru}<br><span lang=\"en\">{heading_en}</span></h1><p>{body_ru}<br><span lang=\"en\">{body_en}</span></p></main><script>setTimeout(function(){{window.close()}},1500)</script></html>"
     )
 }
 
@@ -481,7 +547,7 @@ mod tests {
         assert!(parse_request_line("GET /favicon.ico HTTP/1.1", "s1").is_err());
         assert!(matches!(
             parse_request_line("GET /login?error=access_denied&state=s1 HTTP/1.1", "s1"),
-            Err(AuthError::Rejected { .. })
+            Err(AuthError::Rejected { status: 400, detail: Rejection::BrowserDenied })
         ));
         for line in [
             "GET /login?error=secret-code&state=s1 HTTP/1.1",
@@ -489,6 +555,27 @@ mod tests {
         ] {
             let e = parse_request_line(line, "s1").unwrap_err();
             assert!(!e.to_string().contains("secret"), "{e}");
+            for loc in nikgob_core::i18n::Locale::ALL {
+                assert!(!e.text_in(loc).contains("secret"));
+            }
+        }
+    }
+
+    #[test]
+    fn token_rejections_keep_only_safe_classifications() {
+        for (code, expected) in [
+            ("invalid_grant", Rejection::InvalidGrant),
+            ("invalid_client", Rejection::InvalidClient),
+            ("invalid_scope", Rejection::InvalidScope),
+            ("access_denied", Rejection::AccessDenied),
+            ("secret-refresh", Rejection::Other),
+        ] {
+            let body = format!(r#"{{"error":"{code}","error_description":"secret-refresh"}}"#);
+            let error = decode_token_response(400, &body).err().unwrap();
+            assert_eq!(error, AuthError::Rejected { status: 400, detail: expected });
+            for loc in nikgob_core::i18n::Locale::ALL {
+                assert!(!error.text_in(loc).contains("secret"));
+            }
         }
     }
 
@@ -507,6 +594,9 @@ mod tests {
                 panic!("{status} decoded");
             };
             assert!(!e.to_string().contains("secret"), "{e}");
+            for loc in nikgob_core::i18n::Locale::ALL {
+                assert!(!e.text_in(loc).contains("secret"));
+            }
         }
         let ok = decode_token_response(
             200,

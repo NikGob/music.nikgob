@@ -213,8 +213,11 @@ enum Failure {
     PremiumRequired,
     /// The sign-in expired.
     SessionExpired,
-    /// A login failed, with the service's own words.
-    Login(String),
+    /// A structured OAuth failure, translated when the account is shown.
+    Login(AuthError),
+    MissingRefreshToken,
+    AccountUnconfirmed(String),
+    PlaybackRejected(String),
 }
 
 impl Failure {
@@ -223,7 +226,14 @@ impl Failure {
         match self {
             Self::PremiumRequired => premium_required_in(loc).to_owned(),
             Self::SessionExpired => nikgob_core::i18n::backend_in(loc).spotify_session_expired.to_owned(),
-            Self::Login(why) => why.clone(),
+            Self::Login(why) => why.text_in(loc),
+            Self::MissingRefreshToken => nikgob_core::i18n::spotify_auth_in(loc).missing_refresh_token.to_owned(),
+            Self::AccountUnconfirmed(detail) => {
+                nikgob_core::i18n::spotify_auth::fmt_account_unconfirmed_in(loc, detail)
+            }
+            Self::PlaybackRejected(detail) => {
+                nikgob_core::i18n::spotify_auth::fmt_playback_rejected_in(loc, detail)
+            }
         }
     }
 }
@@ -724,22 +734,25 @@ impl Spotify {
     fn fail(&self, e: AuthError) -> StreamError {
         let message = e.to_string();
         log::warn!("spotify: login failed: {message}");
+        let result = match &e {
+            AuthError::Cancelled | AuthError::Rejected { .. } => StreamError::NotLoggedIn,
+            _ => StreamError::Network(message),
+        };
         // A cancelled login (logout, or another login) is not a failure
         // to show.
         if !matches!(e, AuthError::Cancelled) {
-            lock(&self.state).failure = Some(Failure::Login(message.clone()));
+            lock(&self.state).failure = Some(Failure::Login(e));
         }
-        match e {
-            AuthError::Cancelled => StreamError::NotLoggedIn,
-            AuthError::Rejected { .. } => StreamError::NotLoggedIn,
-            _ => StreamError::Network(message),
-        }
+        result
     }
 
-    fn fail_text(&self, message: &str) -> StreamError {
+    fn fail_login(&self, failure: Failure) -> StreamError {
+        // No preferences reach this background path. The returned error is
+        // diagnostic; the stored failure is localized by account().
+        let message = failure.text_in(nikgob_core::i18n::Locale::En);
         log::warn!("spotify: login failed: {message}");
-        lock(&self.state).failure = Some(Failure::Login(message.into()));
-        StreamError::Network(message.into())
+        lock(&self.state).failure = Some(failure);
+        StreamError::Network(message)
     }
 
     /// Reserves the port, shows the prompt, opens the browser and waits
@@ -780,7 +793,7 @@ impl Spotify {
             .await
             .map_err(|e| self.fail(e))?;
         let token = StoredToken::from_response(&grant.client_id, response, None)
-            .ok_or_else(|| self.fail_text("Spotify не выдал refresh-токен"))?;
+            .ok_or_else(|| self.fail_login(Failure::MissingRefreshToken))?;
         // Verify on a scratch client: nothing sees an unverified grant.
         let probe = ApiClient::new(self.http.clone(), endpoints);
         probe.install(token.clone());
@@ -788,7 +801,7 @@ impl Spotify {
             Ok(me) => me,
             Err(e) if e.is_premium_refusal() => return Err(self.premium_login_failed(epoch)),
             Err(e) => {
-                return Err(self.fail_text(&format!("Spotify не подтвердил аккаунт: {e}")));
+                return Err(self.fail_login(Failure::AccountUnconfirmed(e.to_string())));
             }
         };
         if epoch != self.epoch() {
@@ -879,8 +892,7 @@ impl Spotify {
         if signed_out || epoch != self.epoch() {
             return Err(StreamError::NotLoggedIn);
         }
-        let session =
-            session.map_err(|e| self.fail_text(&format!("Spotify не пустил сессию воспроизведения: {e}")))?;
+        let session = session.map_err(|e| self.fail_login(Failure::PlaybackRejected(e.to_string())))?;
         let credential = PlaybackCredential {
             username: session.username(),
             auth_data: session.auth_data(),
