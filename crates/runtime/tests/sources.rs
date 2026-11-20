@@ -446,7 +446,8 @@ fn the_users_order_and_switches_pick_among_equals() {
             SourceKey::Squidify,
             SourceKey::Archive,
             SourceKey::Soundcloud,
-            SourceKey::Dogmazic
+            SourceKey::Dogmazic,
+            SourceKey::Junkyard
         ]
     );
     r.rt.send(Command::Like(LikeTarget::Track(track), true));
