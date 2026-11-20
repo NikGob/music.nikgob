@@ -1,15 +1,28 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use egui::{Id, Pos2, Rect, Stroke, Ui, pos2, vec2};
-use nikgob_core::i18n::settings::settings_misc;
+use egui::{
+    Align, Area, Color32, CursorIcon, Galley, Id, Key, Modifiers, Order, Painter, Pos2, Rect, Sense, Shape, Stroke,
+    Ui, Vec2, pos2, text::LayoutJob, vec2,
+};
+use nikgob_core::i18n::Locale;
 use nikgob_view::{self as v, Prefs};
+use nikgob_core::i18n::settings::{
+    fmt_days_in, fmt_gb_in, fmt_one_decimal_in, settings_choices_in, settings_misc, settings_misc_in, settings_row_help_in,
+    settings_row_labels_in,
+};
 
+use super::super::home::Section;
+use crate::screens::stage::{Part, Scene, Script};
+use crate::screens::{bg_shapes, lyrics, now_playing};
 use crate::{
-    ColorScheme, Contrast, Icon, SchemeVariant, Theme, TypeRole,
-    components::{anim, slider::wave_line},
+    ColorScheme, Contrast, Elevation, Icon, SchemeVariant, Theme, TypeRole,
+    components::{anim, paint, paint::Radii, slider::wave_line},
     tokens::shape,
 };
-use crate::screens::{bg_shapes, lyrics, now_playing};
+
+use super::*;
+
 
 /// The live sample a card draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +49,7 @@ pub(super) enum Preview {
 
 /// A preview in its own box: `salt` marks an option's sample (an option
 /// that turns the effect off then says so instead of showing a stand-in).
-fn sample(ui: &mut Ui, rect: Rect, kind: Preview, prefs: &Prefs, salt: Option<Id>) {
+pub(super) fn sample(ui: &mut Ui, rect: Rect, kind: Preview, prefs: &Prefs, salt: Option<Id>) {
     let palette = (kind == Preview::Palette && salt.is_some()).then(|| scheme_for(ui.ctx(), prefs));
     let bg = palette.map_or_else(|| Theme::get(ui.ctx()).scheme.surface, |s| s.surface);
     ui.painter().rect_filled(rect, shape::SMALL, bg);

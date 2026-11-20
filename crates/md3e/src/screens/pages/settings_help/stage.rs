@@ -1,9 +1,28 @@
-use nikgob_core::i18n::{Locale, settings::{fmt_days_in, fmt_gb_in, fmt_one_decimal_in, settings_misc_in, settings_row_labels_in}};
-use nikgob_view::{self as v, Prefs};
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use super::SettingId;
-use super::catalog;
+use egui::{
+    Align, Area, Color32, CursorIcon, Galley, Id, Key, Modifiers, Order, Painter, Pos2, Rect, Sense, Shape, Stroke,
+    Ui, Vec2, pos2, text::LayoutJob, vec2,
+};
+use nikgob_core::i18n::Locale;
+use nikgob_view::{self as v, Prefs};
+use nikgob_core::i18n::settings::{
+    fmt_days_in, fmt_gb_in, fmt_one_decimal_in, settings_choices_in, settings_misc, settings_misc_in, settings_row_help_in,
+    settings_row_labels_in,
+};
+
 use super::super::home::Section;
+use crate::screens::stage::{Part, Scene, Script};
+use crate::screens::{bg_shapes, lyrics, now_playing};
+use crate::{
+    ColorScheme, Contrast, Elevation, Icon, SchemeVariant, Theme, TypeRole,
+    components::{anim, paint, paint::Radii, slider::wave_line},
+    tokens::shape,
+};
+
+use super::*;
+
 
 /// What the live stage shows for a row.
 impl SettingId {

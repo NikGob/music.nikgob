@@ -76,7 +76,7 @@ pub(super) const MASS_EARLY: f32 = -0.5;
 pub const H_MASS_MS: i64 = 90 * DAY_MS;
 /// …a like and a playlist entry this.
 pub(super) const MASS_LIKE: f32 = 2.0;
-const MASS_PLAYLIST: f32 = 1.5;
+pub(super) const MASS_PLAYLIST: f32 = 1.5;
 pub(super) const MASS_SAVED: f32 = 1.0;
 /// A like counts as a touch of the play it fell in within this.
 pub(super) const LIKE_IN_PLAY_MS: i64 = 20 * 60_000;
@@ -144,7 +144,7 @@ pub(super) const COLD_MASS: f32 = 0.3;
 pub(super) const COLD_STARTS: f32 = 30.0;
 /// From this many starts the history alone is the taste (the prior would
 /// only blur the profiles of the tracks it gathers).
-const COLD_UNTIL: usize = 300;
+pub(super) const COLD_UNTIL: usize = 300;
 const LR: f32 = 0.05;
 const L2: f32 = 0.01;
 /// The step is halved until this many starts taught the model.

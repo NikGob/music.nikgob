@@ -54,7 +54,7 @@ use nikgob_view::{self as v, Command};
 
 use super::Msg;
 use crate::Worker;
-use retry::offers_of_json;
+use retry::{offers_of_json, picked_fits};
 
 pub(super) mod album_better;
 mod backoff;
