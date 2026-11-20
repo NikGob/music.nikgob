@@ -355,3 +355,34 @@
         let two = Want { album_tracks: 2, ..want.clone() };
         assert!(picked_fits(&hand, &two, &tracks, &picked), "track files with their sheet are taken");
     }
+
+    /// A track whose only file is a temporary copy saved from a stream is
+    /// not downloaded: «Хочу скачать» asks for the track again.
+    #[test]
+    fn a_temporary_copy_is_not_a_file() {
+        let row = |has_local: bool, quality: Option<i32>| nikgob_library::TrackRow {
+            id: TrackId::new(),
+            title: "Song".into(),
+            artist: "Artist".into(),
+            album: None,
+            release_id: None,
+            cover_ref: None,
+            disc_no: 1,
+            track_no: 1,
+            duration_ms: None,
+            quality,
+            codec: None,
+            active_kind: Some(SourceKind::LocalFile),
+            has_local,
+            liked: false,
+            credit: Default::default(),
+            youtube_id: None,
+            check: None,
+            in_library: false,
+        };
+        assert!(super::items::has_real_file(&row(true, Some(900))), "a real file");
+        assert!(super::items::has_real_file(&row(true, Some(300))), "the lowest of the real files");
+        assert!(!super::items::has_real_file(&row(true, Some(score::SAVED_STREAM))), "a copy saved from a stream");
+        assert!(super::items::has_real_file(&row(true, None)), "no quality known: not marked temporary");
+        assert!(!super::items::has_real_file(&row(false, Some(900))), "no file at all");
+    }
