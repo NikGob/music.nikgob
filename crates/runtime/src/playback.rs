@@ -305,9 +305,10 @@ impl Worker {
         let Some(was) = self.state.read().speeds.chosen.get(&track).copied() else { return };
         let title = self.state.read().speed_names.get(&track).map(|n| n.title.clone());
         self.set_track_speed(track, nikgob_view::SpeedVariant::Normal);
+        let loc = self.locale();
         let text = match title {
-            Some(t) => format!("«{t}» снова как записан"),
-            None => "Скорость сброшена".to_owned(),
+            Some(t) => nikgob_core::i18n::misc_toasts::fmt_speed_as_recorded_in(loc, &t),
+            None => nikgob_core::i18n::misc_toasts_in(loc).speed_reset.to_owned(),
         };
         let undo = self.undo_action(Command::SetTrackSpeed { track, variant: was });
         self.toast_info(text, Some(undo));

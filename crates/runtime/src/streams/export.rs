@@ -34,6 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 
+use nikgob_core::i18n::Locale;
 use nikgob_core::model::UnixMs;
 use nikgob_core::streaming::Service;
 use serde_json::Value;
@@ -293,18 +294,18 @@ fn csv_kind(header: &str) -> Option<Kind> {
 /// Reads every export file in `path` (a folder, a `.zip`, or a folder with
 /// `.zip`s in it). Files it does not recognise are ignored, and so is the
 /// music library's songs file unless `saved`.
-pub(crate) fn read_export(path: &Path, saved: bool) -> Result<ExportData, String> {
+pub(crate) fn read_export(path: &Path, saved: bool, loc: Locale) -> Result<ExportData, String> {
     let mut files: Vec<(String, Kind, Vec<u8>)> = Vec::new();
     if path.is_dir() {
-        walk(path, path, &mut files)?;
+        walk(path, path, &mut files, loc)?;
     } else if is_zip(path) {
         read_zip(path, &mut files)?;
     } else {
         // A single export file.
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let not_export = || format!("«{name}» — не файл выгрузки");
+        let not_export = || nikgob_core::i18n::misc_toasts::fmt_not_export_file_in(loc, &name);
         let kind = kind_of(&name).ok_or_else(not_export)?;
-        let bytes = read_file(path)?;
+        let bytes = read_file(path, loc)?;
         let kind = sniff(kind, &bytes[..bytes.len().min(HEAD as usize)]).ok_or_else(not_export)?;
         files.push((name, kind, bytes));
     }
@@ -464,10 +465,11 @@ fn is_zip(path: &Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))
 }
 
-fn read_file(path: &Path) -> Result<Vec<u8>, String> {
+fn read_file(path: &Path, loc: Locale) -> Result<Vec<u8>, String> {
     let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
     if len > MAX_FILE {
-        return Err(format!("{}: слишком большой файл", path.display()));
+        let shown = path.display().to_string();
+        return Err(nikgob_core::i18n::misc_toasts::fmt_file_too_large_in(loc, &shown));
     }
     std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -478,13 +480,18 @@ fn read_head(path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(head)
 }
 
-fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Kind, Vec<u8>)>) -> Result<(), String> {
+fn walk(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(String, Kind, Vec<u8>)>,
+    loc: Locale,
+) -> Result<(), String> {
     let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut entries: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
     entries.sort();
     for p in entries {
         if p.is_dir() {
-            walk(root, &p, out)?;
+            walk(root, &p, out, loc)?;
         } else if is_zip(&p) {
             if let Err(e) = read_zip(&p, out) {
                 log::warn!("export: {e}");
@@ -517,7 +524,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Kind, Vec<u8>)>) -> Resu
                 }
                 k => k,
             };
-            out.push((named, kind, read_file(&p)?));
+            out.push((named, kind, read_file(&p, loc)?));
         }
     }
     Ok(())
@@ -1583,7 +1590,7 @@ mod tests {
         put("search-history.html", &page(&[cell("YouTube", "Searched for <a href=\"https://www.youtube.com/results?search_query=x\">x</a><br>Oct 15, 2026, 4:00:00 PM IDT<br>")]));
         put("notes.html", "<html><body>hi</body></html>");
 
-        let data = read_export(dir.path(), true).unwrap();
+        let data = read_export(dir.path(), true, Locale::Ru).unwrap();
         assert!(data.problems.is_empty(), "{:?}", data.problems);
         assert_eq!(data.plays.len(), 1);
         assert!(data.likes.is_empty(), "a song of the music library is no like");
@@ -1610,7 +1617,7 @@ mod tests {
         assert!(files.iter().all(|f| !f.contains("saves") && !f.contains("search") && !f.contains("notes")));
 
         // Without the music library: its file is not read at all.
-        let data = read_export(dir.path(), false).unwrap();
+        let data = read_export(dir.path(), false, Locale::Ru).unwrap();
         assert!(data.saved.is_empty() && data.likes.is_empty());
         assert_eq!(data.files.len(), 6);
         let abyss = &data.playlists[0].items;
