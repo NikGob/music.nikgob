@@ -3,18 +3,6 @@ use super::*;
 use nikgob_core::model::{EndReason, EventMeta, EventOrigin, EventType, LikeTarget};
 use nikgob_view::LIKED_PLAYLIST;
 
-/// The toast of «Добавить в плейлист»: what was added and what the
-/// playlist had already.
-fn added_to_playlist(name: &str, added: usize, already: usize) -> String {
-    match (added, already) {
-        (0, 0) => format!("Добавлено в «{name}»"),
-        (0, _) => format!("Уже есть в «{name}»"),
-        (_, 0) => format!("Добавлено в «{name}»"),
-        (_, 1) => format!("Добавлено {added}, 1 уже был в «{name}»"),
-        _ => format!("Добавлено {added}, {already} уже были в «{name}»"),
-    }
-}
-
 impl Worker {
     // ---------------------------------------------------------------- commands
 
@@ -316,7 +304,8 @@ impl Worker {
                 let before = self.library_tracks();
                 if let Some(p) = self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.create_playlist(&name)) {
                     let _ = self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.playlist_add_many(p.id, &tracks));
-                    self.toast_ok(format!("Плейлист «{name}» сохранён"), None);
+                    let msg = nikgob_core::i18n::dispatch_toasts::fmt_playlist_saved_in(self.locale(), &name);
+                    self.toast_ok(msg, None);
                     self.library_edited(before, Vec::new());
                 }
             }
@@ -324,10 +313,11 @@ impl Worker {
                 self.publish(|s| s.prefs.home_card = false);
                 self.save_prefs();
                 self.load_home();
+                let strings = nikgob_core::i18n::dispatch_toasts_in(self.locale());
                 self.push_toast(
                     nikgob_view::ToastKind::Info,
-                    "Карточка скрыта. Включить её снова можно в Настройках → Внешний вид → Главная.".into(),
-                    Some(("Вернуть".into(), Command::SetPref(nikgob_view::PrefPatch::HomeCard(true)))),
+                    strings.home_card_hidden.into(),
+                    Some((strings.home_card_restore.into(), Command::SetPref(nikgob_view::PrefPatch::HomeCard(true)))),
                     None,
                     true,
                 );
@@ -337,7 +327,8 @@ impl Worker {
                 let before = self.library_tracks();
                 if let Some(p) = self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.create_playlist(&name)) {
                     let _ = self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.playlist_add_many(p.id, &tracks));
-                    self.toast_ok(format!("Плейлист «{name}» сохранён"), None);
+                    let msg = nikgob_core::i18n::dispatch_toasts::fmt_playlist_saved_in(self.locale(), &name);
+                    self.toast_ok(msg, None);
                     self.library_edited(before, Vec::new());
                 }
             }
@@ -378,11 +369,12 @@ impl Worker {
                     }
                     // A like that downloads says so (a like of a track
                     // without a file puts it into «Хочу скачать»).
+                    let strings = nikgob_core::i18n::dispatch_toasts_in(self.locale());
                     let text = match (on, wished) {
-                        (true, true) if self.can_download() => "В Любимых · скачаю в фоне",
-                        (true, true) => "В Любимых · скачается, когда подключишь торренты",
-                        (true, false) => "Добавлено в Любимые",
-                        (false, _) => "Убрано из Любимых",
+                        (true, true) if self.can_download() => strings.liked_background,
+                        (true, true) => strings.liked_when_torrents,
+                        (true, false) => strings.liked_added,
+                        (false, _) => strings.liked_removed,
                     };
                     let undo = Some(self.undo_action(Command::Like(target, !on)));
                     if on {
@@ -411,7 +403,7 @@ impl Worker {
             Command::DeletePlaylist(id) => {
                 let before = self.library_tracks();
                 if self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.delete_playlist(id)).is_some() {
-                    self.toast_ok("Плейлист удалён", None);
+                    self.toast_ok(nikgob_core::i18n::dispatch_toasts_in(self.locale()).playlist_deleted, None);
                     self.library_edited(before, Vec::new());
                 }
             }
@@ -440,8 +432,9 @@ impl Worker {
                 } else if let Some(n) = self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.playlist_add_missing(id, &tracks)) {
                     (added, already) = n;
                 }
+                let loc = self.locale();
                 let name = if id == LIKED_PLAYLIST {
-                    "Любимые".to_owned()
+                    nikgob_core::i18n::nav_in(loc).liked.to_owned()
                 } else {
                     self.lib
                         .get_playlist(id)
@@ -449,7 +442,7 @@ impl Worker {
                         .flatten()
                         .map_or_else(String::new, |p| p.name)
                 };
-                let msg = added_to_playlist(&name, added, already);
+                let msg = nikgob_core::i18n::dispatch_toasts::fmt_added_to_in(loc, &name, added, already);
                 if added == 0 && already > 0 {
                     self.toast_info(msg, None);
                 } else {
@@ -463,17 +456,20 @@ impl Worker {
                 let before = self.library_tracks();
                 // The way back, in its toast.
                 let mut undo = None;
+                let loc = self.locale();
                 if id == LIKED_PLAYLIST {
                     if self.log_err(nikgob_core::i18n::LibOp::Like.label_in(self.locale()), self.lib.unlike(track)).is_some() {
                         self.publish_liked_state(&[track], None, None, false);
-                        undo = Some(("Убрано из Любимых".to_owned(), Command::Like(LikeTarget::Track(track), true)));
+                        let text = nikgob_core::i18n::dispatch_toasts_in(loc).liked_removed.to_owned();
+                        undo = Some((text, Command::Like(LikeTarget::Track(track), true)));
                     }
                 } else if let Ok(entries) = self.lib.playlist_entries(id, 0, u32::MAX)
                     && let Some(at) = entries.iter().position(|e| e.track.id == track)
                     && self.log_err(nikgob_core::i18n::LibOp::Playlist.label_in(self.locale()), self.lib.playlist_remove(entries[at].entry.id)).is_some()
                 {
                     let name = self.lib.get_playlist(id).ok().flatten().map_or_else(String::new, |p| p.name);
-                    undo = Some((format!("Убрано из «{name}»"), Command::RestoreToPlaylist { playlist: id, track, at }));
+                    let text = nikgob_core::i18n::dispatch_toasts::fmt_removed_from_in(loc, &name);
+                    undo = Some((text, Command::RestoreToPlaylist { playlist: id, track, at }));
                 }
                 self.load_playlist(id);
                 let releases = if id == LIKED_PLAYLIST { self.releases_of(&[track]) } else { Vec::new() };
@@ -504,11 +500,15 @@ impl Worker {
                 }
                 self.load_playlist(playlist);
             }
-            Command::TrashTrack(t) => self.delete_tracks(vec![t], "Трек"),
+            Command::TrashTrack(t) => {
+                let what = nikgob_core::i18n::dispatch_toasts_in(self.locale()).kind_track;
+                self.delete_tracks(vec![t], what);
+            }
             Command::UndoTrash(t) => self.restore_tracks(vec![t]),
             Command::TrashRelease(id) => {
                 let ids = self.release_track_ids(id);
-                self.delete_tracks(ids, "Альбом");
+                let what = nikgob_core::i18n::dispatch_toasts_in(self.locale()).kind_album;
+                self.delete_tracks(ids, what);
             }
             Command::AddWholeAlbum { id, on } => self.add_whole_album(id, on),
             Command::UndoWholeAlbum { id, mine, excluded } => {
