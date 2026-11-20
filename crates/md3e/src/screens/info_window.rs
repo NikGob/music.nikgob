@@ -130,13 +130,13 @@ fn header(ui: &mut egui::Ui) -> bool {
     let s = Theme::get(ui.ctx()).scheme;
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H), Sense::hover());
     let mut right = ui.new_child(UiBuilder::new().max_rect(row).layout(Layout::right_to_left(Align::Center)).id_salt("track-info-header-right"));
-    let close = IconButton::new(Icon::Close).size(Size::S).style(Style::Standard).tooltip("Закрыть (Esc)").id_salt("track-info-close");
+    let close = IconButton::new(Icon::Close).size(Size::S).style(Style::Standard).tooltip(nikgob_core::i18n::pages().close_esc).id_salt("track-info-close");
     let closed = right.add(close).clicked();
     let left = Rect::from_min_max(row.min, pos2((right.min_rect().left() - 12.0).max(row.left()), row.bottom()));
     let mut left = ui.new_child(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)).id_salt("track-info-header-left"));
     // In line with the card's content under it.
     left.add_space(CARD_PAD - modal_window::SHELL_PADDING);
-    left.label(TypeRole::TitleLarge.style().rich("Источник и качество", s.on_surface));
+    left.label(TypeRole::TitleLarge.style().rich(nikgob_core::i18n::menus().source_quality, s.on_surface));
     closed
 }
 

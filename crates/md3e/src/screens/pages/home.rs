@@ -15,6 +15,7 @@
 //! right click open the same menu.
 
 use egui::{Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
+use nikgob_core::i18n;
 use nikgob_view::{
     Command, HomeRow, HomeView, LaneCard, MixCard, MixId, PlaylistCard, Route, ShelfAlbum, Shortcut, Status,
     StreamAlbumCard, StreamPage, StreamTrackRow, TileKind, TrackRow, ViewState,
@@ -33,11 +34,12 @@ use crate::{
 };
 
 pub(super) fn greeting(hour: u8) -> &'static str {
+    let t = i18n::home_recs();
     match hour {
-        5..=11 => "Доброе утро",
-        12..=16 => "Добрый день",
-        17..=22 => "Добрый вечер",
-        _ => "Доброй ночи",
+        5..=11 => t.good_morning,
+        12..=16 => t.good_afternoon,
+        17..=22 => t.good_evening,
+        _ => t.good_night,
     }
 }
 
@@ -257,14 +259,15 @@ impl Section {
 
     /// Its name in «Разделы главной».
     pub fn title(self) -> &'static str {
+        let t = i18n::view();
         match self {
-            Self::Shortcuts => "Быстрый доступ",
-            Self::Mixes => "Миксы для тебя",
-            Self::ListenAgain => "Слушать снова",
-            Self::OfDay => "Плитки дня",
-            Self::FromLibrary => "Из библиотеки",
-            Self::New => "Новое",
-            Self::Releases => "Релизы",
+            Self::Shortcuts => t.home_shortcuts,
+            Self::Mixes => t.home_mixes,
+            Self::ListenAgain => t.home_listen_again,
+            Self::OfDay => t.home_of_day,
+            Self::FromLibrary => t.home_from_library,
+            Self::New => t.home_new,
+            Self::Releases => t.home_releases,
         }
     }
 }
@@ -498,7 +501,7 @@ fn header(ui: &mut Ui, row: Rect, state: &ViewState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let on = state.prefs.mixes_downloaded_only;
     let greeting = greeting_line(state.home.greeting_hour, &state.prefs.user_name);
-    let label = "Только скачанное";
+    let label = i18n::home_recs().only_downloaded;
     let text_w = |t: &str, role: TypeRole| crate::typography::layout(ui.painter(), role.style().job(t, s.on_surface)).size().x;
     let folded = chip_folds(row.width(), text_w(greeting.as_str(), TypeRole::HeadlineMedium), text_w(label, TypeRole::LabelLarge));
     let mut right = ui.new_child(
@@ -574,7 +577,8 @@ pub fn name_buttons_below(inner_w: f32, buttons_w: f32) -> bool {
 fn name_prompt(ui: &mut Ui, grid: Grid, pages: &mut PageState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let w = grid.width.min(560.0);
-    let buttons = Button::new("Пропустить").natural_width(ui) + Button::new("Готово").natural_width(ui) + 16.0;
+    let (t, words) = (i18n::home_recs(), i18n::common());
+    let buttons = Button::new(words.skip).natural_width(ui) + Button::new(words.done).natural_width(ui) + 16.0;
     let below = name_buttons_below(w - 40.0, buttons);
     let h = NAME_PROMPT_H + if below { NAME_BUTTONS_H } else { 0.0 };
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
@@ -588,10 +592,10 @@ fn name_prompt(ui: &mut Ui, grid: Grid, pages: &mut PageState, out: &mut Vec<Com
     );
     let mut c = ui.new_child(UiBuilder::new().max_rect(card.shrink2(vec2(20.0, 16.0))).id_salt("home-name-prompt"));
     c.spacing_mut().item_spacing.y = 4.0;
-    c.label(TypeRole::TitleMedium.style().rich("Как к тебе обращаться?", s.on_surface));
+    c.label(TypeRole::TitleMedium.style().rich(t.name_question, s.on_surface));
     c.add_space(12.0);
     if below {
-        let field = crate::components::TextField::new(&mut pages.name_draft, "Имя")
+        let field = crate::components::TextField::new(&mut pages.name_draft, t.name_field)
             .width(c.available_width())
             .id_salt("home-name-field")
             .show(&mut c);
@@ -600,8 +604,8 @@ fn name_prompt(ui: &mut Ui, grid: Grid, pages: &mut PageState, out: &mut Vec<Com
         let (skip, done) = c
             .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                let done = ui.add(Button::new("Готово").style(Style::Filled).enabled(!name.is_empty()).id_salt("home-name-done")).clicked();
-                let skip = ui.add(Button::new("Пропустить").style(Style::Text).id_salt("home-name-skip")).clicked();
+                let done = ui.add(Button::new(words.done).style(Style::Filled).enabled(!name.is_empty()).id_salt("home-name-done")).clicked();
+                let skip = ui.add(Button::new(words.skip).style(Style::Text).id_salt("home-name-skip")).clicked();
                 (skip, done)
             })
             .inner;
@@ -610,13 +614,13 @@ fn name_prompt(ui: &mut Ui, grid: Grid, pages: &mut PageState, out: &mut Vec<Com
     }
     c.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        let field = crate::components::TextField::new(&mut pages.name_draft, "Имя")
+        let field = crate::components::TextField::new(&mut pages.name_draft, t.name_field)
             .width((ui.available_width() - buttons).max(120.0))
             .id_salt("home-name-field")
             .show(ui);
         let name = nikgob_view::user_name(&pages.name_draft);
-        let skip = ui.add(Button::new("Пропустить").style(Style::Text).id_salt("home-name-skip")).clicked();
-        let done = ui.add(Button::new("Готово").style(Style::Filled).enabled(!name.is_empty()).id_salt("home-name-done")).clicked();
+        let skip = ui.add(Button::new(words.skip).style(Style::Text).id_salt("home-name-skip")).clicked();
+        let done = ui.add(Button::new(words.done).style(Style::Filled).enabled(!name.is_empty()).id_salt("home-name-done")).clicked();
         name_answer(pages, name, skip, done || field.submitted, out);
     });
 }
@@ -670,8 +674,9 @@ pub(crate) fn name_dialog(ctx: &egui::Context, prefs: &nikgob_view::Prefs, pages
         return;
     }
     let mut open = true;
-    let answered = crate::components::TextInputDialog::new("home-name-dialog", "Как к тебе обращаться?", "Имя")
-        .buttons("Готово", "Пропустить")
+    let (t, words) = (i18n::home_recs(), i18n::common());
+    let answered = crate::components::TextInputDialog::new("home-name-dialog", t.name_question, t.name_field)
+        .buttons(words.done, words.skip)
         .show(ctx, &mut open, &mut pages.name_draft);
     match answered {
         Some(crate::components::dialog::TextInputResult::Confirmed) => {
@@ -1075,8 +1080,8 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: 
     let lanes: Vec<&LaneCard> = state.home.lanes.iter().collect();
     let local_only = state.prefs.mixes_downloaded_only;
     let s = Theme::get(ui.ctx()).scheme;
-    let g = crate::typography::layout(ui.painter(), TypeRole::TitleLarge.style().job("Миксы для тебя", s.on_surface));
-    let labels = ["Только моё", "С новым"];
+    let g = crate::typography::layout(ui.painter(), TypeRole::TitleLarge.style().job(i18n::home_recs().mixes_for_you, s.on_surface));
+    let labels = [i18n::home_recs().mixes_mine, i18n::home_recs().mixes_with_new];
     let gw: f32 = labels.iter().map(|l| Button::new(*l).size(Size::S).natural_width(ui)).sum::<f32>() + 2.0;
     // «Только моё | С новым» at the right of the title, or on a row of its
     // own under it where both do not fit (a phone's column).
@@ -1135,7 +1140,7 @@ pub(super) fn blend_sheet(ctx: &egui::Context, state: &ViewState, out: &mut Vec<
     let height = 36.0 + 48.0 + rows * 40.0 + 24.0 + 40.0 + 24.0;
     crate::components::BottomSheet::new("home-blend-sheet").height(height).max_width(640.0).show(ctx, &mut open, |ui| {
         let s = Theme::get(ui.ctx()).scheme;
-        let title = format!("Смешать «{}» с", base_title.as_deref().unwrap_or_default());
+        let title = i18n::home_recs::fmt_blend_with_in(i18n::locale(), base_title.as_deref().unwrap_or_default());
         ui.add(egui::Label::new(TypeRole::TitleLarge.style().rich(title, s.on_surface)).truncate());
         ui.add_space(16.0);
         ui.horizontal_wrapped(|ui| {
@@ -1155,7 +1160,7 @@ pub(super) fn blend_sheet(ctx: &egui::Context, state: &ViewState, out: &mut Vec<
         });
         ui.add_space(24.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let listen = Button::new("Слушать").icon(Icon::PlayArrow).style(Style::Filled).enabled(!b.with.is_empty()).id_salt("home-blend-play");
+            let listen = Button::new(i18n::home_recs().listen).icon(Icon::PlayArrow).style(Style::Filled).enabled(!b.with.is_empty()).id_salt("home-blend-play");
             play = ui.add(listen).clicked();
         });
     });
@@ -1185,7 +1190,7 @@ fn listen_again(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + body), Sense::hover());
     let mut nav = None;
     entering(ui, rect, n, "again", |ui| {
-        if section_header(ui, grid, rect, "Слушать снова", Some(("Слушать всё", Some(Icon::PlayArrow)))) {
+        if section_header(ui, grid, rect, i18n::home_recs().listen_again, Some((i18n::home_recs().play_all, Some(Icon::PlayArrow)))) {
             out.push(Command::PlayAll { tracks: rows.iter().map(|t| t.id).collect(), context: "Слушать снова".into() });
         }
         let at = row::Row { name: "again", top: rect.top() + HEADER_H + HEADER_GAP, card_h: body, arrows_at: body / 2.0, per, n: columns, live, bleed: 8.0 };
@@ -1242,7 +1247,7 @@ fn of_day(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out:
     let per = of_day_per(grid.of_day_per_line(), tiles.len()).max(grid.of_day_least());
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + OF_DAY_H), Sense::hover());
     entering(ui, rect, n, "of-day", |ui| {
-        section_header(ui, grid, rect, "Подборки дня", None);
+        section_header(ui, grid, rect, i18n::home_recs().of_day, None);
         let at = row::Row {
             name: "of-day",
             top: rect.top() + HEADER_H + HEADER_GAP,
@@ -1314,9 +1319,13 @@ pub(super) fn artist_photo(state: &ViewState, name: &str) -> Option<String> {
 pub fn shelf_tail(a: &ShelfAlbum, history: bool) -> String {
     if !history {
         let n = u64::from(a.total);
-        return format!("{n} {}", crate::screens::common::plural(n, "трек", "трека", "треков"));
+        return i18n::tracks_count(n);
     }
-    if a.heard == 0 { "не слушал".to_owned() } else { format!("слушал {} из {}", a.heard, a.total) }
+    if a.heard == 0 {
+        i18n::home_recs().not_heard.to_owned()
+    } else {
+        i18n::home_recs::fmt_heard_of_in(i18n::locale(), a.heard, a.total)
+    }
 }
 
 fn from_library(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
@@ -1327,7 +1336,7 @@ fn from_library(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
     let card_h = w + cards::ALBUM_TEXT_H;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + card_h), Sense::hover());
     let mut nav = None;
-    let title = if h.history { "Из твоей библиотеки" } else { "С чего начать" };
+    let title = if h.history { i18n::home_recs().from_your_library } else { i18n::home_recs().where_to_start };
     entering(ui, rect, n, "shelf", |ui| {
         section_header(ui, grid, rect, title, None);
         let at = row::Row { name: "shelf", top: rect.top() + HEADER_H + HEADER_GAP, card_h, arrows_at: w / 2.0, per, n: albums.len(), live, bleed: 0.0 };
@@ -1372,7 +1381,7 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, p
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + body), Sense::hover());
     let mut nav = None;
     entering(ui, rect, n, "new", |ui| {
-        if section_header(ui, grid, rect, "Новое для тебя", Some(("Слушать всё", Some(Icon::PlayArrow)))) {
+        if section_header(ui, grid, rect, i18n::home_recs().discover, Some((i18n::home_recs().play_all, Some(Icon::PlayArrow)))) {
             out.push(Command::PlayMix { id: MixId::Discover });
         }
         let at = row::Row { name: "new", top: rect.top() + HEADER_H + HEADER_GAP, card_h: body, arrows_at: body / 2.0, per, n: columns, live, bleed: 8.0 };
@@ -1449,7 +1458,7 @@ fn releases(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, ou
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + card_h), Sense::hover());
     let mut nav = None;
     entering(ui, rect, n, "releases", |ui| {
-        if section_header(ui, grid, rect, "Новые релизы", Some(("Все", Some(Icon::ArrowForward)))) {
+        if section_header(ui, grid, rect, i18n::home_recs().new_releases, Some((i18n::home_recs().see_all, Some(Icon::ArrowForward)))) {
             nav = Some(Route::NewReleases);
         }
         let at = row::Row { name: "releases", top: rect.top() + HEADER_H + HEADER_GAP, card_h, arrows_at: w / 2.0, per, n: albums.len(), live, bleed: 0.0 };
@@ -1479,10 +1488,10 @@ fn releases(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, ou
 /// row has, in its order, as cards of the same grid; a click opens one, ▶
 /// plays it, ⋮ and the right click: a service album's menu.
 pub fn new_releases(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
-    super::detail::with_bar(ui, "Новые релизы", pages, |ui, _| {
+    super::detail::with_bar(ui, i18n::home_recs().new_releases, pages, |ui, _| {
         let albums = &state.home.new_releases;
         if albums.is_empty() {
-            widgets::empty_state(ui, Icon::Album, "Новых релизов пока нет", "", None);
+            widgets::empty_state(ui, Icon::Album, i18n::home_recs().no_new_releases, "", None);
             return None;
         }
         ui.spacing_mut().item_spacing.y = 0.0;

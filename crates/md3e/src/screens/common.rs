@@ -40,18 +40,6 @@ pub fn fmt_album_date(released: Option<ReleaseDay>, year: Option<i32>, how: Albu
     })
 }
 
-/// Russian plural: 1 трек, 2 трека, 5 треков.
-pub fn plural<'a>(n: u64, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
-    let (n10, n100) = (n % 10, n % 100);
-    if n10 == 1 && n100 != 11 {
-        one
-    } else if (2..=4).contains(&n10) && !(12..=14).contains(&n100) {
-        few
-    } else {
-        many
-    }
-}
-
 /// A cover image in a rounded rect, or a tonal placeholder with a note icon.
 pub fn cover(ui: &Ui, cover: Option<&Cover>, rect: Rect, radius: f32) {
     let s = Theme::get(ui.ctx()).scheme;

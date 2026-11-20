@@ -22,6 +22,31 @@ pub struct HomeRecsStrings {
     pub similar_sound: &'static str,
     /// «раз», «раза», «раз»: the times a song was played (see [`fmt_on_repeat_in`]).
     pub times: PluralForms,
+    /// The greeting at the top of Главная, by the time of day.
+    pub good_morning: &'static str,
+    pub good_afternoon: &'static str,
+    pub good_evening: &'static str,
+    pub good_night: &'static str,
+    /// The chip beside the greeting.
+    pub only_downloaded: &'static str,
+    /// The two halves of the toggle beside «Миксы для тебя».
+    pub mixes_mine: &'static str,
+    pub mixes_with_new: &'static str,
+    /// The first start's name card.
+    pub name_question: &'static str,
+    pub name_field: &'static str,
+    /// «Смешать с…»'s button.
+    pub listen: &'static str,
+    /// A section's action at its right.
+    pub play_all: &'static str,
+    pub see_all: &'static str,
+    pub new_releases: &'static str,
+    pub no_new_releases: &'static str,
+    /// The shelf's title, with and without a history.
+    pub from_your_library: &'static str,
+    pub where_to_start: &'static str,
+    /// A shelf album never played.
+    pub not_heard: &'static str,
 }
 
 pub static RU: HomeRecsStrings = HomeRecsStrings {
@@ -36,6 +61,23 @@ pub static RU: HomeRecsStrings = HomeRecsStrings {
     next_on_album: "Следующий на альбоме",
     similar_sound: "Похоже по звуку",
     times: PluralForms { one: "раз", few: "раза", many: "раз" },
+    good_morning: "Доброе утро",
+    good_afternoon: "Добрый день",
+    good_evening: "Добрый вечер",
+    good_night: "Доброй ночи",
+    only_downloaded: "Только скачанное",
+    mixes_mine: "Только моё",
+    mixes_with_new: "С новым",
+    name_question: "Как к тебе обращаться?",
+    name_field: "Имя",
+    listen: "Слушать",
+    play_all: "Слушать всё",
+    see_all: "Все",
+    new_releases: "Новые релизы",
+    no_new_releases: "Новых релизов пока нет",
+    from_your_library: "Из твоей библиотеки",
+    where_to_start: "С чего начать",
+    not_heard: "не слушал",
 };
 
 pub static EN: HomeRecsStrings = HomeRecsStrings {
@@ -50,6 +92,23 @@ pub static EN: HomeRecsStrings = HomeRecsStrings {
     next_on_album: "Next on the album",
     similar_sound: "Similar sound",
     times: PluralForms { one: "time", few: "times", many: "times" },
+    good_morning: "Good morning",
+    good_afternoon: "Good afternoon",
+    good_evening: "Good evening",
+    good_night: "Good night",
+    only_downloaded: "Downloaded only",
+    mixes_mine: "Mine only",
+    mixes_with_new: "With new",
+    name_question: "What should we call you?",
+    name_field: "Name",
+    listen: "Listen",
+    play_all: "Play all",
+    see_all: "See all",
+    new_releases: "New releases",
+    no_new_releases: "No new releases yet",
+    from_your_library: "From your library",
+    where_to_start: "Where to start",
+    not_heard: "not played",
 };
 
 locale_table! {
@@ -58,6 +117,23 @@ locale_table! {
     /// Returns home/recommendation strings for the active process locale.
     home_recs,
     { Ru => RU, En => EN }
+}
+
+/// «Смешать «Daily Mix» с» / "Blend “Daily Mix” with": the title of the
+/// sheet that mixes a mix card with others.
+pub fn fmt_blend_with_in(loc: Locale, title: &str) -> String {
+    match loc {
+        Locale::Ru => format!("Смешать «{title}» с"),
+        Locale::En => format!("Blend “{title}” with"),
+    }
+}
+
+/// «слушал 5 из 52» / "played 5 of 52": how much of a shelf album was heard.
+pub fn fmt_heard_of_in(loc: Locale, heard: u32, total: u32) -> String {
+    match loc {
+        Locale::Ru => format!("слушал {heard} из {total}"),
+        Locale::En => format!("played {heard} of {total}"),
+    }
 }
 
 /// Six mood cards in «Под настроение».
