@@ -732,7 +732,8 @@ impl Worker {
                     s.clear_cache();
                 }
                 self.publish_stream_cache();
-                self.toast_ok("Кэш стриминга очищен", None);
+                let loc = self.locale();
+                self.toast_ok(nikgob_core::i18n::misc_toasts_in(loc).stream_cache_cleared, None);
             }
             Command::SetPlaylistSync { playlist, mode } => self.set_playlist_sync(playlist, mode),
             Command::LoadDiscography(artist) => self.load_discography(artist, true),
