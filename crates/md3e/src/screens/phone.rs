@@ -155,7 +155,7 @@ impl PhonePages {
         let rows = pages::with_speed_row(rows, &state.speeds, pages::is_playing(state, track.id));
         let also = state.also_on.get(&track.id).map(|(r, _)| *r);
         let rows = pages::Here::of(here).trim(rows, track, also, Some);
-        let rows = pages::placed(rows, &state.prefs.track_menu, |a| a.menu_item(track.has_local));
+        let rows = pages::placed(rows, &state.prefs.track_menu, |a| a.menu_item(track.has_local && !track.temporary));
         let mut out = Vec::new();
         flatten(rows, &mut out);
         out

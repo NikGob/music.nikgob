@@ -245,7 +245,7 @@ impl Chrome {
             info,
             also: state.also_on.get(&t.id),
             torrents: state.prefs.prowlarr_configured,
-            wished: (!t.has_local).then(|| wish.of_track(Some(t.id), t.release_id)).flatten(),
+            wished: (!t.has_local || t.temporary).then(|| wish.of_track(Some(t.id), t.release_id)).flatten(),
         };
         for r in super::pages::library_track_rows(t, of) {
             if !matches!(r, Row::Item(TrackAct::Next | TrackAct::Queue, _)) {
@@ -285,7 +285,7 @@ impl Chrome {
         });
         // «Меню трека»: the bar's own rows and the delete stay as they are.
         super::pages::placed(rows, &state.prefs.track_menu, |a| match a {
-            PlayerAct::Track(a) => a.menu_item(t.has_local),
+            PlayerAct::Track(a) => a.menu_item(t.has_local && !t.temporary),
             PlayerAct::Own(Act::Visualizer) => Some(nikgob_view::TrackMenuItem::Visualizer),
             PlayerAct::Own(Act::EditLyrics) => Some(nikgob_view::TrackMenuItem::LyricsEdit),
             PlayerAct::Own(_) => None,
@@ -437,7 +437,7 @@ impl Chrome {
             // The playing track's own speed (a queue row opens its own).
             A::Speed => super::pages::sound::open(ctx, super::pages::sound::Tab::Speed, None),
             A::Equalizer => super::pages::sound::open(ctx, super::pages::sound::Tab::Equalizer, None),
-            A::Fetch if t.has_local => out.push(Command::OpenTagEditor(t.id)),
+            A::Fetch if t.has_local && !t.temporary => out.push(Command::OpenTagEditor(t.id)),
             A::Fetch => out.push(Command::DownloadTracks(vec![t.id])),
             // The whole album the track is from, the files it lacks.
             A::AlbumDownload => out.extend(t.release_id.map(Command::DownloadRelease)),

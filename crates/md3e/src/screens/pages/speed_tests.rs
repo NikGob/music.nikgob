@@ -419,6 +419,7 @@ fn a_menu_leaves_out_the_page_it_is_on() {
         liked: false,
         in_library: false,
         has_local: false,
+        temporary: false,
         elsewhere: None,
         also_on: Vec::new(),
     };

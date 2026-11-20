@@ -890,7 +890,7 @@ fn plain_album(card: ReleaseCard, tracks: Vec<TrackRow>, total: Duration, releas
 
 /// The card of an album of `tracks`.
 fn card_of(id: ReleaseId, title: String, artist: String, release_type: ReleaseType, cover: Option<Cover>, tracks: &[TrackRow]) -> ReleaseCard {
-    let local = tracks.iter().filter(|t| t.has_local).count() as u32;
+    let local = tracks.iter().filter(|t| t.has_local && !t.temporary).count() as u32;
     ReleaseCard {
         id,
         title,
@@ -941,7 +941,7 @@ fn catalogue_album(v: &ViewState, t: &TrackRow, seed: TrackId) -> Option<Release
             cover: r.cover_url.clone().map(Cover::web),
             clip: false,
             in_library: r.in_library,
-            temporary: false,
+            temporary: if i == playing { t.temporary } else { r.temporary },
         })
         .collect();
     let artist = if p.subtitle.is_empty() { t.artist.clone() } else { p.subtitle.clone() };
@@ -1856,6 +1856,7 @@ mod tests {
                 liked: false,
                 in_library: false,
                 has_local: false,
+                temporary: false,
                 elsewhere: None,
                 also_on: Vec::new(),
             })

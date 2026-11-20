@@ -300,7 +300,7 @@ impl<'a> LibraryRowsOf<'a> {
             info: has_info(track),
             also: state.also_on.get(&track.id),
             torrents: state.prefs.prowlarr_configured,
-            wished: (!track.has_local).then(|| wish.of_track(Some(track.id), track.release_id)).flatten(),
+            wished: (!track.has_local || track.temporary).then(|| wish.of_track(Some(track.id), track.release_id)).flatten(),
         }
     }
 }
@@ -354,7 +354,7 @@ pub(crate) fn library_track_rows(track: &TrackRow, o: LibraryRowsOf<'_>) -> Vec<
         info: o.info,
         fetch,
         better: track.has_local,
-        pick_release: !track.has_local && o.torrents,
+        pick_release: (!track.has_local || track.temporary) && o.torrents,
         find_song: find_song::label(track),
         wrong_file: track.has_local,
         dislike: dislike_item(o.marks.track(track.id)),
@@ -372,8 +372,10 @@ pub(crate) fn library_track_rows(track: &TrackRow, o: LibraryRowsOf<'_>) -> Vec<
         file.insert(at, widgets::Row::Item(TrackAct::ToMp3, MenuItem::new(i18n::menus().to_mp3).icon(Icon::Sync)));
     }
     // The cover of the album of a file, last of the file's own items. A
-    // song without an album has no cover of its own to refresh.
+    // song without an album has no cover of its own to refresh; a
+    // temporary copy's cover comes from its file as it is.
     if track.has_local
+        && !track.temporary
         && track.release_id.is_some()
         && let Some(file) = widgets::sub_rows_mut(&mut rows, widgets::SubId::File)
     {

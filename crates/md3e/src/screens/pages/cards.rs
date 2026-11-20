@@ -906,7 +906,7 @@ pub fn mix_items(l: &LaneCard, can_blend: bool, list: bool, on_page: bool) -> Ve
         items.extend([MixItem::Play, MixItem::Shuffle]);
     }
     items.extend([MixItem::PlayNext, MixItem::Enqueue, MixItem::Save]);
-    if l.tracks.iter().any(|t| !t.has_local) {
+    if l.tracks.iter().any(|t| !t.has_local || t.temporary) {
         items.push(MixItem::Download);
     }
     if redraw {
@@ -972,7 +972,7 @@ pub fn mix_do(ctx: &egui::Context, l: &LaneCard, item: MixItem, world: Option<&s
             name: l.origin().save_name().unwrap_or_else(|| l.display_title().into_owned()),
             tracks: tracks(),
         }),
-        MixItem::Download => out.push(Command::DownloadTracks(l.tracks.iter().filter(|t| !t.has_local).map(|t| t.id).collect())),
+        MixItem::Download => out.push(Command::DownloadTracks(l.tracks.iter().filter(|t| !t.has_local || t.temporary).map(|t| t.id).collect())),
         MixItem::Redraw => out.push(Command::RefreshMix { id: l.id() }),
         MixItem::Blend => {
             if let Some(base) = l.blend_base {

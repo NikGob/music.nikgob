@@ -1413,7 +1413,7 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, p
                     // A service song's one list (its ♥ is on the row).
                     if !crate::components::Menu::context_idle(&o.response, ("discover-menu", o.response.id)) {
                         let wish = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist);
-                        let wished = (!t.has_local).then(|| wish.of_track(t.track, None)).flatten();
+                        let wished = (!t.has_local || t.temporary).then(|| wish.of_track(t.track, None)).flatten();
                         let rows = super::placed(super::streams::stream_track_rows(t, wished, &state.dislikes), &state.prefs.track_menu, |a| a.menu_item(false));
                         let (menu, acts) = widgets::menu_of(("discover-menu", o.response.id), rows);
                         let act = menu.context_menu(&o.response).and_then(|k| acts.get(k).copied());

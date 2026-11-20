@@ -98,7 +98,7 @@ pub(crate) fn row_plays(t: &StreamTrackRow, youtube_plays: bool) -> bool {
 
 /// How far a stream track is in «Хочу скачать» (its library track's item).
 fn wish_of(t: &StreamTrackRow, wish: &widgets::WishIndex) -> Option<WishlistStatus> {
-    (!t.has_local).then(|| wish.of_track(t.track, None)).flatten()
+    (!t.has_local || t.temporary).then(|| wish.of_track(t.track, None)).flatten()
 }
 
 /// Rows of stream tracks: cover (or number, ▶ on hover), title, artist ·
@@ -168,8 +168,9 @@ fn track_row(
     if t.kind == TrackKind::Video {
         extras.push(si.video.into());
     }
-    // A song filed on another library album says which.
-    match (&t.elsewhere, t.has_local) {
+    // A song filed on another library album says which. A temporary copy
+    // says nothing: it is not the file to be content with.
+    match (&t.elsewhere, t.has_local && !t.temporary) {
         (Some(a), true) => extras.push(nikgob_core::i18n::streams_ui::fmt_yours_in(nikgob_core::i18n::locale(), a)),
         (None, true) => extras.push(si.yours.into()),
         _ => {}
@@ -275,11 +276,11 @@ pub(crate) fn stream_track_rows(
         playable: t.playable,
         has_album: t.album_id.is_some(),
         has_artists: !t.artists.linked().is_empty(),
-        has_file: t.has_local,
+        has_file: t.has_local && !t.temporary,
         also_on: None,
         // The file of its library track.
         info: t.track.is_some() && t.has_local,
-        fetch: if t.has_local { None } else { super::download_item(wished) },
+        fetch: if t.has_local && !t.temporary { None } else { super::download_item(wished) },
         better: false,
         pick_release: false,
         find_song: None,
@@ -931,7 +932,8 @@ fn album_page(
 ) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let mut nav = None;
-    let local = v.tracks.iter().filter(|t| t.has_local).count();
+    // Counted over the page's own rows; a temporary copy is none.
+    let local = v.tracks.iter().filter(|t| t.has_local && !t.temporary).count();
     let artists = artist_links::stream(&v.subtitle_artists);
     header(ui, v, false, |ui| {
         let when = crate::screens::common::fmt_album_date(v.released, v.year, state.prefs.album_date)
@@ -1196,6 +1198,7 @@ mod menu_tests {
             liked: false,
             in_library: false,
             has_local: false,
+            temporary: false,
             elsewhere: None,
             also_on: Vec::new(),
         };
@@ -1228,6 +1231,7 @@ mod menu_tests {
             liked: false,
             in_library: false,
             has_local: false,
+            temporary: false,
             elsewhere: None,
             also_on: Vec::new(),
         };

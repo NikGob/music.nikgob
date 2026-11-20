@@ -880,9 +880,9 @@ fn top_view(top: &TopResult, picks: &[SearchPick], context: &str) -> TopView {
         TopResult::Track(t) => {
             let (title, artist, image, local, salt) = match t {
                 SearchTrack::Library(r) => {
-                    (r.title.clone(), r.artist.clone(), r.cover.as_ref().map(|c| c.uri()), r.has_local, format!("lt-{}", r.id))
+                    (r.title.clone(), r.artist.clone(), r.cover.as_ref().map(|c| c.uri()), r.has_local && !r.temporary, format!("lt-{}", r.id))
                 }
-                SearchTrack::Stream(r) => (r.title.clone(), r.artist.clone(), r.cover_url.clone(), r.has_local, format!("st-{}", r.remote)),
+                SearchTrack::Stream(r) => (r.title.clone(), r.artist.clone(), r.cover_url.clone(), r.has_local && !r.temporary, format!("st-{}", r.remote)),
             };
             let mut line = i18n::search::fmt_track_kind(&artist);
             if local {
