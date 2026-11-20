@@ -1,5 +1,4 @@
 use super::*;
-use super::waves::*;
 
 /// A synthetic dataset goes through serde and back unchanged, and its
 /// parts rebuild the same catalog and history.

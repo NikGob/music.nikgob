@@ -28,14 +28,16 @@ mod menu;
 mod track_list;
 
 pub use cards::*;
-pub use menu::{Row, SubId, menu_of, row_acts, shown_rows, sub_rows_mut};
+pub use menu::{Row, SubId, menu_of, sub_rows_mut};
 pub use track_list::*;
 
 #[cfg(test)]
-pub use menu::{row_items, sub_rows};
+pub use menu::{row_acts, row_items, shown_rows, sub_rows};
 
 #[cfg(test)]
-include!("widgets/tests.rs");
+mod tests;
+#[cfg(test)]
+mod menu_tests;
 
 
 pub const CARD_W: f32 = 160.0;

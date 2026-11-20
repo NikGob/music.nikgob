@@ -4,7 +4,7 @@
 
 use egui::{Context, Rect};
 use nikgob_core::i18n;
-use nikgob_view::{Command, LIKED_PLAYLIST, LibraryTab, Route, TorrentFiles, TrackId};
+use nikgob_view::{Command, LIKED_PLAYLIST, LibraryTab, Route, TorrentFiles, TrackId, ViewState};
 
 use super::{
     Ask, Doomed, PageState, StreamAdd, apart_request_key, delete_request_key, dialogs, fmt_size, picker_request_key, sound, widgets,

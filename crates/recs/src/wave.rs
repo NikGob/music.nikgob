@@ -77,7 +77,8 @@ mod sequence;
 mod tests;
 
 pub use sequence::sequence;
-pub(crate) use sequence::{edge_cost, kept_steady, transition};
+#[cfg(test)]
+use sequence::{edge_cost, kept_steady};
 #[cfg(test)]
 use sequence::*;
 

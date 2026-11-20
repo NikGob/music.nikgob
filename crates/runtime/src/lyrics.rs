@@ -40,7 +40,9 @@ mod fetch;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use fetch::{cached_lyrics, embed_text, fetch_track_lyrics, lookup_row, read_ttml, restore_pauses, stored_lines};
+pub(crate) use fetch::{cached_lyrics, embed_text, fetch_track_lyrics, read_ttml, restore_pauses};
+#[cfg(test)]
+use fetch::{lookup_row, stored_lines};
 use fetch::{ask_source, next_asked, shown_as, show_key};
 #[cfg(test)]
 use fetch::{cached_lyrics_at, fetch_online, genius_artists, miss_holds};

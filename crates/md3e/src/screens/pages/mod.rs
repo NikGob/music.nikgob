@@ -35,9 +35,11 @@ pub use search::{restore_search_scroll, search_results, search_scroll};
 pub use settings_help::SettingId;
 pub use track_menu::{TrackAct, TrackMenuOf, track_rows};
 pub(crate) use track_menu::{
-    LibraryRowsOf, can_trash, download_item, has_info, is_playing, library_item, library_track_rows, pick_release_command, placed,
+    LibraryRowsOf, can_trash, download_item, is_playing, library_item, library_track_rows, pick_release_command, placed,
     radio_by_track, sound_at, with_speed_row,
 };
+#[cfg(test)]
+use track_menu::has_info;
 pub(crate) use worlds::choose as choose_world;
 pub(crate) use worlds::{hide_stage as hide_world_stage, play_primary as play_world};
 
@@ -996,5 +998,3 @@ pub(super) fn connected_shown(
     (picked, rects)
 }
 
-#[cfg(test)]
-mod speed_tests;

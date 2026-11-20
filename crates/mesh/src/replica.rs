@@ -72,9 +72,14 @@ mod io;
 #[path = "replica/audit.rs"]
 mod audit;
 
-pub(crate) use audit::{audit, confirmed, count_copies, recheck};
-pub(crate) use io::{Part, find_part, open_part, place_song, put_in_place, receive_paced, verify_part, write_note};
-pub(crate) use plan::{Rehash, copy_stats, held_on_disk, masters_on_disk, plan_masters};
+pub(crate) use audit::{audit, count_copies, recheck};
+pub(crate) use plan::copy_stats;
+#[cfg(test)]
+use audit::confirmed;
+#[cfg(test)]
+use io::{Part, find_part, open_part, place_song, put_in_place, receive_paced, verify_part, write_note};
+#[cfg(test)]
+use plan::{Rehash, held_on_disk, masters_on_disk, plan_masters};
 use io::pull;
 use plan::replan;
 
