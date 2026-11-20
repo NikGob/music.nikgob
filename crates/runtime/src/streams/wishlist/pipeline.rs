@@ -354,7 +354,7 @@ impl Worker {
             if self.streaming.wish.turned.get(&id).is_some_and(|t| !t.is_empty()) {
                 self.wish_later(id);
             } else {
-                self.no_torrent(id, true);
+                self.wish_nothing_found(id);
             }
             return;
         }
@@ -458,7 +458,7 @@ impl Worker {
                 if self.streaming.wish.turned.get(&id).is_some_and(|t| !t.is_empty()) {
                     self.wish_later(id);
                 } else {
-                    self.no_torrent(id, true);
+                    self.wish_nothing_found(id);
                 }
             } else {
                 self.ask_confirm(id, &shown);

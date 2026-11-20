@@ -321,12 +321,16 @@ impl Worker {
         // goes, the item stays as it is now.
         if !self.streaming.wish.runs.is_current(id, run) {
             log::info!("wishlist: a save from YouTube of {id} came after it was stopped, dropped");
+            let _ = super::yt_fallback::take_fallback_run(run);
             if let Ok(path) = result {
                 let _ = std::fs::remove_file(path);
             }
             return;
         }
         self.streaming.wish.runs.end(id);
+        // A save the fallback started by itself is quiet: no toast, and a
+        // failure just leaves the item «не нашёл» as it would have been.
+        let quiet = super::yt_fallback::take_fallback_run(run);
         match result {
             Ok(path) => {
                 self.streaming.wish.saving.insert(path.clone(), id);
@@ -341,13 +345,20 @@ impl Worker {
             }
             Err(e) => {
                 log::warn!("saving from YouTube: {e}");
-                let loc = self.locale();
-                let msg = nikgob_core::i18n::ErrorStrings::youtube_save_failed_in(loc, &super::super::error_text_in(&e, loc));
-                self.toast_err(msg, None);
-                self.set_item(id, |i| {
-                    i.status = WishlistStatus::NoTorrent;
-                    i.note = Some(note_code(WishNote::SaveFailed));
-                });
+                if quiet {
+                    self.set_item(id, |i| {
+                        i.status = WishlistStatus::NoTorrent;
+                        i.note = Some(note_code(WishNote::NotFound));
+                    });
+                } else {
+                    let loc = self.locale();
+                    let msg = nikgob_core::i18n::ErrorStrings::youtube_save_failed_in(loc, &super::super::error_text_in(&e, loc));
+                    self.toast_err(msg, None);
+                    self.set_item(id, |i| {
+                        i.status = WishlistStatus::NoTorrent;
+                        i.note = Some(note_code(WishNote::SaveFailed));
+                    });
+                }
                 self.publish_wishlist();
             }
         }

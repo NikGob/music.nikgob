@@ -66,6 +66,7 @@ mod sources;
 mod pipeline;
 mod actions;
 mod settle;
+mod yt_fallback;
 
 #[cfg(test)]
 mod tests;

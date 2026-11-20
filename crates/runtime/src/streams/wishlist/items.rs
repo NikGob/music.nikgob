@@ -1,5 +1,13 @@
 use super::*;
 
+/// A track is downloaded when its row has a local file that is not a
+/// temporary copy saved from a stream: such a copy does not count as
+/// downloaded, and «Хочу скачать» asks for the track again (a real file
+/// replaces the copy by itself).
+pub(super) fn has_real_file(row: &nikgob_library::TrackRow) -> bool {
+    row.has_local && !row.is_temporary()
+}
+
 impl Worker {
     pub(super) fn now() -> i64 {
         nikgob_library::now_ms()
@@ -246,7 +254,7 @@ impl Worker {
     /// brings it already; one that waits is not woken for it (it would
     /// fetch the whole album, more than the one song asked for).
     pub(super) fn wish_track_now(&mut self, track: TrackId) -> Wished {
-        let has_file = self.lib.get_track_row(track).ok().flatten().is_some_and(|r| r.has_local);
+        let has_file = self.lib.get_track_row(track).ok().flatten().is_some_and(|r| has_real_file(&r));
         if has_file || self.have_recording(track) {
             return Wished::Nothing;
         }
@@ -282,7 +290,7 @@ impl Worker {
     pub(super) fn wish_release_now(&mut self, release: ReleaseId) -> Wished {
         let p = self.lib.release_progress(release).ok().flatten();
         let tracks = self.lib.tracks_of_release_all(release).unwrap_or_default();
-        let missing = p.is_none_or(|p| p.local < p.total) || tracks.iter().any(|t| !t.has_local);
+        let missing = p.is_none_or(|p| p.local < p.total) || tracks.iter().any(|t| !has_real_file(t));
         if !missing {
             return Wished::Nothing;
         }
