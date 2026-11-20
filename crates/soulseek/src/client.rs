@@ -293,12 +293,19 @@ impl Drop for SearchHandle {
         // late; then the token goes. Without a runtime there is nobody
         // to do the counting, so the token goes at once.
         self.sink.stats.lock().ended = true;
+        // The results went with the caller (or nowhere): only the counts
+        // stay for the line.
+        self.sink.results.lock().clear();
         let sink = self.sink.clone();
         let token = self.token;
         if let Ok(h) = tokio::runtime::Handle::try_current() {
             let inner = self.inner.clone();
             h.spawn(async move {
-                tokio::time::sleep(SEARCH_TAIL).await;
+                // A stopped client does not wait the tail out.
+                tokio::select! {
+                    _ = tokio::time::sleep(SEARCH_TAIL).await => {}
+                    _ = inner.shutdown.cancelled() => {}
+                }
                 inner.searches.lock().remove(&token);
                 let s = sink.stats.lock();
                 info!(
@@ -468,9 +475,13 @@ impl Client {
             s.retain(|_, v| v.created.elapsed() < Duration::from_secs(600));
             s.insert(token, sink.clone());
         }
-        let handle = SearchHandle { inner: inner.clone(), token, sink };
-        inner.server_send(ToServer::FileSearch { token, query: text })?;
-        Ok(handle)
+        // Sent before the handle exists: a search that cannot go out never
+        // was one, so it leaves no tail task and no log line.
+        if let Err(e) = inner.server_send(ToServer::FileSearch { token, query: text }) {
+            inner.searches.lock().remove(&token);
+            return Err(e);
+        }
+        Ok(SearchHandle { inner: inner.clone(), token, sink })
     }
 
     /// Sends the search and waits at most `wait` for the results. The

@@ -26,6 +26,12 @@ pub struct RemoteClient {
     base: String,
     token: String,
     http: reqwest::Client,
+    /// When this client's next search may be sent to the service, spaced
+    /// like the service spaces its own (`crate::DEFAULT_SEARCH_PACE`), so
+    /// one request answers within its own `wait` instead of queueing
+    /// behind this client's other searches past its timeout. Shared by
+    /// every clone: one client, one queue.
+    search_pace: std::sync::Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>>,
 }
 
 impl std::fmt::Debug for RemoteClient {
@@ -68,7 +74,12 @@ impl RemoteClient {
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(remote)?;
-        Ok(Self { base, token: token.to_owned(), http })
+        Ok(Self {
+            base,
+            token: token.to_owned(),
+            http,
+            search_pace: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        })
     }
 
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
@@ -100,9 +111,23 @@ impl RemoteClient {
     }
 
     pub async fn search(&self, q: &SearchQuery, wait: Duration) -> Result<Vec<SearchResult>, Error> {
+        // One search at a time and spaced like the service spaces its own
+        // to the server: a request that the service answers within `wait`
+        // stays within its timeout instead of queueing behind this
+        // client's other searches; a caller that cancels while waiting its
+        // turn sends nothing (its turn stays where it was).
+        let mut turn = self.search_pace.lock().await;
+        if let Some(at) = *turn {
+            let now = tokio::time::Instant::now();
+            if at > now {
+                tokio::time::sleep(at - now).await;
+            }
+        }
         let body = SearchBody { text: q.text.clone(), kind: q.kind, wait_secs: Some(wait.as_secs().max(1)) };
         let r = self.req(reqwest::Method::POST, "/api/search").json(&body).timeout(wait + Duration::from_secs(30));
-        self.send(r).await
+        let out = self.send(r).await?;
+        *turn = Some(tokio::time::Instant::now() + crate::DEFAULT_SEARCH_PACE);
+        Ok(out)
     }
 
     pub async fn folder(&self, user: &str, folder: &str) -> Result<Vec<SearchResult>, Error> {
