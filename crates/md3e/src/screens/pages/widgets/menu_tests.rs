@@ -255,6 +255,7 @@ fn track(has_local: bool) -> nikgob_view::TrackRow {
         cover: None,
         clip: false,
         in_library: true,
+        temporary: false,
     }
 }
 
@@ -306,4 +307,33 @@ fn every_track_menu_has_the_common_actions_in_one_order() {
     assert!(labels(&rows).iter().any(|l| l == "Есть и на альбоме «Other»"));
     let rows = super::playlist_track_rows(&t, PlaylistId::new(), with_also);
     assert!(matches!(&rows[rows.len() - 3..], [Row::Divider, Row::Item(A::Apart, _), Row::Item(A::Remove, _)]));
+}
+
+/// A temporary copy (saved from YouTube Music until a real file is found)
+/// keeps asking for the real one: its menu offers «Скачать» where a track
+/// without a file has it — not the tag editor of the file standing in —
+/// and its line does not say «у тебя».
+#[test]
+fn a_temporary_copy_keeps_asking_for_the_real_file() {
+    use crate::screens::pages::{TrackAct as A, library_track_rows};
+    use super::track_list::shows_you_have;
+    let marks = nikgob_view::DislikesView::default();
+    let mut t = track(true);
+    t.temporary = true;
+    let rows = library_track_rows(&t, of(&marks));
+    // «Скачать» stands in the menu itself, and it is the download.
+    let found = super::row_items(&rows)
+        .into_iter()
+        .find(|(a, _)| *a == A::Fetch)
+        .expect("the menu offers «Скачать»");
+    assert_eq!(found.0, A::Fetch);
+    assert_eq!(found.1.label, nikgob_core::i18n::menus().download);
+    assert!(!labels(&rows).iter().any(|l| l == nikgob_core::i18n::menus().edit_tags), "no tag editor here");
+    // Not in «Файл» either: that is where a real file's actions sit.
+    let file = super::sub_rows(&rows, super::SubId::File).unwrap();
+    assert!(!row_acts(file).contains(&A::Fetch));
+    // The line: a temporary copy is not counted as a file to keep.
+    assert!(!shows_you_have(&t, true));
+    assert!(shows_you_have(&track(true), true), "a real file says it");
+    assert!(!shows_you_have(&t, false), "only where the list marks it");
 }

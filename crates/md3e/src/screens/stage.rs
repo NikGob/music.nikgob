@@ -722,6 +722,7 @@ fn placeholder(id: TrackId) -> TrackRow {
         cover: None,
         clip: false,
         in_library: true,
+        temporary: false,
     }
 }
 
@@ -940,6 +941,7 @@ fn catalogue_album(v: &ViewState, t: &TrackRow, seed: TrackId) -> Option<Release
             cover: r.cover_url.clone().map(Cover::web),
             clip: false,
             in_library: r.in_library,
+            temporary: false,
         })
         .collect();
     let artist = if p.subtitle.is_empty() { t.artist.clone() } else { p.subtitle.clone() };

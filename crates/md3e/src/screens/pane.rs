@@ -1182,6 +1182,7 @@ mod tests {
             cover: None,
             clip: false,
             in_library: true,
+            temporary: false,
         };
         for guest in [false, true] {
             let (line, links, routes) = queue_line(&t, guest);
@@ -1227,6 +1228,7 @@ mod tests {
             cover: None,
             clip: false,
             in_library: true,
+            temporary: false,
         };
         let mut state = ViewState::default();
         state.queue.current_entry = Some(1);

@@ -31,6 +31,11 @@ pub struct TrackRow {
     /// Главная) is not, its menu offers «В библиотеку».
     #[serde(default)]
     pub in_library: bool,
+    /// What plays is a local file saved from a stream for the time being
+    /// («Сохранить с YouTube»): no real file of the track yet, so its rows
+    /// and menus keep asking for one.
+    #[serde(default)]
+    pub temporary: bool,
 }
 
 impl TrackRow {

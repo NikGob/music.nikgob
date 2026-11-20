@@ -326,6 +326,7 @@ impl ZoneTrack {
             cover: None,
             clip: false,
             in_library: false,
+            temporary: false,
         }
     }
 }

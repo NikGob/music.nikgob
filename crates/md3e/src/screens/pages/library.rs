@@ -1255,6 +1255,15 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
                 let r = Rect::from_min_size(pos2(x0, cy - 10.0), vec2((g.size().x + 12.0).min(x1 - x0), 20.0));
                 paint::container(ui.painter(), r, Radii::all(shape::SMALL), s.secondary_container, Stroke::NONE);
                 ui.painter().galley(pos2(r.left() + 6.0, cy - g.size().y * 0.5), g, s.on_secondary_container);
+            } else if t.temporary {
+                // A copy saved from YouTube Music until a real file is
+                // found: its own colour, and on hover what it is.
+                let m = format!("{} · YouTube", i18n::pages().temporary);
+                let g = plain(ui.painter(), &m, TypeRole::LabelSmall.style(), s.on_tertiary_container);
+                let r = Rect::from_min_size(pos2(x0, cy - 10.0), vec2((g.size().x + 12.0).min(x1 - x0), 20.0));
+                paint::container(ui.painter(), r, Radii::all(shape::SMALL), s.tertiary_container, Stroke::NONE);
+                ui.painter().galley(pos2(r.left() + 6.0, cy - g.size().y * 0.5), g, s.on_tertiary_container);
+                ui.interact(r, id.with(("temp", i)), Sense::hover()).on_hover_text(i18n::pages().temporary_tip);
             } else if let Some(q) = &t.quality {
                 let g = line(ui.painter(), q, TypeRole::BodyMedium.style(), variant, x1 - x0);
                 ui.painter().galley(pos2(x0, cy - g.size().y * 0.5), g, variant);

@@ -66,6 +66,13 @@ fn is_compilation(tracks: &[TrackRow]) -> bool {
         .is_some_and(|f| tracks.iter().any(|t| t.artist != f.artist))
 }
 
+/// Whether a row's line says «у тебя» (`mark_local`): a file the library
+/// has. A temporary copy does not say it — it is marked as temporary
+/// instead, and keeps asking for the real file.
+pub(crate) fn shows_you_have(t: &TrackRow, mark_local: bool) -> bool {
+    mark_local && t.has_local && !t.temporary
+}
+
 /// A track list. Double-click (or click on the number) plays from that
 /// track; ⋮ opens the track menu. Returns a route to follow.
 #[allow(clippy::too_many_arguments)]
@@ -332,14 +339,16 @@ fn track_row(
     if t.clip {
         supporting = format!("{supporting} · {}", i18n::pages().clip);
     }
-    if opts.mark_local && t.has_local {
+    if shows_you_have(t, opts.mark_local) {
         supporting = format!("{supporting} · {}", i18n::pages().you_have);
     }
     let dur = t.duration.map(common::fmt_time).unwrap_or_default();
     // No file: it streams (a ⬇ to «Хочу скачать», or how far it is there),
     // or nothing plays it at all («нет файла»).
     let streams = matches!(t.source, Some(SourceKind::Spotify | SourceKind::Youtube));
-    let wished = (!t.has_local).then(|| wish.of_track(Some(t.id), t.release_id)).flatten();
+    // A temporary copy has a file, but the real one is still wanted: its
+    // place in «Хочу скачать» shows all the same.
+    let wished = (!t.has_local || t.temporary).then(|| wish.of_track(Some(t.id), t.release_id)).flatten();
     let track_id = t.id;
     // «Весь альбом»: the song is one of the user's (✓, a click takes it out)
     // or not (+, a click puts it in).
@@ -367,7 +376,7 @@ fn track_row(
                         out.push(Command::AlbumTrackMine { release, track: track_id, mine: !mine });
                     }
                 }
-                if !has_local {
+                if !has_local || t.temporary {
                     match wished {
                         Some(st) => {
                             if wish_mark(ui, st, state.prefs.prowlarr_configured, ("track-wish", id, i)).clicked() {
@@ -407,6 +416,10 @@ fn track_row(
                     ui.label(TypeRole::LabelSmall.style().rich(i18n::pages().no_file, variant));
                 } else if !has_local && opts.mark_missing {
                     ui.label(TypeRole::LabelSmall.style().rich(i18n::pages().stream, variant));
+                } else if t.temporary {
+                    // A copy saved from a stream until a real file is found.
+                    ui.label(TypeRole::LabelSmall.style().rich(i18n::pages().temp_short, variant))
+                        .on_hover_text(i18n::pages().temporary_tip);
                 }
             });
         })
@@ -539,7 +552,7 @@ fn playlist_track_menu(
     let rows = super::super::with_speed_row(rows, &state.speeds, super::super::is_playing(state, track.id));
     let also = state.also_on.get(&track.id).map(|(r, _)| *r);
     let rows = super::super::here(ctx).trim(rows, track, also, Some);
-    let rows = super::super::placed(rows, &state.prefs.track_menu, |a| a.menu_item(track.has_local));
+    let rows = super::super::placed(rows, &state.prefs.track_menu, |a| a.menu_item(track.has_local && !track.temporary));
     let (menu, acts) = menu_of(key, rows);
     (menu.align_right(true), acts)
 }

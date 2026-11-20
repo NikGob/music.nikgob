@@ -842,6 +842,7 @@ mod tests {
             cover: None,
             clip: false,
             in_library: true,
+            temporary: false,
         }
     }
 
