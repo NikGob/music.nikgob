@@ -737,9 +737,10 @@ async fn read_export(
     youtube: Option<Arc<dyn StreamService>>,
     deezer: Option<Arc<dyn StreamService>>,
     saved: bool,
+    loc: nikgob_core::i18n::Locale,
     tx: Sender<Internal>,
 ) -> Result<Box<Parsed>, ColdFailure> {
-    let mut data: ExportData = tokio::task::spawn_blocking(move || export::read_export(&path, saved))
+    let mut data: ExportData = tokio::task::spawn_blocking(move || export::read_export(&path, saved, loc))
         .await
         .map_err(|e| ColdFailure::Words(e.to_string()))??;
     if data.is_empty() {
@@ -1081,9 +1082,10 @@ impl Worker {
         let youtube = self.service(Service::Youtube);
         let deezer = self.service(Service::Deezer);
         let saved = self.state.read().prefs.import_saved_songs;
+        let loc = self.locale();
         let tx = self.streaming.internal.clone();
         self.streaming.spawn(async move {
-            let result = read_export(job, path, lib, youtube, deezer, saved, tx).await;
+            let result = read_export(job, path, lib, youtube, deezer, saved, loc, tx).await;
             Msg::Cold(ColdMsg::Parsed { job, result })
         });
     }
@@ -1776,7 +1778,7 @@ mod tests {
             }
         }
         let t = Instant::now();
-        let data = export::read_export(dir.path(), true).unwrap();
+        let data = export::read_export(dir.path(), true, nikgob_core::i18n::Locale::Ru).unwrap();
         let took = t.elapsed();
         let (first, last) = data.plays.iter().fold((i64::MAX, i64::MIN), |(a, b), p| {
             (a.min(p.start_ms), b.max(p.start_ms))
