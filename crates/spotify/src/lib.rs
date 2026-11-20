@@ -732,11 +732,12 @@ impl Spotify {
 
     /// Records a failed login and turns it into the returned error.
     fn fail(&self, e: AuthError) -> StreamError {
-        let message = e.to_string();
-        log::warn!("spotify: login failed: {message}");
+        log::warn!("spotify: login failed: {e}");
+        // The runtime shows this text in its toast: in the UI's language,
+        // as [`Spotify::account`] words the stored failure.
         let result = match &e {
             AuthError::Cancelled | AuthError::Rejected { .. } => StreamError::NotLoggedIn,
-            _ => StreamError::Network(message),
+            _ => StreamError::Network(e.text_in(nikgob_core::i18n::locale())),
         };
         // A cancelled login (logout, or another login) is not a failure
         // to show.
@@ -747,10 +748,9 @@ impl Spotify {
     }
 
     fn fail_login(&self, failure: Failure) -> StreamError {
-        // No preferences reach this background path. The returned error is
-        // diagnostic; the stored failure is localized by account().
-        let message = failure.text_in(nikgob_core::i18n::Locale::En);
-        log::warn!("spotify: login failed: {message}");
+        log::warn!("spotify: login failed: {}", failure.text_in(nikgob_core::i18n::Locale::En));
+        // Shown in the runtime's toast: the UI's language, as account() words it.
+        let message = failure.text_in(nikgob_core::i18n::locale());
         lock(&self.state).failure = Some(failure);
         StreamError::Network(message)
     }
