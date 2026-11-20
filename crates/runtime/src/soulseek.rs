@@ -521,9 +521,9 @@ pub(crate) fn album_offers(albums: &[AlbumResult]) -> Vec<Offer> {
 /// JoinHandle alone leaves the task running, so a search stopped before
 /// its turn would still be sent (and a fetch nobody waits for costs
 /// a whole search's wait).
-struct Stop<T>(tokio::task::JoinHandle<T>);
+struct Stop(tokio::task::AbortHandle);
 
-impl<T> Drop for Stop<T> {
+impl Drop for Stop {
     fn drop(&mut self) {
         self.0.abort();
     }
@@ -534,7 +534,7 @@ impl SlskSource {
     /// aborted when the caller stops waiting.
     async fn on<T: Send + 'static>(&self, f: impl Future<Output = T> + Send + 'static) -> Result<T, SourceError> {
         let task = self.rt.spawn(f);
-        let _abort = Stop(task.clone());
+        let _abort = Stop(task.abort_handle());
         task.await.map_err(|e| SourceError::Unreachable(e.to_string()))
     }
 

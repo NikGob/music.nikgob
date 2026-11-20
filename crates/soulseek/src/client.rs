@@ -303,8 +303,8 @@ impl Drop for SearchHandle {
             h.spawn(async move {
                 // A stopped client does not wait the tail out.
                 tokio::select! {
-                    _ = tokio::time::sleep(SEARCH_TAIL).await => {}
-                    _ = inner.shutdown.cancelled() => {}
+                    () = tokio::time::sleep(SEARCH_TAIL) => {}
+                    () = inner.shutdown.cancelled() => {}
                 }
                 inner.searches.lock().remove(&token);
                 let s = sink.stats.lock();

@@ -400,7 +400,7 @@ impl Plan {
         let text = std::str::from_utf8(mpd).map_err(|e| SourceError::Parse(format!("the MPD: {e}")))?;
         let init = attr(text, "initialization").ok_or_else(|| SourceError::Parse("an MPD without an initialization".into()))?;
         let media = attr(text, "media").ok_or_else(|| SourceError::Parse("an MPD without media segments".into()))?;
-        let start = attr(text, "startNumber").and_then(|v| v.parse().ok()).unwrap_or(1);
+        let start: u64 = attr(text, "startNumber").and_then(|v| v.parse().ok()).unwrap_or(1);
         let timeline = between(text, "<SegmentTimeline>", "</SegmentTimeline>")
             .ok_or_else(|| SourceError::Parse("an MPD without a segment timeline".into()))?;
         let count = segments(timeline)?;
