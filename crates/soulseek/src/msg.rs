@@ -236,6 +236,15 @@ impl FromServer {
                 let port = r.u32()?;
                 let token = r.u32()?;
                 let privileged = !r.at_end() && r.bool()?;
+                // The obfuscation ports came later; older servers send
+                // neither (this client does not use them, it only reads
+                // them so a longer message is no error).
+                if r.remaining() >= 4 {
+                    let _obfuscated_port = r.u32()?;
+                }
+                if r.remaining() >= 4 {
+                    let _second_port = r.u32()?;
+                }
                 Self::ConnectToPeer { user, kind, ip, port, token, privileged }
             }
             22 => {
@@ -759,6 +768,35 @@ mod tests {
     #[test]
     fn login_hash_is_md5_of_user_and_password() {
         assert_eq!(md5_hex("usernamepassword"), "d51c9a7e9353746a6020f9602d452929");
+    }
+
+    /// ConnectToPeer messages: the oldest shape ends at the token, newer
+    /// ones add the privileged flag, the newest two obfuscation ports
+    /// after it. None of the trailing fields is a must: all decode.
+    #[test]
+    fn connect_to_peer_reads_short_and_long_lays() {
+        let expected = |privileged| FromServer::ConnectToPeer {
+            user: "bob".into(),
+            kind: ConnType::F,
+            ip: "1.2.3.4".parse().unwrap(),
+            port: 2240,
+            token: 40,
+            privileged,
+        };
+        let head = |w: &mut Writer| {
+            w.str("bob").str("F").ip("1.2.3.4".parse().unwrap()).u32(2240).u32(40);
+        };
+        let mut short = Writer::new();
+        head(&mut short);
+        assert_eq!(FromServer::decode(18, &short.into_inner()).unwrap(), expected(false));
+        let mut middle = Writer::new();
+        head(&mut middle);
+        middle.bool(true);
+        assert_eq!(FromServer::decode(18, &middle.into_inner()).unwrap(), expected(true));
+        let mut long = Writer::new();
+        head(&mut long);
+        long.bool(true).u32(2240).u32(0);
+        assert_eq!(FromServer::decode(18, &long.into_inner()).unwrap(), expected(true));
     }
 
     #[test]

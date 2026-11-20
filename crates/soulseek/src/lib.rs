@@ -48,6 +48,10 @@ pub use types::{
 pub const DEFAULT_SERVER: &str = "server.slsknet.org:2242";
 /// The port clients listen on by default.
 pub const DEFAULT_PORT: u16 = 2234;
+/// How long at least between two searches sent to the server, the default
+/// of [`Config::search_pace`]: the server is said to ignore a client that
+/// sends them closer than this.
+pub const DEFAULT_SEARCH_PACE: Duration = Duration::from_secs(7);
 
 /// How long the client waits for things on the network.
 #[derive(Clone, Copy, Debug)]
@@ -100,6 +104,9 @@ pub struct Config {
     pub scan: ScanOptions,
     /// How often the shared folders are listed again.
     pub rescan_every: Option<Duration>,
+    /// How long at least between two searches sent to the server (0: no
+    /// pace); [`Client::search`] holds every search but the first.
+    pub search_pace: Duration,
     pub timeouts: Timeouts,
 }
 
@@ -115,6 +122,7 @@ impl Default for Config {
             state_dir: None,
             scan: ScanOptions::default(),
             rescan_every: Some(Duration::from_secs(3 * 3600)),
+            search_pace: DEFAULT_SEARCH_PACE,
             timeouts: Timeouts::default(),
         }
     }

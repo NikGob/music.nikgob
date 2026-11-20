@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use nikgob_soulseek::codec::{read_frame, split_u8, split_u32, write_all};
-use nikgob_soulseek::msg::{ConnType, DistribMsg, FromServer, PeerInit, PeerMsg, ToServer};
+use nikgob_soulseek::msg::{ConnType, DistribMsg, FileEntry, FromServer, PeerInit, PeerMsg, SearchReply, ToServer};
 use nikgob_soulseek::{Client, Connection, DownloadState, Error, RemoteClient, SearchQuery, ShareSettings, Soulseek};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
@@ -55,9 +55,12 @@ async fn search_and_download_between_two_clients() {
     let dir = tempfile::tempdir().unwrap();
     let lib = library(dir.path(), 300_000);
     let before = snapshot(&lib);
+    // The mock server does not mind a burst; this test searches often.
+    let mut bob = config(&server, "bob", None);
+    bob.search_pace = Duration::ZERO;
     let a = client(config(&server, "alice", Some(&lib))).await;
     assert_eq!(a.status().shared_files, 4);
-    let b = client(config(&server, "bob", None)).await;
+    let b = client(bob).await;
     let res = b.search(&SearchQuery::track("aimer insane"), SEARCH_WAIT).await.unwrap();
     assert_eq!(res.len(), 1, "{res:?}");
     let r = &res[0];
@@ -140,6 +143,53 @@ async fn nobody_reachable_fails_cleanly() {
     assert!(matches!(err, Error::Denied(ref r) if r.contains("offline")), "{err:?}");
 }
 
+/// An answer that comes 9 s into the search — past the old plain 8 s wait,
+/// within the new long one — is kept, and once it has come and nothing
+/// further follows, the wait does not run to its end either. (Real time:
+/// the mock server talks over real sockets, which mock time cannot pace.)
+#[tokio::test]
+async fn a_late_answer_within_the_long_wait_is_kept() {
+    let server = MockServer::start().await;
+    // The server keeps the search to itself: the test drives the one
+    // sharer that answers, by hand and late.
+    server.set_embed(false);
+    let b = client(config(&server, "bob", None)).await;
+    let port = b.status().listen_port;
+    let h = b.start_search(&SearchQuery::track("insane dream")).unwrap();
+    let token = h.token();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(9)).await;
+        let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await.unwrap();
+        write_all(&mut s, &PeerInit::Init { user: "carol".into(), kind: ConnType::P, token: 0 }.encode()).await.unwrap();
+        let reply = PeerMsg::FileSearchResponse(SearchReply {
+            user: "carol".into(),
+            token,
+            files: vec![FileEntry {
+                name: "Shared\\Aimer\\01 Insane Dream.flac".into(),
+                size: 1000,
+                ext: "flac".into(),
+                attrs: vec![],
+            }],
+            slot_free: true,
+            avg_speed: 0,
+            queue_len: 0,
+            private: Vec::new(),
+        });
+        write_all(&mut s, &reply.encode()).await.unwrap();
+        // Held long enough for the answer to be read on this connection.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+    let started = tokio::time::Instant::now();
+    let res = h.wait(Duration::from_secs(15)).await;
+    let took = started.elapsed();
+    assert_eq!(res.len(), 1, "the late answer is kept");
+    assert_eq!(res[0].user, "carol");
+    assert!(res[0].lossless);
+    assert!(took >= Duration::from_secs(9), "the answer came after 9 s");
+    assert!(took < Duration::from_secs(15), "the wait ended early once the lossless answer was the last word");
+    b.shutdown();
+}
+
 #[tokio::test]
 async fn upload_speed_limit_and_slots() {
     let server = MockServer::start().await;
@@ -148,7 +198,11 @@ async fn upload_speed_limit_and_slots() {
     let mut cfg = config(&server, "alice", Some(&lib));
     cfg.share.upload_limit_kbps = 100;
     let a = client(cfg).await;
-    let b = client(config(&server, "bob", None)).await;
+    let mut bob = config(&server, "bob", None);
+    // The test searches again once sharing is off; the mock server does
+    // not mind a burst.
+    bob.search_pace = Duration::ZERO;
+    let b = client(bob).await;
     let r = b.search(&SearchQuery::track("insane dream"), SEARCH_WAIT).await.unwrap().remove(0);
     let out = tempfile::tempdir().unwrap();
     let started = Instant::now();

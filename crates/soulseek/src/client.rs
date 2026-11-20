@@ -3,6 +3,7 @@
 //! network. Transfers are in [`crate::transfer`].
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::codec::{self, read_frame, split_u8, split_u32};
 use crate::limit::Limiter;
-use crate::msg::{ConnType, DirEntry, DistribMsg, FromServer, MAJOR_VERSION, MINOR_VERSION, PeerInit, PeerMsg, ToServer};
+use crate::msg::{ConnType, DirEntry, DistribMsg, FromServer, MAJOR_VERSION, MINOR_VERSION, PeerInit, PeerMsg, SearchReply, ToServer};
 use crate::share::ShareIndex;
 use crate::transfer::{Downloads, Uploads};
 use crate::{Config, Connection, Error, SearchQuery, SearchResult, ShareSettings, Status};
@@ -37,6 +38,15 @@ const RESULTS_PER_SEARCH: usize = 5000;
 const ANSWER_LIMIT: usize = 100;
 /// Search answers being sent at once; more are dropped.
 const ANSWERS_AT_ONCE: usize = 4;
+/// Once a search has a lossless answer and this long has brought nothing
+/// further, the search's wait ends early.
+const SEARCH_QUIET: Duration = Duration::from_secs(3);
+/// How often a search's wait looks whether answers still come.
+const SEARCH_POLL: Duration = Duration::from_millis(250);
+/// How long after a search's wait ended its answers are still counted, so
+/// its log line can tell how many peers still sent theirs; they are
+/// dropped, its token gone after.
+const SEARCH_TAIL: Duration = Duration::from_secs(10);
 const SERVER_PING: Duration = Duration::from_secs(120);
 /// Bytes waiting to be sent to one peer at most: a peer that lets more pile
 /// up (it asks and does not read) is cut off. An empty queue takes a message
@@ -103,6 +113,57 @@ impl PeerHandle {
 pub(crate) struct SearchSink {
     results: Mutex<Vec<SearchResult>>,
     created: Instant,
+    /// The text the search went out with, told in its log line.
+    query: String,
+    /// What the peers answered, also once the wait ended (`ended`): the
+    /// log line.
+    stats: Mutex<SearchStats>,
+}
+
+/// What one search got: the answers taken while its wait ran, and the
+/// late ones counted after it ended (dropped, not taken).
+#[derive(Default)]
+struct SearchStats {
+    /// The search's wait is over: answers past this go to the late count.
+    ended: bool,
+    /// Files taken into `results`.
+    files: usize,
+    /// A lossless file came (the wait may end early then).
+    lossless: bool,
+    /// The peers whose answers were taken.
+    peers: Vec<String>,
+    /// Files that arrived after the wait ended, dropped.
+    late: usize,
+    /// The peers still answering after the wait ended.
+    late_peers: Vec<String>,
+}
+
+impl SearchSink {
+    /// One peer's answer: taken into the results while the search's wait
+    /// runs, counted as late (and dropped) once it ended.
+    fn answer(&self, user: &str, reply: &SearchReply) {
+        let mut res = self.results.lock();
+        let mut s = self.stats.lock();
+        if s.ended {
+            s.late += reply.files.len();
+            if !s.late_peers.iter().any(|p| p == user) {
+                s.late_peers.push(user.to_owned());
+            }
+            return;
+        }
+        if !s.peers.iter().any(|p| p == user) {
+            s.peers.push(user.to_owned());
+        }
+        for f in &reply.files {
+            if res.len() >= RESULTS_PER_SEARCH {
+                break;
+            }
+            let r = SearchResult::from_entry(user, f.name.clone(), f, reply.slot_free, reply.avg_speed, reply.queue_len);
+            s.files += 1;
+            s.lossless |= r.lossless;
+            res.push(r);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -129,6 +190,9 @@ pub(crate) struct Inner {
     peers: Mutex<HashMap<String, Arc<PeerHandle>>>,
     connect_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     searches: Mutex<HashMap<u32, Arc<SearchSink>>>,
+    /// When the next search may be sent to the server: at most one every
+    /// [`Config::search_pace`], across the whole client.
+    search_pace: SearchPace,
     folder_waiters: Waiters<Vec<DirEntry>>,
     /// Answers to our transfer requests, by (user, token).
     pub(crate) transfer_responses: Waiters<(bool, Option<String>)>,
@@ -155,7 +219,27 @@ pub struct Client {
     pub(crate) inner: Arc<Inner>,
 }
 
-/// A running search; results keep coming until it is dropped.
+/// The search queue of [`Inner`]: when the next search may be sent to the
+/// server, or `None` while none was.
+type SearchPace = tokio::sync::Mutex<Option<tokio::time::Instant>>;
+
+/// At most one search goes out at a time, `every` apart at least: a search
+/// waits `pace`'s turn, and one that cancels while waiting sends nothing
+/// (its turn stays where it was).
+async fn paced<T>(pace: &SearchPace, every: Duration, send: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
+    let mut next = pace.lock().await;
+    if let Some(at) = *next {
+        let now = tokio::time::Instant::now();
+        if at > now {
+            tokio::time::sleep(at - now).await;
+        }
+    }
+    let sent = send.await?;
+    *next = Some(tokio::time::Instant::now() + every);
+    Ok(sent)
+}
+
+/// A running search; results keep coming while it is held.
 pub struct SearchHandle {
     inner: Arc<Inner>,
     token: u32,
@@ -172,16 +256,63 @@ impl SearchHandle {
         self.sink.results.lock().clone()
     }
 
-    /// Waits `d`, then returns what came in.
+    /// Waits at most `d`, then returns what came in. Once a lossless
+    /// result has come and nothing further has for [`SEARCH_QUIET`], what
+    /// is in is enough: the wait ends early.
     pub async fn wait(&self, d: Duration) -> Vec<SearchResult> {
-        tokio::time::sleep(d).await;
+        let end = tokio::time::Instant::now() + d;
+        let mut files = self.sink.stats.lock().files;
+        let mut quiet_since = tokio::time::Instant::now();
+        loop {
+            if tokio::time::Instant::now() >= end {
+                break;
+            }
+            tokio::time::sleep(SEARCH_POLL).await;
+            let (n, lossless) = {
+                let s = self.sink.stats.lock();
+                (s.files, s.lossless)
+            };
+            let now = tokio::time::Instant::now();
+            if n != files {
+                files = n;
+                quiet_since = now;
+            }
+            if lossless && now - quiet_since >= SEARCH_QUIET {
+                break;
+            }
+        }
+        self.sink.stats.lock().ended = true;
         self.results()
     }
 }
 
 impl Drop for SearchHandle {
     fn drop(&mut self) {
-        self.inner.searches.lock().remove(&self.token);
+        // Answers from here on are late: counted for a while longer, so
+        // one line per search can tell what came in and what came too
+        // late; then the token goes. Without a runtime there is nobody
+        // to do the counting, so the token goes at once.
+        self.sink.stats.lock().ended = true;
+        let sink = self.sink.clone();
+        let token = self.token;
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            let inner = self.inner.clone();
+            h.spawn(async move {
+                tokio::time::sleep(SEARCH_TAIL).await;
+                inner.searches.lock().remove(&token);
+                let s = sink.stats.lock();
+                info!(
+                    "soulseek: search {token} \"{}\": {} results from {} peers, {} from {} peers came after the wait ended and were dropped",
+                    sink.query,
+                    s.files,
+                    s.peers.len(),
+                    s.late,
+                    s.late_peers.len()
+                );
+            });
+        } else {
+            self.inner.searches.lock().remove(&self.token);
+        }
     }
 }
 
@@ -276,6 +407,7 @@ impl Client {
             peers: Mutex::default(),
             connect_locks: Mutex::default(),
             searches: Mutex::default(),
+            search_pace: SearchPace::default(),
             folder_waiters: Mutex::default(),
             transfer_responses: Mutex::default(),
             downloads: Mutex::default(),
@@ -319,24 +451,34 @@ impl Client {
         timeout(within, wait).await.map_err(|_| Error::Timeout)?
     }
 
-    /// Sends a search to the network; results come in on the handle.
+    /// Sends a search to the network at once; results come in on the
+    /// handle. [`Self::search`] paces this over the whole client.
     pub fn start_search(&self, query: &SearchQuery) -> Result<SearchHandle, Error> {
         let inner = &self.inner;
         let token = inner.token();
-        let sink = Arc::new(SearchSink { results: Mutex::default(), created: Instant::now() });
+        let text = query.text.trim().to_owned();
+        let sink = Arc::new(SearchSink {
+            results: Mutex::default(),
+            created: Instant::now(),
+            query: text.clone(),
+            stats: Mutex::default(),
+        });
         {
             let mut s = inner.searches.lock();
             s.retain(|_, v| v.created.elapsed() < Duration::from_secs(600));
             s.insert(token, sink.clone());
         }
         let handle = SearchHandle { inner: inner.clone(), token, sink };
-        inner.server_send(ToServer::FileSearch { token, query: query.text.trim().to_owned() })?;
+        inner.server_send(ToServer::FileSearch { token, query: text })?;
         Ok(handle)
     }
 
-    /// Searches for `wait`, then returns the results.
+    /// Sends the search and waits at most `wait` for the results. The
+    /// searches go out one at a time, at least
+    /// [`Config::search_pace`] apart: a search waits its turn, and one
+    /// that cancels while waiting sends nothing.
     pub async fn search(&self, query: &SearchQuery, wait: Duration) -> Result<Vec<SearchResult>, Error> {
-        let h = self.start_search(query)?;
+        let h = paced(&self.inner.search_pace, self.inner.cfg.search_pace, async { self.start_search(query) }).await?;
         Ok(h.wait(wait).await)
     }
 
@@ -593,7 +735,10 @@ impl Inner {
                 }
             }
             FromServer::ConnectToPeer { user, kind, ip, port, token, .. } => {
-                if kind == ConnType::D || port > u32::from(u16::MAX) {
+                // Port 0: nobody to reach through, as bad as a D
+                // connection (we take no children); refuse it at once
+                // rather than spend the whole connect timeout on it.
+                if kind == ConnType::D || port == 0 || port > u32::from(u16::MAX) {
                     let _ = self.server_send(ToServer::CantConnectToPeer { token, user });
                     return;
                 }
@@ -606,7 +751,10 @@ impl Inner {
                         Some(s)
                     };
                     match pierce.await {
-                        Some(s) => me.dispatch(user, kind, s),
+                        Some(s) => {
+                            debug!("soulseek: indirect connect: reached {user} for its {} connection", kind.as_str());
+                            me.dispatch(user, kind, s);
+                        }
                         None => {
                             debug!("soulseek: cannot reach {user} for its {} connection", kind.as_str());
                             let _ = me.server_send(ToServer::CantConnectToPeer { token, user });
@@ -727,7 +875,10 @@ impl Inner {
                     let _ = w.send(Some(s));
                 }
             }
-            Ok(PeerInit::Init { user, kind, .. }) => self.dispatch(user, kind, s),
+            Ok(PeerInit::Init { user, kind, .. }) => {
+                debug!("soulseek: {user} connected to us for its {} connection", kind.as_str());
+                self.dispatch(user, kind, s);
+            }
             Err(e) => debug!("soulseek: peer init: {e}"),
         }
     }
@@ -888,20 +1039,7 @@ impl Inner {
             }
             PeerMsg::FileSearchResponse(reply) => {
                 let Some(sink) = self.searches.lock().get(&reply.token).cloned() else { return };
-                let mut res = sink.results.lock();
-                for f in &reply.files {
-                    if res.len() >= RESULTS_PER_SEARCH {
-                        break;
-                    }
-                    res.push(SearchResult::from_entry(
-                        user,
-                        f.name.clone(),
-                        f,
-                        reply.slot_free,
-                        reply.avg_speed,
-                        reply.queue_len,
-                    ));
-                }
+                sink.answer(user, &reply);
             }
             PeerMsg::UserInfoRequest => {
                 let s = *self.share_settings.lock();
@@ -1158,5 +1296,27 @@ mod tests {
         prefixed.extend_from_slice(&body);
         assert_eq!(embedded_search(3, &prefixed), Some(("bob".into(), 7, "aimer".into())));
         assert_eq!(embedded_search(4, &body), None);
+    }
+
+    /// The search queue: the first search goes out at once, the next waits
+    /// its pace after it, and one that cancels while waiting its turn
+    /// leaves the turn where it was for the next.
+    #[tokio::test(start_paused = true)]
+    async fn searches_go_out_one_every_pace() {
+        let pace = std::sync::Arc::new(SearchPace::default());
+        let every = Duration::from_secs(7);
+        let start = tokio::time::Instant::now();
+        paced(&pace, every, async { Ok::<(), Error>(()) }).await.unwrap();
+        assert_eq!(tokio::time::Instant::now(), start);
+        paced(&pace, every, async { Ok::<(), Error>(()) }).await.unwrap();
+        assert_eq!(tokio::time::Instant::now() - start, every);
+        let gone = {
+            let pace = pace.clone();
+            tokio::spawn(async move { paced(&pace, every, async { Ok::<(), Error>(()) }).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        gone.abort();
+        paced(&pace, every, async { Ok::<(), Error>(()) }).await.unwrap();
+        assert_eq!(tokio::time::Instant::now() - start, 2 * every);
     }
 }

@@ -333,8 +333,9 @@ impl Worker {
     }
 }
 
-/// How long a search listens for the peers' answers.
-const SEARCH_WAIT: Duration = Duration::from_secs(8);
+/// How long a search listens for the peers' answers; one that has a
+/// lossless result and hears nothing more for a few seconds ends earlier.
+const SEARCH_WAIT: Duration = Duration::from_secs(15);
 /// How long a search waits for the client to log in.
 const LOGIN_WAIT: Duration = Duration::from_secs(30);
 /// Lengths further apart (s) are another recording.
@@ -590,8 +591,12 @@ impl Source for SlskSource {
                 WantScope::Track => {
                     let mut offers: Vec<Offer> = Vec::new();
                     for q in catalogue_queries(want).into_iter().take(2) {
-                        let found = self.search_text(q, QueryKind::Track).await?;
-                        for o in track_offers(&found, want) {
+                        let found = self.search_text(q.clone(), QueryKind::Track).await?;
+                        // Raw results against what the filter kept: a
+                        // filter too strict shows up here.
+                        let batch = track_offers(&found, want);
+                        log::info!("soulseek: {} results for \"{q}\", {} offers kept", found.len(), batch.len());
+                        for o in batch {
                             if !offers.iter().any(|x| x.id == o.id) {
                                 offers.push(o);
                             }
@@ -605,8 +610,11 @@ impl Source for SlskSource {
                 WantScope::Album => {
                     let Some(album) = want.album.as_deref().or(want.title.as_deref()) else { return Ok(Vec::new()) };
                     let text = format!("{} {}", main_artist(want.artist()), album_core(album)).trim().to_owned();
-                    let found = self.search_text(text, QueryKind::Album).await?;
-                    Ok(album_offers(&nikgob_soulseek::group_albums(&found)))
+                    let found = self.search_text(text.clone(), QueryKind::Album).await?;
+                    let albums = nikgob_soulseek::group_albums(&found);
+                    let kept = album_offers(&albums);
+                    log::info!("soulseek: {} results for \"{text}\", {} offers kept", found.len(), kept.len());
+                    Ok(kept)
                 }
             }
         })
