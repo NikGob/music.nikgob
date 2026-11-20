@@ -1,7 +1,6 @@
 use nikgob_core::model::EventContext;
 
 use super::replay::best_n;
-use super::stats::*;
 use super::*;
 use crate::rng::Rng;
 use crate::test_util::*;

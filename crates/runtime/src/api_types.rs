@@ -11,7 +11,6 @@ use nikgob_view::{Command, ViewState};
 use parking_lot::{RwLock, RwLockReadGuard};
 
 use super::{ImportSetup, Msg, StreamSchedule, WebLogin, Worker};
-use crate::connect;
 use crate::streams;
 
 /// In a [`PlaybackEvent::Error`] of a SoundCloud track: SoundCloud streams

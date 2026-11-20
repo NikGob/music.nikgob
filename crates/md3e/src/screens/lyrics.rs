@@ -26,7 +26,6 @@ mod tests;
 use fade::*;
 use interlude::*;
 use layout::*;
-use preview::*;
 use timing::*;
 
 pub(crate) use preview::{countdown_preview, edges_preview, gap_preview, made_preview, preview, preview_at, tile_preview};

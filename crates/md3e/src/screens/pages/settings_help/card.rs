@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use egui::{
@@ -7,17 +6,11 @@ use egui::{
 };
 use nikgob_core::i18n::Locale;
 use nikgob_view::{self as v, Prefs};
-use nikgob_core::i18n::settings::{
-    fmt_days_in, fmt_gb_in, fmt_one_decimal_in, settings_choices_in, settings_misc, settings_misc_in, settings_row_help_in,
-    settings_row_labels_in,
-};
+use nikgob_core::i18n::settings::settings_misc_in;
 
-use super::super::home::Section;
-use crate::screens::stage::{Part, Scene, Script};
-use crate::screens::{bg_shapes, lyrics, now_playing};
 use crate::{
-    ColorScheme, Contrast, Elevation, Icon, SchemeVariant, Theme, TypeRole,
-    components::{anim, paint, paint::Radii, slider::wave_line},
+    ColorScheme, Elevation, Icon, Theme, TypeRole,
+    components::{anim, paint, paint::Radii},
     tokens::shape,
 };
 

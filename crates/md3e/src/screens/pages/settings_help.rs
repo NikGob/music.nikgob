@@ -15,7 +15,9 @@
 //! [`SettingId::help`] (a choice also [`SettingId::choices`]);
 //! [`super::settings`] does the rest.
 
-use nikgob_view::{self as v, Prefs};
+use nikgob_view as v;
+#[cfg(test)]
+use nikgob_view::Prefs;
 
 #[cfg(test)]
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
@@ -372,18 +374,20 @@ pub enum Level {
 pub use nikgob_core::i18n::settings::ChoiceText as Choice;
 
 pub use card::{
-    begin_focus, drawn_rows, finish, glow_at, group_start, group_tint_at, help_button, help_button_beside, item, note_group,
-    report_choices, report_control, report_menu, BTN, DrawnRow, FOCUS_S, GROUP_S,
+    begin_focus, drawn_rows, finish, group_start, help_button, help_button_beside, item, note_group,
+    report_choices, report_control, report_menu, BTN, DrawnRow,
 };
 
-pub use catalog::{preset_title, preset_title_in, radio_source_line_of, radio_source_of, radio_source_patches};
+pub use catalog::{radio_source_line_of, radio_source_of, radio_source_patches};
 
 pub(crate) use preview::beat;
 
 pub use stage::preset_rows;
 
 #[cfg(test)]
-use card::{base_body, Body, GAP, place};
+use card::{base_body, Body, GAP, place, FOCUS_S, GROUP_S, glow_at, group_tint_at};
+#[cfg(test)]
+use catalog::preset_title;
 
 #[cfg(test)]
 use stage::field_text_in;

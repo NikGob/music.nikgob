@@ -55,7 +55,7 @@ use nikgob_view::{self as v, Command};
 use crate::Worker;
 use crate::import::Internal;
 
-pub(crate) use cold::{IMPORT_DEVICE, STREAM_JOB, plural};
+pub(crate) use cold::{IMPORT_DEVICE, STREAM_JOB};
 pub(crate) use export::music_video_title;
 pub(crate) use pages::{album_card_of, stream_row_of};
 pub(crate) use replace::shown_title;

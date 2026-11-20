@@ -570,7 +570,7 @@ impl UserModel {
     /// user's at the screen: a speaker's runs, the assistant's and an
     /// agent's plays are weighed by their context instead, `p_bg` 0); the
     /// starts and the `p_bg` of each.
-    pub(super) fn listen(&mut self, input: &TasteInput, order: &[usize], weights: &[f32]) -> (Vec<Started>, Vec<f32>) {
+    fn listen(&mut self, input: &TasteInput, order: &[usize], weights: &[f32]) -> (Vec<Started>, Vec<f32>) {
         let starts = self.starts_of(input, order, weights);
         let own: Vec<usize> = (0..starts.len()).filter(|&k| !starts[k].import && !starts[k].room).collect();
         let heard: Vec<Heard> = own

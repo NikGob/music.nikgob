@@ -89,11 +89,14 @@ pub(crate) use discover::{DiscoverInput, HOME_NEW_MORE};
 pub use tiles::{PreviewTile, preview_ready_tiles, preview_tile_days};
 
 pub(crate) use snapshot::{
-    Devices, ReadExtra, background_fit, compose_songs, embedding_fingerprint, fold_recordings, local_offsets, own_kind, play_of,
-    profile_lines, set_own_kind, style_families, whole, work_heads,
+    Devices, ReadExtra, play_of, profile_lines, set_own_kind, whole,
 };
+#[cfg(test)]
+use snapshot::{compose_songs, embedding_fingerprint, style_families, work_heads};
 use snapshot::{BuildInput, read_snapshot};
-pub(crate) use home::{HomeParts, RecsFill, card_first, dedupe_rows, lane_mix_title, only_downloaded, play_lane_mix_title};
+pub(crate) use home::{HomeParts, RecsFill, play_lane_mix_title};
+#[cfg(test)]
+use home::{dedupe_rows, lane_mix_title};
 pub use preview::{HomePreview, ModelPreview, preview_home, preview_home_with, preview_replay, preview_replay_with};
 
 /// Plays after which the taste is built again.
