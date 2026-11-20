@@ -25,8 +25,6 @@ use crate::{
 pub struct BarOutput {
     pub open_now_playing: bool,
     pub toggle_pane: Option<PaneTab>,
-    /// The queue button: Now Playing with the queue.
-    pub open_queue: bool,
 }
 
 /// Draws the player in `rect` (64 tall). `medium` = Medium size class.
@@ -45,7 +43,6 @@ pub fn show(
     let mut result = BarOutput {
         open_now_playing: false,
         toggle_pane: None,
-        open_queue: false,
     };
     let item = toolbar::item_colors(ToolbarColor::Vibrant, &s);
     // Narrow pills drop the extras (they live in Now Playing) and show a
@@ -184,13 +181,12 @@ pub fn show(
         }
         ui.add_space(8.0);
 
-        // The queue opens Now Playing with it; the lyrics button only with
-        // the pane's lyrics turned on in Settings. The room of a button that
-        // is off goes to the slider.
+        // The queue's button is Now Playing's alone (Q opens it from here);
+        // the lyrics button only with the pane's lyrics turned on in
+        // Settings. The room of a button that is off goes to the slider.
         let lyrics_on = PaneTab::Lyrics.on(&state.prefs);
-        let show_queue = buttons.queue;
         let (show_like, show_lyrics, show_volume) = (!compact && buttons.like, wide && lyrics_on && buttons.lyrics, wide);
-        let trailing = [show_like, show_queue, show_lyrics, show_volume, true].into_iter().filter(|b| *b).count();
+        let trailing = [show_like, show_lyrics, show_volume, true].into_iter().filter(|b| *b).count();
         // The seek bar comes first: short of room for it, the pill of the
         // device's name gives way to the button alone (its name in the
         // tooltip, its accent kept), then goes into ⋮.
@@ -282,18 +278,6 @@ pub fn show(
             {
                 out.push(Command::Like(LikeTarget::Track(t.id), !liked));
             }
-        }
-        if show_queue
-            && ui
-                .add(
-                    IconButton::new(Icon::QueueMusic)
-                        .colors(item)
-                        .tooltip(nikgob_core::i18n::player().queue_ctrl_tooltip)
-                        .id_salt("bar-queue"),
-                )
-                .clicked()
-        {
-            result.open_queue = true;
         }
         if show_lyrics
             && ui

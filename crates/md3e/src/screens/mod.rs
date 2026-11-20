@@ -678,10 +678,6 @@ impl Md3eUi {
                             let medium = size_class(full.width()) == SizeClass::Medium;
                             let bo = player_bar::show(&mut bui, bar, state, self.pane, medium, &mut self.chrome, &mut bar_out);
                             toggle |= bo.open_now_playing;
-                            if bo.open_queue {
-                                self.chrome.np_slot = NpSlot::Queue;
-                                toggle = true;
-                            }
                         }
                     });
                 // Only a closing pill is live; opening, it is just a picture.
@@ -1128,9 +1124,6 @@ impl Md3eUi {
             }
             if let Some(tab) = bo.toggle_pane {
                 self.pane = if self.pane == Some(tab) { None } else { Some(tab) };
-            }
-            if bo.open_queue {
-                self.toggle_queue(&ctx, false, out);
             }
         } else if self.chrome.np_covering && state.player.current.is_some() {
             // The overlay's layers miss a click now and then (an area's first
