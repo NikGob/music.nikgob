@@ -86,17 +86,23 @@ pub fn buffering_overlay(ui: &mut Ui, button: Rect, bg: Color32, fg: Color32) {
 /// What plays, in one quiet line: «YouTube · Opus ~160 кбит/с» for a
 /// stream (where its sound really comes from: a Spotify track may play
 /// from YouTube Music), «YouTube · клип · Opus ~160 кбит/с» for a music
-/// video without its song, the file's own format for a local track.
+/// video without its song, the file's own format for a local track — a
+/// temporary copy (saved from YouTube Music until a real file is found)
+/// names where it came from, like a stream does.
 pub fn sound_line(state: &nikgob_view::ViewState) -> Option<String> {
     let p = &state.player;
     let clip = p.current.as_ref().is_some_and(|t| t.clip);
     let quality = p.audio_quality.as_deref().or_else(|| p.current.as_ref().and_then(|t| t.quality.as_deref()));
-    let service = p.audio_service.map(|s| match s {
-        nikgob_view::Service::Spotify => "Spotify",
-        // A Deezer entry plays from YouTube Music.
-        nikgob_view::Service::Youtube | nikgob_view::Service::Deezer => "YouTube",
-        nikgob_view::Service::Soundcloud => "SoundCloud",
-    });
+    let service = p
+        .audio_service
+        // The file is local, but it is a stand-in: said where it came from.
+        .or_else(|| p.current.as_ref().filter(|t| t.temporary).map(|_| nikgob_view::Service::Youtube))
+        .map(|s| match s {
+            nikgob_view::Service::Spotify => "Spotify",
+            // A Deezer entry plays from YouTube Music.
+            nikgob_view::Service::Youtube | nikgob_view::Service::Deezer => "YouTube",
+            nikgob_view::Service::Soundcloud => "SoundCloud",
+        });
     let service = service.map(|s| if clip { format!("{s} · {}", nikgob_core::i18n::screens().clip_word) } else { s.to_owned() });
     match (service, quality) {
         (Some(s), Some(q)) => Some(format!("{s} · {q}")),
@@ -108,7 +114,46 @@ pub fn sound_line(state: &nikgob_view::ViewState) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use nikgob_view::{AlbumDate, ReleaseDay};
+    use nikgob_view::{AlbumDate, ReleaseDay, TrackId};
+
+    /// A playing track with a quality of its own.
+    fn current(quality: Option<&str>, temporary: bool) -> nikgob_view::TrackRow {
+        nikgob_view::TrackRow {
+            id: TrackId::new(),
+            title: "Песня".into(),
+            artist: "Кино".into(),
+            album: None,
+            release_id: None,
+            artists: Default::default(),
+            disc_no: 1,
+            track_no: 1,
+            duration: None,
+            quality: quality.map(str::to_owned),
+            source: None,
+            has_local: true,
+            liked: false,
+            cover: None,
+            clip: false,
+            in_library: true,
+            temporary,
+        }
+    }
+
+    #[test]
+    fn a_temporary_copy_names_its_service_like_a_stream() {
+        use nikgob_view::ViewState;
+        // A real file: its own format, no service.
+        let mut state = ViewState::default();
+        state.player.current = Some(current(Some("Opus · 160"), false));
+        assert_eq!(super::sound_line(&state).as_deref(), Some("Opus · 160"));
+        // A temporary copy: where it came from, before the format.
+        state.player.current = Some(current(Some("Opus · 160"), true));
+        assert_eq!(super::sound_line(&state).as_deref(), Some("YouTube · Opus · 160"));
+        // What plays is the stream itself: its service was there already.
+        state.player.audio_service = Some(nikgob_view::Service::Youtube);
+        state.player.audio_quality = Some("Opus ~160 кбит/с".into());
+        assert_eq!(super::sound_line(&state).as_deref(), Some("YouTube · Opus ~160 кбит/с"));
+    }
 
     #[test]
     fn album_dates_read_in_russian_as_chosen() {

@@ -434,6 +434,7 @@ impl Resolver {
             }),
             clip: r.is_clip(),
             in_library: r.in_library,
+            temporary: r.is_temporary(),
         }
     }
 

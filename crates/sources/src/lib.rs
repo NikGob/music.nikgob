@@ -68,7 +68,7 @@ pub fn web_sources(settings: &Settings, lists: &config::Lists) -> WebSources {
         Arc::new(archive::Archive::new(&s.archive_url)),
         Arc::new(bandcamp::Bandcamp::new()),
         Arc::new(dogmazic::Dogmazic::from_settings(s)),
-        Arc::new(junkyard::Junkyard::new()),
+        Arc::new(junkyard::Junkyard::new(&lists.junkyard)),
     ];
     WebSources { list, khinsider: Some(kh), qobuz: Some(q), tidal: Some(t) }
 }

@@ -341,13 +341,15 @@ pub(crate) fn library_item(in_library: bool, has_local: bool, liked: bool) -> Op
 /// [`track_rows`] of a library track (in the library or in a playlist).
 pub(crate) fn library_track_rows(track: &TrackRow, o: LibraryRowsOf<'_>) -> Vec<widgets::Row<TrackAct>> {
     // A file: its tags and a better copy; no file: download it (no like)
-    // or look for a release by hand.
-    let fetch = if track.has_local { Some(MenuItem::new(i18n::menus().edit_tags).icon(Icon::Edit)) } else { download_item(o.wished) };
+    // or look for a release by hand. A temporary copy (saved from a stream
+    // until a real one is found) is asked for again, like a track without
+    // a file: «Скачать», not the tags of the file standing in.
+    let fetch = if track.has_local && !track.temporary { Some(MenuItem::new(i18n::menus().edit_tags).icon(Icon::Edit)) } else { download_item(o.wished) };
     let mut rows = track_rows(TrackMenuOf {
         playable: true,
         has_album: track.release_id.is_some(),
         has_artists: !track.artists.linked().is_empty(),
-        has_file: track.has_local,
+        has_file: track.has_local && !track.temporary,
         also_on: o.also.map(|(_, a)| a.clone()),
         info: o.info,
         fetch,

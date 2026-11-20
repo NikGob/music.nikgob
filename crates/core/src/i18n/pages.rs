@@ -8,6 +8,13 @@ pub struct PagesStrings {
     pub you_have: &'static str,
     pub in_queue: &'static str,
     pub no_file: &'static str,
+    /// A copy saved from a stream until a real file is found: the pill of
+    /// its quality in the library's table.
+    pub temporary: &'static str,
+    /// The same, short, where a pill does not fit (a list's line).
+    pub temp_short: &'static str,
+    /// What that copy is, on hover.
+    pub temporary_tip: &'static str,
     pub clip: &'static str,
     pub pause: &'static str,
     pub character: &'static str,
@@ -113,6 +120,9 @@ pub static RU: PagesStrings = PagesStrings {
     you_have: "у тебя",
     in_queue: "в очереди",
     no_file: "нет файла",
+    temporary: "временная",
+    temp_short: "врем.",
+    temporary_tip: "Копия с YouTube — ищется настоящий файл",
     clip: "клип",
     pause: "Пауза",
     character: "Персонаж",
@@ -218,6 +228,9 @@ pub static EN: PagesStrings = PagesStrings {
     you_have: "in your library",
     in_queue: "queued",
     no_file: "no file",
+    temporary: "temporary",
+    temp_short: "temp",
+    temporary_tip: "Copy from YouTube — a real file is being looked for",
     clip: "video",
     pause: "Pause",
     character: "Character",

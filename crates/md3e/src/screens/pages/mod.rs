@@ -686,7 +686,7 @@ impl PageState {
         push_deletes(&mut rows, track);
         let also = state.also_on.get(&track.id).map(|(r, _)| *r);
         let rows = here.trim(rows, track, also, Some);
-        let rows = placed(rows, &state.prefs.track_menu, |a| a.menu_item(track.has_local));
+        let rows = placed(rows, &state.prefs.track_menu, |a| a.menu_item(track.has_local && !track.temporary));
         let (menu, acts) = widgets::menu_of(("track-menu", anchor), rows);
         (menu.align_right(true), acts)
     }
@@ -733,7 +733,9 @@ impl PageState {
             // Of this track, which need not be the one playing.
             A::Speed => sound::open(ctx, sound::Tab::Speed, Some((track.id, track.title.clone()))),
             A::Equalizer => sound::open(ctx, sound::Tab::Equalizer, None),
-            A::Fetch if track.has_local => out.push(Command::OpenTagEditor(track.id)),
+            // A temporary copy has a file, but it is a stand-in: its
+            // «Скачать» asks for the real one again.
+            A::Fetch if track.has_local && !track.temporary => out.push(Command::OpenTagEditor(track.id)),
             A::Fetch => out.push(Command::DownloadTracks(vec![track.id])),
             // The whole album the track is from, the files it lacks.
             A::AlbumDownload => {

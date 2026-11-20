@@ -34,6 +34,7 @@ fn song(title: &str) -> TrackRow {
         cover: None,
         clip: false,
         in_library: true,
+        temporary: false,
     }
 }
 

@@ -1,8 +1,9 @@
 //! `sources.toml`, next to `settings.toml`: the Qobuz and Tidal instance
-//! lists the user can edit. Written once, with the built-in addresses and
-//! a short header, when it is missing; never rewritten, so a later edit
-//! and any key this version does not know stay as the user left them.
-//! A missing list, or an empty one, is the built-in list.
+//! lists the user can edit, and the sites of «Барахолка» (one list per
+//! backend kind). Written once, with the built-in addresses and a short
+//! header, when it is missing; never rewritten, so a later edit and any
+//! key this version does not know stay as the user left them. A missing
+//! list, or an empty one, is the built-in list.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,8 @@ pub struct Lists {
     pub qobuz_own: bool,
     /// The file names a Tidal list that is not the built-in one.
     pub tidal_own: bool,
+    /// The sites of «Барахолка», one list per backend kind.
+    pub junkyard: crate::junkyard::Sites,
 }
 
 /// The addresses shipped in code, for a list the file does not set.
@@ -28,13 +31,15 @@ pub struct Defaults<'a> {
 }
 
 impl Lists {
-    /// Both services on their built-in lists (not the user's own).
+    /// Both services on their built-in lists (not the user's own), and
+    /// «Барахолка» on the sites built into it.
     pub fn from_defaults(defaults: Defaults<'_>) -> Self {
         Self {
             qobuz: owned(defaults.qobuz),
             tidal: owned(defaults.tidal),
             qobuz_own: false,
             tidal_own: false,
+            junkyard: junkyard_defaults(),
         }
     }
 }
@@ -97,13 +102,38 @@ pub fn parse(text: &str, defaults: Defaults<'_>) -> Result<Lists, String> {
     let doc: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
     let qobuz = field(&doc, "qobuz")?;
     let tidal = field(&doc, "tidal")?;
-    Ok(merge(qobuz, tidal, defaults))
+    let junkyard = junkyard(&doc)?;
+    Ok(merge(qobuz, tidal, junkyard, defaults))
 }
 
-fn merge(qobuz: Option<Vec<String>>, tidal: Option<Vec<String>>, defaults: Defaults<'_>) -> Lists {
+fn merge(
+    qobuz: Option<Vec<String>>,
+    tidal: Option<Vec<String>>,
+    junkyard: crate::junkyard::Sites,
+    defaults: Defaults<'_>,
+) -> Lists {
     let (qobuz, qobuz_own) = one(qobuz, defaults.qobuz);
     let (tidal, tidal_own) = one(tidal, defaults.tidal);
-    Lists { qobuz, tidal, qobuz_own, tidal_own }
+    Lists { qobuz, tidal, qobuz_own, tidal_own, junkyard }
+}
+
+/// `[junkyard]`: one list per backend kind, each the built-in one when it
+/// is missing or empty.
+fn junkyard(doc: &toml::Value) -> Result<crate::junkyard::Sites, String> {
+    Ok(crate::junkyard::Sites {
+        qobuz_dl: one(list_in(doc, "junkyard", "qobuz_dl")?, crate::junkyard::DEFAULT_QOBUZ_DL).0,
+        hifi: one(list_in(doc, "junkyard", "hifi")?, crate::junkyard::DEFAULT_HIFI).0,
+        rhythmax: one(list_in(doc, "junkyard", "rhythmax")?, crate::junkyard::DEFAULT_RHYTHMAX).0,
+    })
+}
+
+/// The sites built into «Барахолка», for a file that does not name them.
+fn junkyard_defaults() -> crate::junkyard::Sites {
+    crate::junkyard::Sites {
+        qobuz_dl: owned(crate::junkyard::DEFAULT_QOBUZ_DL),
+        hifi: owned(crate::junkyard::DEFAULT_HIFI),
+        rhythmax: owned(crate::junkyard::DEFAULT_RHYTHMAX),
+    }
 }
 
 /// `None` or empty: the built-in list, not the user's. A non-empty list
@@ -117,6 +147,11 @@ fn one(list: Option<Vec<String>>, defaults: &[&str]) -> (Vec<String>, bool) {
 }
 
 fn field(doc: &toml::Value, section: &str) -> Result<Option<Vec<String>>, String> {
+    list_in(doc, section, "instances")
+}
+
+/// The list under `[section].key`, without trailing slashes.
+fn list_in(doc: &toml::Value, section: &str, key: &str) -> Result<Option<Vec<String>>, String> {
     let Some(table) = doc.as_table() else {
         return Err("sources.toml is not a table".into());
     };
@@ -124,9 +159,9 @@ fn field(doc: &toml::Value, section: &str) -> Result<Option<Vec<String>>, String
     let Some(sec) = sec.as_table() else {
         return Err(format!("[{section}] is not a table"));
     };
-    let Some(v) = sec.get("instances") else { return Ok(None) };
+    let Some(v) = sec.get(key) else { return Ok(None) };
     let Some(arr) = v.as_array() else {
-        return Err(format!("[{section}].instances is not a list"));
+        return Err(format!("[{section}].{key} is not a list"));
     };
     Ok(Some(
         arr.iter().filter_map(|i| i.as_str()).map(|s| s.trim().trim_end_matches('/').to_owned()).filter(|s| !s.is_empty()).collect(),
@@ -150,11 +185,11 @@ fn toml_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn list_block(urls: &[String]) -> String {
+fn list_block(key: &str, urls: &[String]) -> String {
     if urls.is_empty() {
-        return "instances = []\n".into();
+        return format!("{key} = []\n");
     }
-    let mut out = String::from("instances = [\n");
+    let mut out = format!("{key} = [\n");
     for u in urls {
         out.push_str("  ");
         out.push_str(&toml_string(u));
@@ -167,6 +202,7 @@ fn list_block(urls: &[String]) -> String {
 fn template(defaults: Defaults<'_>, seed: &SourcesSettings) -> String {
     let qobuz = seed_or(&seed.qobuz_instances, defaults.qobuz);
     let tidal = seed_or(&seed.tidal_instances, defaults.tidal);
+    let junkyard = junkyard_defaults();
     format!(
         "\
 # Инстансы бесплатных сервисов скачивания. Свой адрес или публичный — в список.
@@ -176,15 +212,26 @@ fn template(defaults: Defaults<'_>, seed: &SourcesSettings) -> String {
 # [qobuz] — Qobuz-DL (https://github.com/QobuzDL/Qobuz-DL), без /api на конце.
 # [tidal] — hifi-api (https://github.com/binimum/hifi-api). Не класть сюда
 # tracks.monochrome.st: у него другой API.
+# [junkyard] — «Барахолка»: те же два вида и Rhythmax, свои адреса для неё.
 
 [qobuz]
 # Qobuz-DL, без /api на конце.
 {qobuz}
 [tidal]
 # hifi-api. Не tracks.monochrome.st.
-{tidal}",
-        qobuz = list_block(&qobuz),
-        tidal = list_block(&tidal),
+{tidal}
+[junkyard]
+# Qobuz-DL, без /api на конце.
+{qobuz_dl}
+# hifi-api.
+{hifi}
+# Rhythmax (hifi.odskyler.com): отвечает без проверок.
+{rhythmax}",
+        qobuz = list_block("instances", &qobuz),
+        tidal = list_block("instances", &tidal),
+        qobuz_dl = list_block("qobuz_dl", &junkyard.qobuz_dl),
+        hifi = list_block("hifi", &junkyard.hifi),
+        rhythmax = list_block("rhythmax", &junkyard.rhythmax),
     )
 }
 
@@ -240,6 +287,7 @@ left = "keep me"
         let fresh = std::fs::read_to_string(&created).unwrap();
         assert!(fresh.contains("https://from-settings.example"), "{fresh}");
         assert!(fresh.contains("https://tidal.example"), "{fresh}");
+        assert!(fresh.contains("[junkyard]"), "{fresh}");
         assert!(fresh.starts_with('#'));
         ensure(&created, defaults(), &SourcesSettings::default()).unwrap();
         assert_eq!(std::fs::read_to_string(&created).unwrap(), fresh, "a second ensure does not overwrite");
@@ -249,5 +297,31 @@ left = "keep me"
     fn a_broken_file_is_told_and_not_taken_for_the_lists() {
         assert!(parse("instances = [", defaults()).is_err());
         assert!(parse("[qobuz]\ninstances = \"no\"\n", defaults()).is_err());
+    }
+
+    /// `[junkyard]` names a list per backend kind; a missing table, or an
+    /// empty list, is the built-in one.
+    #[test]
+    fn the_junkyard_table_names_a_list_per_backend() {
+        let text = r#"
+[junkyard]
+qobuz_dl = ["https://q.example/"]
+hifi = []
+rhythmax = ["https://r.example"]
+"#;
+        let lists = parse(text, defaults()).unwrap();
+        assert_eq!(lists.junkyard.qobuz_dl, ["https://q.example"]);
+        assert!(lists.junkyard.hifi.is_empty(), "an empty list is the built-in one, and none is built in");
+        assert_eq!(lists.junkyard.rhythmax, ["https://r.example"]);
+        assert_eq!(lists.qobuz, ["https://qobuz.example"], "the other tables are untouched");
+        let none = parse("[qobuz]\ninstances = []\n", defaults()).unwrap();
+        assert_eq!(
+            none.junkyard.rhythmax,
+            ["https://hifi.odskyler.com"],
+            "a file without the table is the built-in lists"
+        );
+        assert!(none.junkyard.qobuz_dl.is_empty() && none.junkyard.hifi.is_empty());
+        assert!(parse("[junkyard]\nqobuz_dl = \"no\"\n", defaults()).is_err());
+        assert!(parse("[junkyard]\nhifi = [\"https://h.example\"]\n", defaults()).is_ok());
     }
 }

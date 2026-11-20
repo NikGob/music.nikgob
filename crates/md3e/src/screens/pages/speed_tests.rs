@@ -31,7 +31,7 @@ fn track(has_local: bool) -> TrackRow {
         id: TrackId::new(), title: "Track".into(), artist: "Artist".into(),
         album: Some("Album".into()), release_id: Some(ReleaseId::new()),
         artists: nikgob_view::Credit::single("Artist", Some(nikgob_view::ArtistId::new())), disc_no: 1, track_no: 1,
-        duration: None, quality: None, source: None, has_local, liked: false, cover: None, clip: false, in_library: true,
+        duration: None, quality: None, source: None, has_local, liked: false, cover: None, clip: false, in_library: true, temporary: false,
     }
 }
 

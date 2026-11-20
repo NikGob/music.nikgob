@@ -202,6 +202,7 @@ mod tests {
             cover: None,
             clip: false,
             in_library: true,
+            temporary: false,
         });
         let p = of_view(&st, "PC", MeshKind::Pc, "0.0.5", 1).playing.unwrap();
         assert_eq!(p.title, "Song");

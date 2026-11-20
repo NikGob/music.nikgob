@@ -765,6 +765,7 @@ mod tests {
             cover: None,
             clip: false,
             in_library: true,
+            temporary: false,
         };
         st.queue.current = Some(row("now"));
         st.queue.current_entry = Some(5);

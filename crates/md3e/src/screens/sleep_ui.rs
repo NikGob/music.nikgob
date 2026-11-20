@@ -226,6 +226,7 @@ mod tests {
             cover: None,
             clip: false,
             in_library: true,
+            temporary: false,
         });
         state.player.sleep = Some(SleepView { choice: SleepChoice::TrackEnd, deadline: None, after_current: Some(Duration::ZERO) });
         let rows = rows(&state, |c| c);
