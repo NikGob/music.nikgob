@@ -248,6 +248,10 @@ impl Worker {
             }
             log::info!("sources.toml: tidal {:?}", lists.tidal);
         }
+        if let Some(j) = &self.junkyard {
+            j.set_sites(&lists.junkyard);
+            log::info!("sources.toml: junkyard {:?}", lists.junkyard);
+        }
     }
 
     /// Creates `sources.toml` if it is missing and opens it for editing.

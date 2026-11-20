@@ -287,6 +287,8 @@ struct Worker {
     /// Qobuz and Tidal, so `sources.toml` can change their lists.
     qobuz: Option<Arc<nikgob_sources::qobuz::Qobuz>>,
     tidal: Option<Arc<nikgob_sources::tidal::Tidal>>,
+    /// «Барахолка», so `sources.toml` can change its sites.
+    junkyard: Option<Arc<nikgob_sources::junkyard::Junkyard>>,
     /// `sources.toml`'s mtime when it was last read.
     sources_mtime: Option<SystemTime>,
     candidates: Vec<nikgob_core::indexer::Candidate>,
@@ -583,6 +585,7 @@ impl Worker {
             khinsider: web.khinsider,
             qobuz: web.qobuz,
             tidal: web.tidal,
+            junkyard: web.junkyard,
             sources_mtime,
             candidates: Vec::new(),
             torrents: torrents::Torrents::new(torrent_state, torrent_offline),

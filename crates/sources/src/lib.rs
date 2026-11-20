@@ -41,11 +41,12 @@ pub struct WebSources {
     pub khinsider: Option<Arc<khinsider::Khinsider>>,
     pub qobuz: Option<Arc<qobuz::Qobuz>>,
     pub tidal: Option<Arc<tidal::Tidal>>,
+    pub junkyard: Option<Arc<junkyard::Junkyard>>,
 }
 
 impl WebSources {
     pub fn empty() -> Self {
-        Self { list: Vec::new(), khinsider: None, qobuz: None, tidal: None }
+        Self { list: Vec::new(), khinsider: None, qobuz: None, tidal: None, junkyard: None }
     }
 }
 
@@ -60,6 +61,7 @@ pub fn web_sources(settings: &Settings, lists: &config::Lists) -> WebSources {
     let kh = Arc::new(khinsider::Khinsider::new(&s.khinsider_url));
     let q = Arc::new(qobuz::Qobuz::from_list(&lists.qobuz, lists.qobuz_own, std::time::Duration::from_millis(1500)));
     let t = Arc::new(tidal::Tidal::from_list(&lists.tidal, lists.tidal_own, std::time::Duration::from_millis(1500)));
+    let j = Arc::new(junkyard::Junkyard::new(&lists.junkyard));
     let list: Vec<Arc<dyn Source>> = vec![
         kh.clone(),
         q.clone(),
@@ -68,7 +70,7 @@ pub fn web_sources(settings: &Settings, lists: &config::Lists) -> WebSources {
         Arc::new(archive::Archive::new(&s.archive_url)),
         Arc::new(bandcamp::Bandcamp::new()),
         Arc::new(dogmazic::Dogmazic::from_settings(s)),
-        Arc::new(junkyard::Junkyard::new(&lists.junkyard)),
+        j.clone(),
     ];
-    WebSources { list, khinsider: Some(kh), qobuz: Some(q), tidal: Some(t) }
+    WebSources { list, khinsider: Some(kh), qobuz: Some(q), tidal: Some(t), junkyard: Some(j) }
 }

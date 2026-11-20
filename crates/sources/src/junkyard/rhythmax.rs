@@ -41,6 +41,12 @@ const CATALOGUE: &str = "https://api.tidal.com/v1";
 const QUALITY: &str = "LOSSLESS";
 /// A token is fetched again this long before it expires.
 const TOKEN_SLACK: Duration = Duration::from_secs(30);
+/// A token is never trusted for longer than this, whatever it says: an
+/// `expires_in` of `u64::MAX` is not a date.
+const LONGEST_TOKEN: Duration = Duration::from_secs(24 * 3600);
+/// A track's manifest is a few hundred segments; a timeline that names
+/// more than this is not one.
+const MOST_SEGMENTS: u64 = 10_000;
 /// The base is probed at most this often.
 const HEALTH_EVERY: Duration = Duration::from_secs(30 * 60);
 /// One request to one site per this.
@@ -63,7 +69,7 @@ struct TokenAnswer {
 impl Token {
     fn of(body: &str) -> Result<Self, SourceError> {
         let answer: TokenAnswer = serde_json::from_str(body).map_err(|e| SourceError::Parse(format!("a token: {e}")))?;
-        let life = Duration::from_secs(answer.expires_in).saturating_sub(TOKEN_SLACK);
+        let life = Duration::from_secs(answer.expires_in).min(LONGEST_TOKEN).saturating_sub(TOKEN_SLACK);
         Ok(Self { value: answer.access_token, until: Instant::now() + life })
     }
 
@@ -151,27 +157,29 @@ impl Rhythmax {
     }
 
     /// The bases are probed at most every [`HEALTH_EVERY`], so one whose
-    /// accounts are all gone is skipped before a wish asks it. A base that
-    /// is sitting out is skipped without a request, as everywhere else.
+    /// accounts are all gone is skipped before a wish asks it. Between
+    /// probes nothing is asked: a call through [`Instances`] would count as
+    /// an answer and wipe the strikes of a base that is failing.
     async fn health(&self) -> Result<(), SourceError> {
-        let fresh = {
-            let mut probed = self.probed.lock().await;
-            let fresh = probed.is_none_or(|t| t.elapsed() >= HEALTH_EVERY);
-            if fresh {
-                *probed = Some(Instant::now());
+        let fresh = self.probed.lock().await.is_none_or(|t| t.elapsed() >= HEALTH_EVERY);
+        if !fresh {
+            if self.instances.is_empty() {
+                return Err(SourceError::NotConfigured);
             }
-            fresh
-        };
+            let urls = self.instances.urls();
+            if urls.iter().all(|u| self.instances.paused(u)) {
+                return Err(SourceError::Blocked("every base is sitting out".into()));
+            }
+            return Ok(());
+        }
         let http = &self.http;
-        self.instances
-            .call(|base| async move {
-                if fresh {
-                    probe(http, &base).await?;
-                }
-                Ok(base)
-            })
-            .await
-            .map(|_| ())
+        let r = self.instances.call(|base| async move { probe(http, &base).await.map(|()| base) }).await;
+        // A probe that failed is asked again on the next wish; the base's
+        // own pause keeps that from being a request every time.
+        if r.is_ok() {
+            *self.probed.lock().await = Some(Instant::now());
+        }
+        r.map(|_| ())
     }
 
     /// The catalogue token, fetched again when it is spent.
@@ -256,10 +264,18 @@ impl Backend for Rhythmax {
         "rhythmax"
     }
 
+    fn sites(&self) -> Vec<String> {
+        self.instances.urls()
+    }
+
+    /// Tracks only: an album is asked of the backends that list one.
+    fn supports(&self, scope: WantScope) -> bool {
+        scope == WantScope::Track
+    }
+
     fn search<'a>(&'a self, want: &'a Want) -> BoxFuture<'a, Result<Vec<Offer>, SourceError>> {
         Box::pin(async move {
-            // Tracks only: an album is asked of the backends that list one.
-            if want.scope != WantScope::Track {
+            if !self.supports(want.scope) {
                 return Ok(Vec::new());
             }
             self.health().await?;
@@ -387,9 +403,12 @@ impl Plan {
         let start = attr(text, "startNumber").and_then(|v| v.parse().ok()).unwrap_or(1);
         let timeline = between(text, "<SegmentTimeline>", "</SegmentTimeline>")
             .ok_or_else(|| SourceError::Parse("an MPD without a segment timeline".into()))?;
-        let count = segments(timeline);
+        let count = segments(timeline)?;
         if count == 0 {
             return Err(SourceError::Parse("an MPD with no segment".into()));
+        }
+        if start.checked_add(count).is_none() {
+            return Err(SourceError::Parse("a segment numbering that does not fit".into()));
         }
         let total = attr(text, "bandwidth")
             .and_then(|v| v.parse::<u64>().ok())
@@ -400,13 +419,15 @@ impl Plan {
 
     /// The URL of the `n`th segment (from 0).
     fn segment(&self, n: u64) -> String {
-        self.media.replace("$Number$", &(self.start + n).to_string())
+        self.media.replace("$Number$", &self.start.saturating_add(n).to_string())
     }
 }
 
-/// The value of `name="…"` in `text`.
+/// The value of the attribute `name` in `text`: `name="…"` after the
+/// whitespace that separates it from the tag or the attribute before it, so
+/// an attribute that merely ends in the same letters is not it.
 fn attr<'a>(text: &'a str, name: &str) -> Option<&'a str> {
-    let at = text.find(&format!("{name}=\""))? + name.len() + 2;
+    let at = text.find(&format!(" {name}=\""))? + name.len() + 3;
     let end = text[at..].find('"')?;
     Some(&text[at..at + end])
 }
@@ -419,17 +440,26 @@ fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
 }
 
 /// How many segments a `SegmentTimeline` names: each `<S>` is one, plus its
-/// `r` repeats.
-fn segments(timeline: &str) -> u64 {
+/// `r` repeats. A repeat that is not a number, or a timeline longer than
+/// [`MOST_SEGMENTS`], is a shape this does not read.
+fn segments(timeline: &str) -> Result<u64, SourceError> {
     let mut count = 0u64;
     let mut rest = timeline;
     while let Some(at) = rest.find("<S ") {
         let Some(end) = rest[at..].find('>') else { break };
         let tag = &rest[at..at + end];
-        count += attr(tag, "r").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) + 1;
+        let repeats = match attr(tag, "r") {
+            Some(v) => v.parse::<u64>().map_err(|_| SourceError::Parse(format!("a segment repeat: {v}")))?,
+            None => 0,
+        };
+        let one = repeats.checked_add(1).ok_or_else(|| SourceError::Parse("a segment repeat: too many".into()))?;
+        count = count
+            .checked_add(one)
+            .filter(|n| *n <= MOST_SEGMENTS)
+            .ok_or_else(|| SourceError::Parse("a timeline of too many segments".into()))?;
         rest = &rest[at + end..];
     }
-    count
+    Ok(count)
 }
 
 /// `PT2M41.25S` → 161.25 seconds.
@@ -477,13 +507,16 @@ fn box_of<'a>(data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
             }
             n => (8, n),
         };
-        if size < header || at + size > data.len() {
+        // A size the file cannot hold is not a box: a largesize of
+        // `u64::MAX` must not wrap the walk into itself.
+        let end = at.checked_add(size)?;
+        if size < header || end > data.len() {
             return None;
         }
         if name == kind.as_slice() {
-            return Some(&data[at + header..at + size]);
+            return Some(&data[at + header..end]);
         }
-        at += size;
+        at = end;
     }
     None
 }
@@ -725,6 +758,40 @@ mod tests {
         assert!(Plan::of(b"<MPD></MPD>").is_err(), "an MPD without segments is not a plan");
     }
 
+    /// A timeline or a numbering this does not read is refused, not
+    /// truncated: a repeat of `u64::MAX`, a repeat that is not a number, a
+    /// timeline of a billion segments, a numbering that does not fit, and a
+    /// token that claims to live forever.
+    #[test]
+    fn a_shape_this_does_not_read_is_refused() {
+        let at = |segments: &str| mpd("https://x/0.mp4", "https://x/$Number$.mp4", segments);
+        assert!(Plan::of(at(r#"<S d="1" r="18446744073709551615"/>"#).as_bytes()).is_err(), "a repeat that overflows");
+        assert!(Plan::of(at(r#"<S d="1" r="-1"/>"#).as_bytes()).is_err(), "a repeat that is not a number");
+        assert!(Plan::of(at(r#"<S d="1" r="1000000000"/>"#).as_bytes()).is_err(), "a timeline of too many segments");
+        let far = at(r#"<S d="1"/><S d="1"/>"#).replace("startNumber=\"1\"", "startNumber=\"18446744073709551615\"");
+        assert!(Plan::of(far.as_bytes()).is_err(), "a numbering that does not fit");
+        assert_eq!(attr(r#"<S fooBar="7" r="3"/>"#, "r"), Some("3"), "an attribute that ends in r is not r");
+        assert!(Token::of(r#"{"access_token":"x","expires_in":18446744073709551615}"#).is_ok(), "a token that claims forever is capped");
+    }
+
+    /// A box whose size the file cannot hold is not a box: a largesize of
+    /// `u64::MAX` after a valid `ftyp` is refused, not walked into.
+    #[test]
+    fn a_box_that_does_not_fit_is_refused() {
+        let mut data = boxed(b"ftyp", b"isom");
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(b"moov");
+        data.extend_from_slice(&u64::MAX.to_be_bytes());
+        assert_eq!(box_of(&data, b"ftyp"), Some(b"isom".as_slice()), "the box before it is still read");
+        assert_eq!(box_of(&data, b"moov"), None, "a size of u64::MAX is not a box");
+        // A size of 0 runs to the end of the file, as the format says.
+        let mut open = boxed(b"ftyp", b"isom");
+        open.extend_from_slice(&0u32.to_be_bytes());
+        open.extend_from_slice(b"mdat");
+        open.extend_from_slice(b"tail");
+        assert_eq!(box_of(&open, b"mdat"), Some(b"tail".as_slice()));
+    }
+
     /// The remux: `fLaC`, the STREAMINFO block, then the two segments'
     /// frames in order.
     #[tokio::test]
@@ -835,7 +902,7 @@ mod tests {
             &format!("{}/cat-token", server.uri()),
             Duration::ZERO,
         );
-        let junkyard = super::super::Junkyard { backends: vec![Box::new(backend)] };
+        let junkyard = super::super::Junkyard::of(vec![Arc::new(backend)]);
         let found = junkyard.search(&want()).await.unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].handle, "rhythmax:172802834");
