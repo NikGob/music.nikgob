@@ -166,9 +166,9 @@ pub const STALE_SHARE: f32 = 0.25;
 pub const LIKED_STALE_SHARE: f32 = 0.5;
 /// The blends made today shown at most (the latest).
 pub const BLENDS_SHOWN: usize = 2;
-/// Songs of a mix (about 90–100 minutes)…
-pub const MIX_LEN: usize = 28;
-const MIX_MS: u64 = 105 * 60_000;
+/// Songs of a mix (about 95–105 minutes)…
+pub const MIX_LEN: usize = 30;
+const MIX_MS: u64 = 110 * 60_000;
 /// …of «Фон» (about 80 minutes; a radio of the same mode goes on after)…
 pub const BG_LEN: usize = 36;
 const BG_MS: u64 = 120 * 60_000;
@@ -227,6 +227,9 @@ const W_COHERE: f32 = 0.8;
 pub const CORE_POOL: usize = 3;
 const CORE_SPREAD: f32 = 3.0;
 const CORE_BEFORE: f32 = 1.0;
+/// Share of yesterday's familiar, non-worn tracks carried over as the daily
+/// familiar core on automatic day rollover (manual refresh still rotates all).
+const DAILY_CARRY_SHARE: f32 = 0.42;
 /// The lottery of the lineup: how much the fit to now weighs (its log
 /// odds), the least weight of a profile by its share against the largest,
 /// and a moment shown in the epoch before (and the one before it).

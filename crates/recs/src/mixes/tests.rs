@@ -1164,3 +1164,32 @@
         };
         assert!(prior(&m_sat) > prior(&m_tue) + 0.2, "{} vs {}", prior(&m_sat), prior(&m_tue));
     }
+
+    /// Daily mixes refresh half-persistently across days (~35–55% familiar
+    /// core carried over from yesterday, ~45–65% fresh rotation), whereas a
+    /// manual refresh (`salt != 0`) rotates more aggressively.
+    #[test]
+    fn daily_mixes_refresh_half_persistently_across_days() {
+        let l = lib(40, &[]);
+        let m = model(&l, T0 + 7 * HOUR_MS);
+        let day = 77u64;
+        let (first, keys) = in_epoch(&l, &m, DayPart::Morning, day, |b| b.daily(&Kept::default()));
+        let mut kept = Kept { lineup: keys, ..Kept::default() };
+        kept.keep(&first, &m);
+        let next_kept = kept.clone().next_epoch(false);
+        let (day2, _) = in_epoch(&l, &m, DayPart::Morning, day + 1, |b| b.daily(&next_kept));
+        let d1 = first.iter().find(|x| x.key == MixKey::Daily(0)).unwrap();
+        let d2 = day2.iter().find(|x| x.key == MixKey::Daily(0)).unwrap();
+        let set1: HashSet<usize> = d1.tracks.iter().copied().collect();
+        let shared = d2.tracks.iter().filter(|i| set1.contains(i)).count() as f32 / d2.tracks.len().max(1) as f32;
+        assert!((0.25..=0.60).contains(&shared), "expected half-persistent daily carryover, got {shared:.2}");
+        assert_ne!(d1.tracks, d2.tracks, "fresh half must rotate");
+
+        // Manual refresh («Другой состав», salt != 0) skips carryover.
+        let mut refreshed = kept;
+        refreshed.salts.push((MixKey::Daily(0), 99));
+        let (manual, _) = in_epoch(&l, &m, DayPart::Morning, day, |b| b.daily(&refreshed));
+        let dm = manual.iter().find(|x| x.key == MixKey::Daily(0)).unwrap();
+        let shared_manual = dm.tracks.iter().filter(|i| set1.contains(i)).count() as f32 / dm.tracks.len().max(1) as f32;
+        assert!(shared_manual < shared, "manual refresh should rotate more than daily carryover: {shared_manual:.2} vs {shared:.2}");
+    }

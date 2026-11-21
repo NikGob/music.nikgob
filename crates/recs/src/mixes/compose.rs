@@ -86,6 +86,27 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // Half-persistent daily refresh: on automatic day rollover (`salt == 0`)
+        // daily & genre mixes keep ~42% of yesterday's familiar non-worn core
+        // so the mix feels recognizable yet genuinely fresh (~58% rotated).
+        let daily_carry = matches!(key, MixKey::Daily(_) | MixKey::Genre(_)) && salt == 0 && !away.is_empty();
+        if daily_carry {
+            let carry_target = ((n as f32 * DAILY_CARRY_SHARE).round() as usize).min(n.saturating_sub(floor));
+            let mut prev_core: Vec<(f32, usize)> = pool
+                .tracks
+                .iter()
+                .copied()
+                .filter(|&i| away.contains(&i) && !self.unheard(i) && self.model.worn(i) == 0.0)
+                .map(|i| (value(i) + 0.18 * chance(i), i))
+                .collect();
+            prev_core.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            for &(_, i) in &prev_core {
+                if pick.len() >= floor + carry_target || pick.full(n) {
+                    break;
+                }
+                pick.take(i);
+            }
+        }
         // The core: drawn from the best by value (Gumbel keys over a third
         // of their spread), the epoch before's less likely; then the rest of
         // the pool by value, for what the rules held back.
@@ -110,11 +131,14 @@ impl<'a> Builder<'a> {
         let cohere = (matches!(key, MixKey::Profile(_) | MixKey::Kind(_) | MixKey::Genre(_)) || key.is_cluster()) && !self.model.graph.is_empty();
         if cohere {
             let mut top: Vec<(f32, usize)> = core[..k].to_vec();
-            self.take_cohering(&mut pick, &mut top, 1.0 / tau, &|p: &Picking<'_, '_>| p.len() >= half || p.full(n), &|_| false);
+            self.take_cohering(&mut pick, &mut top, 1.0 / tau, &|p: &Picking<'_, '_>| p.len() >= half || p.full(n), &|i| daily_carry && away.contains(&i));
         }
         for &(_, i) in &core[if cohere { k } else { 0 }..] {
             if pick.len() >= half || pick.full(n) {
                 break;
+            }
+            if daily_carry && away.contains(&i) {
+                continue;
             }
             pick.take(i);
         }

@@ -52,9 +52,8 @@ use crate::songtype::{Lang, SongTypes, Voice};
 
 /// About every fifth song of a mix is new before anything new was heard.
 pub const NEW_EVERY: usize = 5;
-/// The user's share of new music a mix takes at most (more finds no places
-/// between loved songs anyway).
-pub const CARD_MAX_SHARE: f32 = 0.3;
+/// The user's share of new music a mix takes at most in the calm mode.
+pub const CARD_MAX_SHARE: f32 = 0.35;
 /// The open modes' share at most…
 pub const OPEN_MAX_SHARE: f32 = 0.9;
 /// …a niche's at least…
@@ -255,8 +254,16 @@ fn choose_by<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], want: us
             0
         }
     };
-    let mut order: Vec<(u8, f32, usize)> =
-        cands.iter().enumerate().filter(|(_, c)| (!kind || fits(c, &langs, inst)) && keep(c)).map(|(k, c)| (group(c), c.weight, k)).collect();
+    let mut order: Vec<(u8, f32, usize)> = cands
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            (!kind || fits(c, &langs, inst))
+                && keep(c)
+                && c.vector.as_ref().is_none_or(|v| model.dislike_near_of(&model.embed(v)) < crate::open_world::MISFIT_DISLIKE)
+        })
+        .map(|(k, c)| (group(c), c.weight, k))
+        .collect();
     order.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
     let mut out = Vec::new();
     for (_, _, k) in order {
@@ -290,7 +297,19 @@ pub fn take<'c>(
 ) -> (Vec<&'c NewCandidate>, NewMode) {
     let (tracks, artists) = if m.pool_size.0 > 0 { m.pool_size } else { (m.tracks.len(), m.artists.len()) };
     let mode = if user > 0.0 { NewMode::of(tracks, artists, user) } else { NewMode::Calm };
-    let want = want_in(m.tracks.len(), appetite, user, mode);
+    let mut want = want_in(m.tracks.len(), appetite, user, mode);
+    // For daily & genre mixes in the calm mode, spill unused library-unheard
+    // budget into service new tracks (up to `CARD_MAX_SHARE`) so mixes stay
+    // fresh even when the user has already heard most of their library.
+    if mode == NewMode::Calm && user > 0.0 && matches!(m.key, MixKey::Daily(_) | MixKey::Genre(_)) {
+        let actual_unheard = m.tracks.iter().filter(|&&i| crate::mixes::never_heard(model, i)).count();
+        let expected_unheard = (m.tracks.len() as f32 * crate::mixes::DAILY_UNHEARD).floor() as usize;
+        let spill = expected_unheard.saturating_sub(actual_unheard).div_ceil(2);
+        if spill > 0 {
+            let cap = new_count(m.tracks.len(), CARD_MAX_SHARE);
+            want = (want + spill).min(cap);
+        }
+    }
     let chosen = if mode == NewMode::Niche {
         let seeds = if m.pool.is_empty() { &m.tracks } else { &m.pool };
         let strict = matches!(m.key, MixKey::Calm | MixKey::Lively | MixKey::Background { .. });
@@ -378,18 +397,29 @@ pub fn spread(len: usize, n: usize) -> Vec<usize> {
 }
 
 /// After which places of a mix of `anchors` (familiar and loved) `n` new
-/// songs stand, in order: each between two anchors, never in the first two
-/// places nor two running, spread as evenly as such places allow.
+/// songs stand, in order: prefers gaps between two anchors, falling back to
+/// non-adjacent gaps next to at least one anchor if more slots are needed,
+/// never in the first two places nor two running.
 pub fn places(anchors: &[bool], n: usize) -> Vec<usize> {
     let len = anchors.len();
-    // The gaps after place k (k ≥ 1): between two anchors.
-    let gaps: Vec<usize> = (1..len.saturating_sub(1)).filter(|&k| anchors[k] && anchors[k + 1]).collect();
+    if len < 3 || n == 0 {
+        return Vec::new();
+    }
+    // Pass 1: gaps after place k (k >= 1) strictly between two anchors.
+    let strict: Vec<usize> = (1..len - 1).filter(|&k| anchors[k] && anchors[k + 1]).collect();
+    // Pass 2: fallback gaps next to at least one anchor.
+    let soft: Vec<usize> = (1..len - 1).filter(|&k| (anchors[k] || anchors[k + 1]) && !(anchors[k] && anchors[k + 1])).collect();
     let mut after: Vec<usize> = Vec::new();
-    for j in 0..n.min(gaps.len()) {
-        // The gap nearest the even spot of the j-th new song, free.
-        let spot = (j + 1) * len / (n + 1);
-        if let Some(&g) = gaps.iter().filter(|g| !after.contains(g) && !after.contains(&(*g - 1)) && !after.contains(&(*g + 1))).min_by_key(|g| g.abs_diff(spot)) {
-            after.push(g);
+    let fits = |after: &[usize], g: usize| !after.contains(&g) && !after.contains(&(g - 1)) && !after.contains(&(g + 1));
+    for gaps in [&strict, &soft] {
+        for j in 0..n {
+            if after.len() >= n {
+                break;
+            }
+            let spot = (j + 1) * len / (n + 1);
+            if let Some(&g) = gaps.iter().filter(|&&g| fits(&after, g)).min_by_key(|&&g| g.abs_diff(spot)) {
+                after.push(g);
+            }
         }
     }
     after.sort_unstable();
@@ -476,5 +506,91 @@ mod tests {
         }
         assert!(places(&anchors, 0).is_empty());
         assert!(places(&[true, true], 3).is_empty());
+    }
+
+    /// When strict anchor-anchor gaps run out, `places` falls back to
+    /// non-adjacent slots next to at least one anchor, never in the first
+    /// two places nor back-to-back.
+    #[test]
+    fn places_falls_back_to_soft_anchor_gaps() {
+        // Only two strict anchor-anchor gaps (at k=1 and k=7), plus several
+        // single-anchor gaps.
+        let anchors = [true, true, true, false, true, false, false, true, true, false, true, false];
+        let at = places(&anchors, 4);
+        assert_eq!(at.len(), 4, "expected 4 placed slots via fallback: {at:?}");
+        assert!(at.contains(&1) && at.contains(&7), "strict gaps chosen first: {at:?}");
+        for &k in &at {
+            assert!(k >= 1 && (anchors[k] || anchors[k + 1]), "valid slot: {at:?}");
+        }
+        for w in at.windows(2) {
+            assert!(w[1] - w[0] >= 2, "never adjacent: {at:?}");
+        }
+    }
+
+    /// Daily/genre mixes with few unheard library tracks spill their unused
+    /// unheard capacity into service new tracks (up to `CARD_MAX_SHARE`), and
+    /// previewed candidates next to user dislikes are filtered out.
+    #[test]
+    fn daily_mix_spills_unused_unheard_and_filters_disliked_previews() {
+        use crate::eval::synthetic::{Kind, user};
+        let mut p = user(Kind::Omnivore, 5).parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let disliked_idx = (0..p.catalog.len()).find(|&i| p.index.get(p.catalog.tracks()[i].id).is_some()).unwrap();
+        let disliked_id = p.catalog.tracks()[disliked_idx].id;
+        p.input.disliked_tracks.push(disliked_id);
+        p.input.dislike_neighbours = true;
+        let model = p.model_at(last + 1);
+        let played: Vec<usize> = (0..model.len()).filter(|&i| !crate::mixes::never_heard(&model, i)).take(30).collect();
+        let unheard: Vec<usize> = (0..model.len()).filter(|&i| crate::mixes::never_heard(&model, i)).take(6).collect();
+        assert!(played.len() >= 24 && unheard.len() >= 6);
+        let mut profiles: Vec<usize> = played.iter().filter_map(|&i| model.profile_at(i)).collect();
+        profiles.sort_unstable();
+        profiles.dedup();
+        let (langs, inst) = {
+            let dummy = Mix {
+                key: MixKey::Daily(0),
+                title: String::new(),
+                short: Vec::new(),
+                anchors: vec![true; played.len()],
+                tracks: played.clone(),
+                artists: Vec::new(),
+                profiles: profiles.clone(),
+                score: 0.0,
+                kind: None,
+                genre: None,
+                pool_size: (200, 30),
+                pool: Vec::new(),
+            };
+            kinds(&model, &dummy)
+        };
+        let fit_lane = langs.iter().next().copied().map(LaneKey::Sung).or(inst.then_some(LaneKey::Instrumental));
+        let mut cands: Vec<NewCandidate> = (0..25).map(|k| cand(&format!("n{k}"), fit_lane, vec![played[k % played.len()]], 1.0)).collect();
+        // Add a high-weight candidate whose preview sits right on a disliked track.
+        let mut bad = cand("disliked_near", fit_lane, vec![played[0]], 100.0);
+        bad.vector = p.index.get(disliked_id).copied();
+        cands.push(bad);
+
+        let all_played_mix = Mix {
+            key: MixKey::Daily(0),
+            title: String::new(),
+            short: Vec::new(),
+            anchors: vec![true; played.len()],
+            tracks: played.clone(),
+            artists: Vec::new(),
+            profiles: profiles.clone(),
+            score: 0.0,
+            kind: None,
+            genre: None,
+            pool_size: (200, 30),
+            pool: Vec::new(),
+        };
+        let mut mixed_tracks = played[..played.len() - 6].to_vec();
+        mixed_tracks.extend_from_slice(&unheard[..6]);
+        let with_unheard_mix = Mix { tracks: mixed_tracks, ..all_played_mix.clone() };
+
+        let (chosen_played, _) = take(&model, Some(&p.index), &all_played_mix, &cands, None, 0.2, &mut HashSet::new());
+        let (chosen_unheard, _) = take(&model, Some(&p.index), &with_unheard_mix, &cands, None, 0.2, &mut HashSet::new());
+        assert!(chosen_played.len() > chosen_unheard.len(), "unused library unheard budget should spill into service new: {} vs {}", chosen_played.len(), chosen_unheard.len());
+        assert!(chosen_played.iter().all(|c| c.track.id.id != "disliked_near"), "disliked-neighborhood preview must be excluded");
     }
 }
