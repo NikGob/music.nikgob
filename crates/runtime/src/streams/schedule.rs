@@ -116,9 +116,8 @@ pub struct StreamSchedule {
     /// The pause assumed when the service did not say how long it is.
     pub rate_limit_unknown: Duration,
     /// «Моя волна» asks the niches' top-up for more new songs of a filter
-    /// that ran short, and a wave with nothing new yet waits for it: the
-    /// app runs with [`crate::recs::WAVE_REFILL`] (off); the tests of
-    /// the refill turn it on.
+    /// that ran short, and a wave with nothing new yet waits for it
+    /// ([`crate::recs::WAVE_REFILL`]).
     pub wave_refill: bool,
     /// While YouTube Music plays or comes next, background work of YouTube
     /// Music does not start: it looks again this long after (see

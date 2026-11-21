@@ -14,6 +14,11 @@ impl UserModel {
         self.moment_with(session, now, true)
     }
 
+    /// [`Self::moment`] without graph walks (for skip scoring).
+    pub(crate) fn moment_light(&self, session: &Session, now: UnixMs) -> Moment {
+        self.moment_with(session, now, false)
+    }
+
     /// [`Self::moment`]; the neighbours of the session in the graphs and in
     /// the sessions before only when it will `rank` candidates (the walk of
     /// the history needs them for a step alone).

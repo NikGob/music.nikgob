@@ -161,13 +161,8 @@ pub(crate) fn empty_snapshot() -> Arc<Snapshot> {
 
 /// Whether «Моя волна» asks the niches' top-up for more new songs of a
 /// filter that ran short, and a wave whose first picks found nothing waits
-/// for it ([`Worker::wave_asked`], [`Worker::wave_refill_ended`]). Off: a
-/// wave with nothing of its filter ends at once («Нечего играть») and asks
-/// nothing, as before the refill. Kept in the code with its tests (they
-/// turn it on through [`crate::StreamSchedule::wave_refill`]); the owner
-/// decides whether to turn it on (the lead's decision of 2026-11-13: its
-/// open edge cases are in the status of r36-recsbugs).
-pub const WAVE_REFILL: bool = false;
+/// for it ([`Worker::wave_asked`], [`Worker::wave_refill_ended`]).
+pub const WAVE_REFILL: bool = true;
 
 /// What a wave's picks asked ([`nikgob_recs::wave::WaveAsks`]) with its
 /// library work done off the worker: the songs of the pool without a
@@ -356,7 +351,7 @@ impl Worker {
         if !self.streaming.schedule.wave_refill || self.wave_refill_empty(&token) {
             return None;
         }
-        self.niche_want_wave(token, seeds)
+        self.niche_want_wave(id, token, seeds)
     }
 
     /// `Command::SetWave`: the playing wave plays `filter` from its next

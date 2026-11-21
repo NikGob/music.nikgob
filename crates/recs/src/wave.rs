@@ -844,6 +844,17 @@ impl Bandit {
         self.run.as_ref().map_or(0, |r| r.count)
     }
 
+    /// Whether «not now» just held the cluster for one recovery song.
+    pub fn is_stay(&self) -> bool {
+        self.stay.is_some()
+    }
+
+    /// The last `max` known artists served by this wave (oldest first).
+    pub fn recent_artists(&self, max: usize) -> Vec<String> {
+        let from = self.served.len().saturating_sub(max);
+        self.served.iter().skip(from).map(|s| s.artist.clone()).filter(|a| !a.is_empty()).collect()
+    }
+
     /// After a skip, whether the queue keeps its `next` pick of the radio
     /// (`None`: the next is none, or the user's own): one skip running keeps
     /// it, unless a cluster is held ([`Self::held`]) and it is of another;
@@ -1071,6 +1082,16 @@ pub fn pick(
         key.label(String::new)
     };
     let run_seed = bandit.seed;
+    let mut recent_artists = bandit.recent_artists(crate::open_world::ARTIST_FATIGUE_WINDOW);
+    let after_skip = bandit.skips_running() > 0 || bandit.is_stay() || session.last().is_some_and(|p| Session::verdict(p, m).rejects());
+    let push_recent = |recent: &mut Vec<String>, artist: String| {
+        if !artist.is_empty() {
+            recent.push(artist);
+            if recent.len() > crate::open_world::ARTIST_FATIGUE_WINDOW {
+                recent.remove(0);
+            }
+        }
+    };
     while out.len() < n {
         // A cluster held by rejections running takes the picks back from a
         // block picked ahead of another.
@@ -1083,7 +1104,23 @@ pub fn pick(
         let filter = WaveFilter { scene, novelty: bandit.novelty_of(user.novelty), ..user };
         let want = (n - out.len()).min(usize::from(bandit.block_left.max(1)));
         let (c, p) = if scene == user.scene { (ctx, pool) } else { (&within, pool_in) };
-        let next = crate::open_world::next_turn(c, p, &filter, session, want, &served, WaveTurn { queued: &ahead, seed: run_seed, skipped_new, again: &[], works });
+        let next = crate::open_world::next_turn(
+            c,
+            p,
+            &filter,
+            session,
+            want,
+            &served,
+            WaveTurn {
+                queued: &ahead,
+                seed: run_seed,
+                skipped_new,
+                again: &[],
+                works,
+                recent_artists: &recent_artists,
+                after_skip: after_skip && out.is_empty(),
+            },
+        );
         asks.add(m, p, &filter, &next);
         if next.picks.is_empty() {
             dry.push(k);
@@ -1093,7 +1130,9 @@ pub fn pick(
         for p in next.picks {
             served.insert(served_key(&p.item, &keys));
             let a = ahead_of(&p.item);
-            bandit.note_served(p.item.clone(), k, &artist_of(a));
+            let label = artist_of(a);
+            bandit.note_served(p.item.clone(), k, &label);
+            push_recent(&mut recent_artists, label);
             ahead.push(a);
             out.push(p);
         }
@@ -1109,18 +1148,56 @@ pub fn pick(
             break;
         }
         let before = out.len();
-        let next = crate::open_world::next_turn(ctx, pool, f, session, n - out.len(), &served, WaveTurn { queued: &ahead, seed: run_seed, skipped_new, again: &[], works });
+        let next = crate::open_world::next_turn(
+            ctx,
+            pool,
+            f,
+            session,
+            n - out.len(),
+            &served,
+            WaveTurn {
+                queued: &ahead,
+                seed: run_seed,
+                skipped_new,
+                again: &[],
+                works,
+                recent_artists: &recent_artists,
+                after_skip: after_skip && out.is_empty(),
+            },
+        );
         asks.add(m, pool, f, &next);
         for p in next.picks {
             served.insert(served_key(&p.item, &keys));
-            ahead.push(ahead_of(&p.item));
+            let a = ahead_of(&p.item);
+            push_recent(&mut recent_artists, artist_of(a));
+            ahead.push(a);
             out.push(p);
         }
         if out.len() < n {
-            let again = repeats(ctx, pool, f, session, n - out.len(), &served, repeatable, cool_ms, WaveTurn { queued: &ahead, seed: run_seed, skipped_new, again: &[], works });
+            let again = repeats(
+                ctx,
+                pool,
+                f,
+                session,
+                n - out.len(),
+                &served,
+                repeatable,
+                cool_ms,
+                WaveTurn {
+                    queued: &ahead,
+                    seed: run_seed,
+                    skipped_new,
+                    again: &[],
+                    works,
+                    recent_artists: &recent_artists,
+                    after_skip: after_skip && out.is_empty(),
+                },
+            );
             for p in again {
                 served.insert(served_key(&p.item, &keys));
-                ahead.push(ahead_of(&p.item));
+                let a = ahead_of(&p.item);
+                push_recent(&mut recent_artists, artist_of(a));
+                ahead.push(a);
                 out.push(p);
             }
         }

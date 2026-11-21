@@ -183,8 +183,8 @@ pub(crate) struct RadioRun {
 struct Refill {
     /// A top-up ended with songs: the next empty picks end the wave.
     done: bool,
-    /// The filters whose top-ups ended with nothing: not asked again while
-    /// it waits.
+    /// The filters whose top-ups already ended for this startup wait: not
+    /// asked again until playback starts or the filter changes.
     empty: Vec<String>,
 }
 
@@ -725,7 +725,7 @@ impl Worker {
         let left = self.queue.upcoming().len();
         let snap = self.snapshot();
         let Some(run) = &self.recs.radio.run else { return };
-        if run.extending || (run.queue_gen.is_some() && left > EXTEND_AT) {
+        if run.extending || run.refill.as_ref().is_some_and(|r| !r.done) || (run.queue_gen.is_some() && left > EXTEND_AT) {
             return;
         }
         if self.recs.radio.paused_dry.is_some_and(|(id, t)| id == run.id && std::time::Instant::now() < t) {
@@ -1094,6 +1094,7 @@ impl Worker {
         // its cluster, not that of the picks ahead of it.
         let playing = playing.map(|t| run.streams.get(&t).map_or(Item::Track(t), |r| Item::Stream(r.clone())));
         run.wave_dry = None;
+        run.refill = None;
         // Picks on their way for a queue not started yet: they are of
         // what the user just changed; the newer asks again.
         if run.extending && run.queue_gen.is_none() {
@@ -1447,6 +1448,7 @@ impl Worker {
                 self.explain_entries(&entries, whys);
                 if let Some(run) = self.recs.radio.run.as_mut() {
                     run.queue_gen = Some(generation);
+                    run.refill = None;
                     run.added.extend(entries);
                 }
                 if let Some(e) = self.queue.current() {
@@ -1720,9 +1722,12 @@ impl Worker {
     /// with them (the pool is built again:
     /// [`super::niche::NicheState::topped_gen`] moved), or ends when there
     /// are none and none of its filters is still to be topped up.
-    pub(crate) fn wave_refill_ended(&mut self, token: &str, found: usize) {
-        let Some(run) = self.recs.radio.run.as_mut() else { return };
+    pub(crate) fn wave_refill_ended(&mut self, run_id: u64, token: &str, found: usize) {
+        let Some(run) = self.recs.radio.run.as_mut().filter(|r| r.id == run_id) else { return };
         let Some(refill) = run.refill.as_mut().filter(|r| !r.done) else { return };
+        if !refill.empty.iter().any(|t| t == token) {
+            refill.empty.push(token.to_owned());
+        }
         if found > 0 {
             refill.done = true;
             log::info!("wave: the top-up of {token} brought {found} songs");
@@ -1731,8 +1736,7 @@ impl Worker {
             }
             return;
         }
-        refill.empty.push(token.to_owned());
-        if self.niche_wave_pending() {
+        if self.niche_wave_pending(run_id) {
             log::info!("wave: the top-up of {token} brought nothing, another is under way");
             return;
         }
@@ -1751,10 +1755,10 @@ impl Worker {
         self.recs.radio.run.as_ref().and_then(|r| r.refill.as_ref()).is_some_and(|r| !r.done)
     }
 
-    /// Whether the waiting wave's filter `token` was topped up with nothing
-    /// while it waits (it is not asked again).
+    /// Whether the waiting wave's filter `token` was already topped up for
+    /// this startup wait (it is not asked again before playback starts).
     pub(crate) fn wave_refill_empty(&self, token: &str) -> bool {
-        self.recs.radio.run.as_ref().and_then(|r| r.refill.as_ref()).is_some_and(|r| !r.done && r.empty.iter().any(|t| t == token))
+        self.recs.radio.run.as_ref().and_then(|r| r.refill.as_ref()).is_some_and(|r| r.empty.iter().any(|t| t == token))
     }
 
     /// The radio found nothing to play after all: the player waiting for

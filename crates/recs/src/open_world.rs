@@ -111,6 +111,22 @@ const GATHER: usize = 200;
 /// The seeded jitter of a pick's value ([`WaveTurn::seed`]), as a radio
 /// picked by the model has: a wave started again does not open the same.
 const WAVE_JITTER: f32 = 0.15;
+/// Relative seeded tie-break jitter (±half this share) on the pull path when
+/// [`WaveTurn::seed`] is set.
+const PULL_JITTER: f32 = 0.18;
+/// Cross-call artist fatigue window (last served picks) and half-life in picks.
+pub(crate) const ARTIST_FATIGUE_WINDOW: usize = 24;
+const ARTIST_FATIGUE_HALF: f32 = 8.0;
+/// Progressive relative pull damping for recent wave plays of the same artist:
+/// light after a single play, steeper on repeated plays to break ping-pong.
+const ARTIST_FATIGUE_BASE: f32 = 0.14;
+const ARTIST_FATIGUE_EXTRA: f32 = 0.30;
+const ARTIST_FATIGUE_KNEE: f32 = 0.7;
+/// Additional temporary relative damping for an artist rejected in the session.
+const SKIP_ARTIST_PENALTY: f32 = 0.55;
+/// Session lookback for skipped-artist cooldown and its decay half-life.
+const SKIP_ARTIST_WINDOW: usize = 12;
+const SKIP_ARTIST_HALF: f32 = 6.0;
 /// A simulated pick plays this long ([`LibStepper`]).
 const SIM_MS: i64 = 200_000;
 /// A user whose own next starts are of the same artist this often
@@ -137,7 +153,7 @@ pub const BLIND_DAMP: f32 = 0.25;
 /// this share of their score; library songs by [`NEW_PUSH_LIB`] of the
 /// pull.
 pub const NEW_PUSH: f32 = 0.6;
-pub const NEW_PUSH_LIB: f32 = 0.3;
+pub const NEW_PUSH_LIB: f32 = 0.55;
 /// A song without a preview joins a niche of a sound when the lists of
 /// this many of its songs hold it.
 pub const STRICT_LINKS: usize = 2;
@@ -282,6 +298,12 @@ pub struct WaveTurn<'a> {
     /// served, queued or played this session, kept as they were (the pool
     /// may no longer hold them): no other version of them is picked.
     pub works: &'a [String],
+    /// Artists served recently in this wave (oldest first, [`ArtistKey::label`]),
+    /// used for smooth cross-call artist fatigue.
+    pub recent_artists: &'a [String],
+    /// Whether the wave is picking immediately after a rejection: a balanced
+    /// wave stabilizes on a familiar song before dropping a new one.
+    pub after_skip: bool,
 }
 
 /// Whether a filter with `tracks` fitting library tracks of `artists`
@@ -794,16 +816,51 @@ fn next_ranked(
     let free = |i: usize| fitting_set.contains(&i) && !served.contains(&m.id(i).to_string()) && m.taste.last_played_at(i).is_none_or(|t| now - t >= rest_at(i));
     let anchor = session.anchor(m).map(|a| m.embed(&a));
     let scale = m.scale().max(1e-6);
+    // The artists kept out of the next pick: the last one, or the last two
+    // for a user who seldom plays an artist twice running — the session's
+    // and the queue's before this call's picks.
+    let avoid = if m.artist_again(ARTIST_AGAIN_PRIOR) >= ARTIST_AGAIN { 1 } else { 2 };
+    // One identity of an artist for the library's songs and the new ones
+    // ([`ArtistKey`]).
+    let lib_artist = |i: usize| ArtistKey::of_track(m, i).label(|| format!("track:{i}"));
+    let mut order: Vec<String> = session.tracks().filter_map(|p| m.position(p.track)).map(lib_artist).collect();
+    for (k, q) in turn.queued.iter().enumerate() {
+        match q {
+            Ahead::Track(t) => order.extend(m.position(*t).map(lib_artist)),
+            Ahead::New(a) => order.push(a.label(|| format!("queued:{k}"))),
+        }
+    }
+    // Smooth cross-call artist fatigue from artists served by this wave so far
+    // (never from the user's pre-wave session, which seeds the taste). Scaled
+    // by the filter's loved-artist breadth so narrow repertoires stay rich.
+    let loved_artists: HashSet<ArtistId> = fitting.iter().filter(|&&i| m.tracks[i].aff_long(now) > 0.0).filter_map(|&i| m.main_artist_at(i)).collect();
+    let breadth_n = if loved_artists.is_empty() { artists.len() } else { loved_artists.len() };
+    let breadth = ((breadth_n as f32 - 4.0) / 8.0).clamp(0.0, 1.0);
+    let fatigue_scale = breadth * (1.0 - 0.4 * m.artist_again(ARTIST_AGAIN_PRIOR));
+    let mut artist_load: HashMap<&str, f32> = HashMap::new();
+    let from = turn.recent_artists.len().saturating_sub(ARTIST_FATIGUE_WINDOW);
+    let tail = &turn.recent_artists[from..];
+    for (pos, a) in tail.iter().enumerate() {
+        if a.is_empty() {
+            continue;
+        }
+        let ago = tail.len() - pos;
+        *artist_load.entry(a.as_str()).or_default() += 0.5f32.powf((ago - 1) as f32 / ARTIST_FATIGUE_HALF);
+    }
     // Where the new songs the session rejected sounded (their preview, else
     // the mean of their seeds' sounds), and the seeds of those rejected
     // unheard; and where its rejected library songs sound, each as hard as
     // its rejection pushes ([`crate::session::Verdict::push`]): a skip turns
-    // the picks from its sound within the cluster too.
+    // the picks from its sound and its artist within the cluster too.
     let mut rejected_at: Vec<(Vector, f32)> = Vec::new();
     let mut blind_seeds: HashSet<usize> = HashSet::new();
+    let mut skipped_artists: HashMap<String, f32> = HashMap::new();
     for r in turn.skipped_new.iter().filter(|_| part_on(Part::Rejected)) {
-
         let Some(c) = pool.iter().find(|c| c.track.id == *r) else { continue };
+        let ak = ArtistKey::of_new(ctx, c);
+        if ak != ArtistKey::Unknown {
+            *skipped_artists.entry(ak.label(String::new)).or_default() += 1.0;
+        }
         match &c.vector {
             Some(v) => rejected_at.push((m.embed(v), 1.0)),
             None => {
@@ -814,8 +871,23 @@ fn next_ranked(
     }
     if part_on(Part::Rejected) {
         rejected_at.extend(session.pushed(m).into_iter().filter_map(|(t, w)| Some((*m.embedded_at(m.position(t)?)?, w))));
+        for (ago, p) in session.tracks().rev().take(SKIP_ARTIST_WINDOW).enumerate() {
+            let v = crate::session::Session::verdict(p, m);
+            if !v.rejects() {
+                continue;
+            }
+            if let Some(i) = m.position(p.track) {
+                let ak = ArtistKey::of_track(m, i);
+                if ak != ArtistKey::Unknown {
+                    let w = v.push() * 0.5f32.powf(ago as f32 / SKIP_ARTIST_HALF);
+                    *skipped_artists.entry(ak.label(String::new)).or_default() += w;
+                }
+            }
+        }
     }
-    let pushed = |e: &Vector| rejected_at.iter().map(|(r, w)| w * (-euclid(e, r) / scale).exp()).fold(0.0f32, f32::max);
+    // Gaussian repulsion around rejected sounds: strong within half a median
+    // distance, tapering rapidly so genuinely different songs stay unaffected.
+    let pushed = |e: &Vector| rejected_at.iter().map(|(r, w)| w * (-(euclid(e, r) / (0.75 * scale)).powi(2)).exp()).fold(0.0f32, f32::max);
     let pull = |i: usize| {
         let aff = (m.tracks[i].aff_long(now).max(0.0) / 3.0).tanh();
         let link = walk.get(&i).copied().unwrap_or(0.0).min(1.0);
@@ -848,9 +920,31 @@ fn next_ranked(
         }
         c
     };
+    let artist_damp = |load: f32| ARTIST_FATIGUE_BASE * load + ARTIST_FATIGUE_EXTRA * (load - ARTIST_FATIGUE_KNEE).max(0.0);
     // A song worn out now (skipped early in most of its last plays) stands
-    // lower whatever its love.
-    let pulled = |i: usize| pull(i) + moment(i) - WORN_PULL * m.worn(i) - m.embedded_at(i).map_or(0.0, |e| NEW_PUSH_LIB * pushed(e));
+    // lower whatever its love; artist fatigue, skipped sounds/artists, dislike
+    // proximity and seeded tie-break jitter damp positive pull multiplicatively
+    // so loved artists rotate cleanly without dropping below unheard filler.
+    let pulled = |i: usize| {
+        let base = pull(i) + moment(i);
+        let scaled = if base > 0.0 {
+            let ak = lib_artist(i);
+            let load = artist_load.get(ak.as_str()).copied().unwrap_or(0.0);
+            let skip_art = skipped_artists.get(ak.as_str()).copied().unwrap_or(0.0);
+            let fatigue_factor = 1.0 / (1.0 + fatigue_scale * artist_damp(load) + breadth * SKIP_ARTIST_PENALTY * skip_art);
+            let push_factor = m.embedded_at(i).map_or(1.0, |e| 1.0 - NEW_PUSH_LIB * pushed(e));
+            let dislike_factor = 1.0 - 0.5 * m.taste.dislike_near_at(i);
+            let jitter_factor = if turn.seed != 0 {
+                1.0 + PULL_JITTER * (Rng::derive(turn.seed, i as u64).f32() - 0.5)
+            } else {
+                1.0
+            };
+            base * fatigue_factor * push_factor * dislike_factor * jitter_factor
+        } else {
+            base
+        };
+        scaled - WORN_PULL * m.worn(i)
+    };
     // One version of a song a session ([`UserModel::work_at`]: an off
     // vocal or a TV size of a song played, queued or served is that song).
     let by_work = part_on(Part::Works);
@@ -875,28 +969,22 @@ fn next_ranked(
     let mut lib: Vec<(f32, usize)> =
         fitting.iter().copied().filter(|&i| free(i) && (!works.contains(&m.work_at(i)) || again.contains(m.id(i).to_string().as_str()))).map(|i| (pulled(i), i)).collect();
     lib.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-    // The artists kept out of the next pick: the last one, or the last two
-    // for a user who seldom plays an artist twice running — the session's
-    // and the queue's before this call's picks.
-    let avoid = if m.artist_again(ARTIST_AGAIN_PRIOR) >= ARTIST_AGAIN { 1 } else { 2 };
-    // One identity of an artist for the library's songs and the new ones
-    // ([`ArtistKey`]).
-    let lib_artist = |i: usize| ArtistKey::of_track(m, i).label(|| format!("track:{i}"));
-    let mut order: Vec<String> = session.tracks().filter_map(|p| m.position(p.track)).map(lib_artist).collect();
-    for (k, q) in turn.queued.iter().enumerate() {
-        match q {
-            Ahead::Track(t) => order.extend(m.position(*t).map(lib_artist)),
-            Ahead::New(a) => order.push(a.label(|| format!("queued:{k}"))),
-        }
-    }
     let mut stepper = by_model.then(|| LibStepper::new(ctx, session, turn, &lib, avoid));
 
     // The pool's: its weight and its links, times the independent seeds
     // that reach it (its linked songs' distinct artists among the seeds).
+    let skip_moment = (!pool.is_empty() && share > 0.0).then(|| m.moment_light(session, now));
     let mut ext: Vec<(f32, usize)> = Vec::new();
     let mut ext_work: HashMap<usize, String> = HashMap::new();
     for (k, c) in pool.iter().enumerate() {
         if served.contains(&c.key) {
+            continue;
+        }
+        let emb = c.vector.as_ref().map(|v| m.embed(v));
+        // A preview already known to sit next to the user's dislikes is kept
+        // out before picking, matching [`still_fits`].
+        let dislike = emb.as_ref().map_or(0.0, |e| m.dislike_near_of(e));
+        if dislike >= MISFIT_DISLIKE {
             continue;
         }
         if !character_of_new(m, filter.character, c.vector.as_ref()) {
@@ -925,21 +1013,53 @@ fn next_ranked(
 
         let independent: HashSet<Option<ArtistId>> = c.near.iter().filter(|i| seed_set.contains(i) || walk.contains_key(i)).map(|&i| m.main_artist_at(i)).collect();
         let mut score = (c.weight + 0.5 * link) * crate::discover::multi_seed(independent.len());
+        if dislike > 0.0 {
+            score *= (1.0 - dislike).max(0.2);
+        }
+        // Previewed candidates near the session's current sound rise cleanly.
+        if let (Some(e), Some(a)) = (emb.as_ref(), anchor.as_ref()) {
+            let near = (-euclid(e, a) / scale).exp();
+            score *= 0.8 + 0.45 * near;
+        }
+        // Weigh down new tracks with a high predicted early-skip risk (length,
+        // interlude, acoustic jump from the previous song).
+        if let Some(mo) = skip_moment.as_ref() {
+            let dur = c.track.duration_ms.and_then(|d| u32::try_from(d).ok());
+            let p_skip = m.p_skip_new(mo, emb.as_ref(), dur, EventContext::Radio).clamp(0.0, 0.9);
+            score *= (1.0 - 0.5 * p_skip).max(0.35);
+        }
         // A rejected new song teaches at once: unheard songs of its seeds
         // wait, and its sound's neighbourhood stands lower.
         if c.vector.is_none() && c.near.iter().any(|i| blind_seeds.contains(i)) {
             score *= BLIND_DAMP;
         }
         if !rejected_at.is_empty() {
-            let at = c.vector.as_ref().map(|v| m.embed(v)).or_else(|| centroid(m, &c.near));
+            let at = emb.or_else(|| centroid(m, &c.near));
             if let Some(e) = at {
                 score *= 1.0 - NEW_PUSH * pushed(&e);
             }
         }
         // A new song heard by its preview: how it sounds against the
         // user's music of this moment (no character chosen by hand).
-        if free_character && let Some(v) = c.vector.as_ref() {
-            score *= 1.0 + m.sound_fit_of(&m.embed(v), slot);
+        if free_character && let Some(e) = emb.as_ref() {
+            score *= 1.0 + m.sound_fit_of(e, slot);
+        }
+        let ak = ArtistKey::of_new(ctx, c);
+        if ak != ArtistKey::Unknown {
+            let label = ak.label(String::new);
+            let load = artist_load.get(label.as_str()).copied().unwrap_or(0.0);
+            let skip_load = skipped_artists.get(label.as_str()).copied().unwrap_or(0.0);
+            let damp = fatigue_scale * artist_damp(load) + breadth * SKIP_ARTIST_PENALTY * skip_load;
+            if damp > 0.0 {
+                score /= 1.0 + damp;
+            }
+        }
+        if turn.seed != 0 {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            c.key.hash(&mut h);
+            let j = Rng::derive(turn.seed ^ 0x9E37_79B9_7F4A_7C15, h.finish()).f32();
+            score *= 1.0 + 0.14 * (j - 0.5);
         }
         ext.push((score, k));
         ext_work.insert(k, work);
@@ -968,8 +1088,12 @@ fn next_ranked(
     let mut per_artist: HashMap<String, usize> = HashMap::new();
     let cap = (n / 3).max(2);
     while took_lib + took_new < want_lib + want_new {
-        // The new one's turn when it is behind its even share.
-        let new_turn = took_new < want_new
+        // The new one's turn when it is behind its even share — except right
+        // after a skip, when a familiar song stabilizes the vibe first if one
+        // is wanted in this batch.
+        let stabilize = turn.after_skip && part_on(Part::Rejected) && took_lib == 0 && took_new == 0 && took_lib < want_lib;
+        let new_turn = !stabilize
+            && took_new < want_new
             && (took_lib >= want_lib || (took_new as f32 + 0.5) * (want_lib + want_new) as f32 <= want_new as f32 * (took_lib + took_new + 1) as f32);
         let recent: Vec<String> = order.iter().rev().take(avoid).cloned().collect();
         let pick = if new_turn {
@@ -1888,5 +2012,100 @@ mod tests {
         assert!(!radio.still_fits(&ctx, &heard(far)));
         assert!(radio.still_fits(&ctx, &heard(seed)));
         assert!(radio.still_fits(&ctx, &pool_of(&model, 1).remove(0)), "unheard");
+    }
+
+    /// The active pull path opens differently on different run seeds and
+    /// identically on the same seed.
+    #[test]
+    fn a_wave_by_pull_opens_otherwise_on_new_seeds() {
+        let model = listener();
+        let start = |seed: u64| -> Vec<usize> { by_pull(&model, &Session::default(), 10, WaveTurn { seed, ..WaveTurn::default() }) };
+        assert_eq!(start(7), start(7));
+        let differ = (1..=5u64).filter(|&s| start(s) != start(s + 50)).count();
+        assert!(differ >= 3, "expected varied starts across seeds, got {differ}");
+    }
+
+    /// Repeated wave plays of an artist in `recent_artists` damp that artist
+    /// across calls so other loved artists step in instead of ping-ponging.
+    #[test]
+    fn cross_call_artist_fatigue_breaks_ping_pong() {
+        let model = listener();
+        let first = by_pull(&model, &Session::default(), 3, WaveTurn::default());
+        let top = model.main_artist_at(first[0]).expect("an artist");
+        let top_label = ArtistKey::of_track(&model, first[0]).label(String::new);
+        let other = ArtistKey::of_track(&model, first[1]).label(String::new);
+        // Simulate top artist already played 5 times in the recent window,
+        // NOT in the last two slots so `avoid` alone would pick them again.
+        let recent = vec![
+            top_label.clone(),
+            other.clone(),
+            top_label.clone(),
+            other.clone(),
+            top_label.clone(),
+            other.clone(),
+            top_label.clone(),
+            top_label.clone(),
+            "filler-a".to_owned(),
+            "filler-b".to_owned(),
+        ];
+        let next = by_pull(&model, &Session::default(), 1, WaveTurn { recent_artists: &recent, ..WaveTurn::default() });
+        assert_ne!(model.main_artist_at(next[0]), Some(top), "fatigued artist should yield to another loved artist");
+    }
+
+    /// Skipping a track in the session temporarily cools down its artist even
+    /// after two intervening tracks clear the immediate `avoid` window.
+    #[test]
+    fn a_skipped_artist_cools_down_in_the_session() {
+        let model = listener();
+        let first = by_pull(&model, &Session::default(), 3, WaveTurn::default());
+        let skipped = first[0];
+        let a = model.main_artist_at(skipped).expect("an artist");
+        let mut session = Session::default();
+        let t0 = model.now() - 20 * 60_000;
+        session.start(model.id(skipped), t0, EventContext::Radio, Some(EventOrigin::Radio));
+        session.end_at(model.id(skipped), Ended::Early, 8_000, model.duration_at(skipped), None);
+        // Two other artists played after so `avoid` no longer blocks `a`.
+        for (k, &i) in first[1..3].iter().enumerate() {
+            session.start(model.id(i), t0 + ((k + 1) as i64) * 200_000, EventContext::Radio, Some(EventOrigin::Radio));
+            session.end(model.id(i), Ended::Complete);
+        }
+        let after = by_pull(&model, &session, 1, WaveTurn::default());
+        assert_ne!(model.main_artist_at(after[0]), Some(a), "recently skipped artist should stay cooled down");
+    }
+
+    /// A previewed new song next to a user dislike is rejected before picking,
+    /// and immediately after a skip a balanced wave stabilizes on a familiar
+    /// track before introducing a new one.
+    #[test]
+    fn preview_near_dislike_is_skipped_and_after_skip_stabilizes_on_familiar() {
+        let mut p = user(Kind::Omnivore, 5).parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let disliked = (0..p.catalog.len()).find(|&i| p.index.get(p.catalog.tracks()[i].id).is_some()).unwrap();
+        let disliked_id = p.catalog.tracks()[disliked].id;
+        p.input.disliked_tracks.push(disliked_id);
+        p.input.dislike_neighbours = true;
+        let model = p.model_at(last + 1);
+        let (ok, no) = (|_: usize| true, |_: usize| false);
+        let none = |_: &StreamTrack| Vec::new();
+        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &no, artist_tracks: &none, index: Some(&p.index), learned: None };
+        let mut bad = pool_of(&model, 1).remove(0);
+        bad.vector = p.index.get(disliked_id).copied();
+        bad.weight = 10.0;
+        let mut good = pool_of(&model, 2).remove(1);
+        good.weight = 1.0;
+        let only = WaveFilter { novelty: 1.0, ..WaveFilter::default() };
+        let picked = next_ranked(&ctx, &[bad.clone(), good.clone()], &only, &Session::default(), 2, &HashSet::new(), false, WaveTurn::default());
+        assert_eq!(picked.picks.len(), 1);
+        assert_eq!(picked.picks[0].item, Item::Stream(good.track.id.clone()));
+
+        // Right after a skip, a balanced wave with novelty 0.6 opens with a
+        // familiar library song instead of dropping a new song on slot 0.
+        let more = WaveFilter { novelty: 0.6, ..WaveFilter::default() };
+        let pool = pool_of(&model, 6);
+        let plain = next_ranked(&ctx, &pool, &more, &Session::default(), 3, &HashSet::new(), false, WaveTurn::default());
+        assert!(plain.picks[0].new, "normally novelty 0.6 places a new song first");
+        let after = next_ranked(&ctx, &pool, &more, &Session::default(), 3, &HashSet::new(), false, WaveTurn { after_skip: true, ..WaveTurn::default() });
+        assert!(!after.picks[0].new, "after a skip, slot 0 stabilizes on a familiar song");
+        assert_eq!(after.picks.iter().filter(|x| x.new).count(), plain.picks.iter().filter(|x| x.new).count(), "batch novelty share is preserved");
     }
 }

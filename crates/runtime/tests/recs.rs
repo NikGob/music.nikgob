@@ -51,8 +51,7 @@ fn schedule() -> StreamSchedule {
     }
 }
 
-/// [`schedule`] with the wave's refill on (it is off in the app:
-/// `WAVE_REFILL` in `recs/wave.rs`), for the tests of the refill.
+/// [`schedule`] with the wave's refill explicitly on.
 fn refill_schedule() -> StreamSchedule {
     StreamSchedule { wave_refill: true, ..schedule() }
 }
@@ -585,9 +584,8 @@ fn a_chip_while_the_wave_starts_wins() {
     assert!(st.queue.radio.is_none());
 }
 
-/// The refill off (as the app runs): «Только новое» with no new music of
-/// its filter ends at once, as before the refill, and asks the services
-/// nothing for it.
+/// With the refill explicitly off: «Только новое» with no new music of
+/// its filter ends at once and asks the services nothing for it.
 #[test]
 fn a_dry_wave_ends_at_once_without_the_refill() {
     let l = library(3, 6, 5, &[]);
@@ -600,7 +598,7 @@ fn a_dry_wave_ends_at_once_without_the_refill() {
         wave_novelty: nikgob_view::WaveNovelty::OnlyNew,
         ..Prefs::default()
     };
-    let s = start(&l.lib, vec![yt.clone(), dz.clone()], prefs, None);
+    let s = start_with(&l.lib, vec![yt.clone(), dz.clone()], prefs, None, StreamSchedule { wave_refill: false, ..schedule() });
     wait_for(&s.rt, "the home", home_ready);
     s.rt.send(Command::PlayWave { preset: None });
     wait_for(&s.rt, "the wave's end", |st| {
@@ -733,6 +731,39 @@ fn a_dry_wave_plays_what_its_filter_was_topped_up_with_lately() {
     assert!(!st.toasts.iter().any(|t| t.text == nothing));
     drop(st);
     assert_eq!(asked(&l.lib), before, "nothing asked again");
+}
+
+/// Starting a new wave while an earlier dry wave's refill is in flight:
+/// the older wave's empty refill ending never aborts the newer wave.
+#[test]
+fn a_new_wave_ignores_an_older_waves_refill_ending() {
+    let l = library(3, 6, 5, &[]);
+    let yt = Arc::new(FakeService::youtube());
+    let dz = Arc::new(FakeService::deezer());
+    let prefs = Prefs {
+        mixes_with_new: false,
+        graph_services: false,
+        graph_open_data: false,
+        wave_novelty: nikgob_view::WaveNovelty::OnlyNew,
+        ..Prefs::default()
+    };
+    let sched = StreamSchedule { discover_gap: (Duration::from_millis(80), Duration::from_millis(120)), ..refill_schedule() };
+    let s = start_with(&l.lib, vec![yt.clone(), dz.clone()], prefs, None, sched);
+    wait_for(&s.rt, "the home", home_ready);
+    // Start a dry OnlyNew wave that waits for its top-up.
+    s.rt.send(Command::PlayWave { preset: None });
+    wait_for(&s.rt, "first wave waiting", |st| st.queue.radio.as_ref().is_some_and(|r| r.extending && r.wave.is_some()));
+    // Switch novelty to Familiar and start a brand-new wave (new run_id)
+    // before the old top-up finishes.
+    s.rt.send(Command::SetWave(nikgob_view::WaveFilter { novelty: nikgob_view::WaveNovelty::Familiar, ..nikgob_view::WaveFilter::default() }));
+    s.rt.send(Command::PlayWave { preset: None });
+    wait_for(&s.rt, "fresh wave playing", |st| st.queue.current_entry.is_some() && st.queue.radio.is_some());
+    // Let any in-flight top-up from the first filter finish and confirm the new wave stays alive without «Нечего играть».
+    std::thread::sleep(Duration::from_millis(350));
+    let st = s.rt.state();
+    let nothing = nikgob_core::i18n::errors_in(st.prefs.resolved_locale()).nothing_to_play;
+    assert!(st.queue.radio.is_some() && st.queue.current_entry.is_some(), "new wave must keep playing");
+    assert!(!st.toasts.iter().any(|t| t.text == nothing), "stale refill must not toast nothing_to_play");
 }
 
 /// A like of a familiar track teaches the wave its cluster (α), as one of
