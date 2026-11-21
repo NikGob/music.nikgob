@@ -389,6 +389,7 @@ pub use stage::preset_rows;
 #[cfg(test)]
 use card::{base_body, Body, GAP, place, FOCUS_S, GROUP_S, glow_at, group_tint_at};
 #[cfg(test)]
+#[cfg(test)]
 use catalog::preset_title;
 
 #[cfg(test)]

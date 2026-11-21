@@ -316,6 +316,7 @@ pub(crate) struct ColdState {
 }
 
 /// Russian plural: 1 лайк, 2 лайка, 5 лайков.
+#[cfg(test)]
 pub(crate) fn plural(n: usize, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
     let (d, h) = (n % 10, n % 100);
     if d == 1 && h != 11 {

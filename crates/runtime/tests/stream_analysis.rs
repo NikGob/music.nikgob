@@ -332,7 +332,8 @@ fn nothing_is_downloaded_or_previewed_in_the_background_while_youtube_music_play
     let lib = Library::open_in_memory().unwrap();
     let yt = Arc::new(youtube());
     let track = lib.upsert_stream_track(&find(&yt, "yt-gruppa-1")).unwrap();
-    let (rt, asked) = start(&lib, vec![yt.clone()], Prefs { autoplay: false, ..Prefs::default() }, schedule(50, 300));
+    let off = Prefs { autoplay: false, stream_analysis: false, ..Prefs::default() };
+    let (rt, asked) = start(&lib, vec![yt.clone()], off, schedule(50, 300));
     rt.send(Command::PlayTracks {
         tracks: vec![track],
         start: 0,
@@ -341,7 +342,9 @@ fn nothing_is_downloaded_or_previewed_in_the_background_while_youtube_music_play
     wait_until("the play request", || !asked.lock().unwrap().is_empty());
     let id = asked.lock().unwrap()[0].id;
     rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+    wait_for(&rt, "the playing state", |s| s.player.status == nikgob_view::Status::Playing);
     wait_for(&rt, "the likes", |s| s.analysis.streams_total >= 3);
+    rt.send(Command::SetPrefs(Box::new(Prefs { autoplay: false, stream_analysis: true, ..Prefs::default() })));
     // The player's requests are the listener's: none in the background.
     std::thread::sleep(Duration::from_millis(800));
     assert!(yt.opened().is_empty(), "{:?}", yt.opened());
@@ -396,14 +399,19 @@ fn nothing_is_downloaded_while_the_next_song_needs_youtube_music() {
     let file = lib.upsert_track(&nikgob_core::model::Track::new("A file", nikgob_core::model::ArtistCredit::single("Someone", None))).unwrap();
     lib.add_source(&Source::new(file.id, SourceKind::LocalFile, "Music/a-file.opus", Codec::Opus)).unwrap();
     let next = lib.upsert_stream_track(&find(&FakeService::spotify(), "sp-discovery-1")).unwrap();
-    let (rt, asked) = start(&lib, vec![yt.clone()], Prefs { autoplay: false, ..Prefs::default() }, schedule(50, 300));
+    let off = Prefs { autoplay: false, stream_analysis: false, ..Prefs::default() };
+    let (rt, asked) = start(&lib, vec![yt.clone()], off, schedule(50, 300));
     rt.send(Command::PlayTracks {
         tracks: vec![file.id, next],
         start: 0,
         context: "test".into(),
     });
     wait_until("the play request", || !asked.lock().unwrap().is_empty());
+    let id = asked.lock().unwrap()[0].id;
+    rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+    wait_for(&rt, "the playing state", |s| s.player.status == nikgob_view::Status::Playing);
     wait_for(&rt, "the likes", |s| s.analysis.streams_total >= 3);
+    rt.send(Command::SetPrefs(Box::new(Prefs { autoplay: false, stream_analysis: true, ..Prefs::default() })));
     std::thread::sleep(Duration::from_millis(800));
     assert!(yt.opened().is_empty(), "{:?}", yt.opened());
     rt.send(Command::Pause);

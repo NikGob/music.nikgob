@@ -25,29 +25,31 @@ pub struct Desktop {
 pub use crate::icon_art::icon_rgba;
 
 impl Desktop {
-    pub fn start(wake: impl Fn() + Send + Sync + Clone + 'static) -> Self {
+    pub fn start(wake: impl Fn() + Send + Sync + Clone + 'static, with_tray: bool) -> Self {
         let loc = i18n::locale();
         let n = i18n::nav_in(loc);
-        let tray = Tray::spawn(
-            tray::Config {
-                id: "music.nikgob",
-                title: "music.nikgob".into(),
-                icon: icon_rgba,
-                template_icon: None,
-                themed_icon: false,
-                menu_on_click: false,
-                menu: vec![
-                    tray::MenuItem::action("show", n.tray_show_hide),
-                    tray::MenuItem::Separator,
-                    tray::MenuItem::action("play-pause", n.tray_play),
-                    tray::MenuItem::action("next", n.tray_next),
-                    tray::MenuItem::action("previous", n.tray_previous),
-                    tray::MenuItem::Separator,
-                    tray::MenuItem::action("quit", n.tray_quit),
-                ],
-            },
-            wake.clone(),
-        );
+        let tray = with_tray.then(|| {
+            Tray::spawn(
+                tray::Config {
+                    id: "music.nikgob",
+                    title: "music.nikgob".into(),
+                    icon: icon_rgba,
+                    template_icon: None,
+                    themed_icon: false,
+                    menu_on_click: false,
+                    menu: vec![
+                        tray::MenuItem::action("show", n.tray_show_hide),
+                        tray::MenuItem::Separator,
+                        tray::MenuItem::action("play-pause", n.tray_play),
+                        tray::MenuItem::action("next", n.tray_next),
+                        tray::MenuItem::action("previous", n.tray_previous),
+                        tray::MenuItem::Separator,
+                        tray::MenuItem::action("quit", n.tray_quit),
+                    ],
+                },
+                wake.clone(),
+            )
+        }).flatten();
         let mut app = np::App::new("nikgob", "music.nikgob");
         app.can_raise = true;
         app.can_quit = true;

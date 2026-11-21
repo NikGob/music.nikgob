@@ -204,6 +204,7 @@ pub(crate) fn deezer_kind(record_type: Option<&str>) -> ReleaseType {
 }
 
 /// The cover of the first of `found` that is `w` ([`pick_hit`]).
+#[cfg(test)]
 fn pick(w: &Want, found: Vec<StreamAlbum>) -> Option<String> {
     pick_hit(w, found).and_then(|a| a.cover_url).filter(|u| !u.is_empty())
 }

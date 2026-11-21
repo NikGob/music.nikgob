@@ -64,6 +64,7 @@ pub(super) fn same_state(a: &SourceError, b: &SourceError) -> bool {
 /// A source whose download failed, in words for «Источники»; `None` when
 /// the failure says nothing of the source (the disk, an empty offer).
 /// `aside`: how long it is still set aside for refusing, when it is.
+#[cfg(test)]
 pub(super) fn fetch_down_text(e: &SourceError, aside: Option<Duration>) -> Option<String> {
     fetch_down_text_in(Locale::Ru, e, aside)
 }

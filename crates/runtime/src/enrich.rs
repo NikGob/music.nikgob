@@ -458,6 +458,7 @@ fn record_verdict(lib: &Library, id: ArtistId, verdict: &Verdict) -> PhotoOutcom
 
 /// Deezer's photo of the artist, downloaded into `dir` and recorded (see
 /// [`deezer_verdict`]). A photo locked by the user is left alone.
+#[cfg(test)]
 pub(crate) async fn fetch_artist_photo(
     deezer: &Deezer,
     lib: &Library,

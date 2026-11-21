@@ -16,10 +16,26 @@ pub(super) struct SampleText {
 }
 
 /// The ⓘ card's sample.
-pub(super) const CARD_TEXT: SampleText = SampleText { above: "Где-то рядом", below: "Он ведёт меня", sung: &["Слы", "шишь ", "э", "тот ", "ритм"] };
+pub(super) const CARD_TEXT_RU: SampleText = SampleText { above: "Где-то рядом", below: "Он ведёт меня", sung: &["Слы", "шишь ", "э", "тот ", "ритм"] };
+pub(super) const CARD_TEXT_EN: SampleText = SampleText { above: "Close beside me", below: "Pulls me right along", sung: &["Can ", "you ", "feel ", "the ", "beat"] };
 /// A preset tile's: short lines, so the sung one can be large in a small
 /// tile.
-pub(super) const TILE_TEXT: SampleText = SampleText { above: "Где-то рядом", below: "Он ведёт", sung: &["Слы", "шишь ", "ритм"] };
+pub(super) const TILE_TEXT_RU: SampleText = SampleText { above: "Где-то рядом", below: "Он ведёт", sung: &["Слы", "шишь ", "ритм"] };
+pub(super) const TILE_TEXT_EN: SampleText = SampleText { above: "Close by", below: "Leads on", sung: &["Feel ", "the ", "beat"] };
+
+pub(super) fn card_text() -> &'static SampleText {
+    match nikgob_core::i18n::locale() {
+        nikgob_core::i18n::Locale::Ru => &CARD_TEXT_RU,
+        nikgob_core::i18n::Locale::En => &CARD_TEXT_EN,
+    }
+}
+
+pub(super) fn tile_text() -> &'static SampleText {
+    match nikgob_core::i18n::locale() {
+        nikgob_core::i18n::Locale::Ru => &TILE_TEXT_RU,
+        nikgob_core::i18n::Locale::En => &TILE_TEXT_EN,
+    }
+}
 
 /// [`preview`] standing at `still` seconds into its loop, or running with
 /// the clock.
@@ -27,12 +43,13 @@ pub(crate) fn preview_at(ui: &Ui, rect: Rect, prefs: &Prefs, still: Option<f64>)
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
     let scale = prefs.lyrics_scale.clamp(0.8, 1.4);
     let (big, small) = (PANE.big * 0.8 * scale, PANE.small * 0.8 * scale);
+    let text = card_text();
     // Fit the three lines into the sample (a small card shrinks the text;
     // the size setting still shows, relative to the others): fitted at the
     // largest size.
-    let (w, h) = sample_extent(&painter, &CARD_TEXT, big / scale * 1.4, small / scale * 1.4);
+    let (w, h) = sample_extent(&painter, text, big / scale * 1.4, small / scale * 1.4);
     let fit = ((rect.width() - 2.0 * 10.0) / w).min((rect.height() - 2.0 * 6.0) / h).min(1.0);
-    sample(ui.ctx(), &painter, rect, prefs, still, &CARD_TEXT, big * fit, small * fit, 6.0 * fit, 10.0);
+    sample(ui.ctx(), &painter, rect, prefs, still, text, big * fit, small * fit, 6.0 * fit, 10.0);
 }
 
 /// A preset's tile (`rect`, small): the sample drawn as the lyrics view
@@ -45,7 +62,8 @@ pub(crate) fn tile_preview(ui: &Ui, rect: Rect, prefs: &Prefs, still: Option<f64
     let ctx = ui.ctx();
     let probe = ui.painter();
     let (big, small, gap) = (PANE.big, PANE.small, 8.0);
-    let (w, h) = sample_extent(probe, &TILE_TEXT, big, small);
+    let text = tile_text();
+    let (w, h) = sample_extent(probe, text, big, small);
     // The sung line spans the tile but for a margin; the three rows fit.
     const MARGIN: f32 = 10.0;
     let k = ((rect.width() - 2.0 * MARGIN) / w).min((rect.height() - 8.0) / (h + 2.0 * gap)).clamp(0.05, 1.0);
@@ -58,7 +76,7 @@ pub(crate) fn tile_preview(ui: &Ui, rect: Rect, prefs: &Prefs, still: Option<f64
     // this one in the scene's points (scaled down with it).
     let mut painter = ui.painter().clone();
     painter.set_clip_rect(clip);
-    sample(ctx, &painter, virt, prefs, still, &TILE_TEXT, big, small, gap, MARGIN / k);
+    sample(ctx, &painter, virt, prefs, still, text, big, small, gap, MARGIN / k);
     ctx.graphics_mut(|g| {
         let list = g.entry(layer);
         let end = list.next_idx();
@@ -176,8 +194,12 @@ pub(crate) fn countdown_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     let small = PANE.small * 0.75;
     let k = 0.8 * prefs.lyrics_gap_size.clamp(0.8, 1.5);
     let row_h = 42.0 * k;
-    let prev = fixed_layout(&painter, "Слышишь этот ритм", small);
-    let next = fixed_layout(&painter, "Он ведёт меня", small);
+    let (prev_line, next_line) = match nikgob_core::i18n::locale() {
+        nikgob_core::i18n::Locale::Ru => ("Слышишь этот ритм", "Он ведёт меня"),
+        nikgob_core::i18n::Locale::En => ("Can you feel the beat", "Pulls me right along"),
+    };
+    let prev = fixed_layout(&painter, prev_line, small);
+    let next = fixed_layout(&painter, next_line, small);
     let total = prev.size().y + row_h + next.size().y + 8.0;
     let top = rect.center().y - total * 0.5;
     painter.galley_with_override_text_color(pos2(rect.left() + PAD, top), prev.clone(), dim);
@@ -197,7 +219,12 @@ pub(crate) fn countdown_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
 pub(crate) fn edges_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     let s = Theme::get(ui.ctx()).scheme;
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
-    const TEXTS: [&str; 6] = ["Где-то рядом", "Слышишь этот ритм", "Он ведёт меня", "Сквозь огни домов", "До самого утра", "И дальше вперёд"];
+    const TEXTS_RU: [&str; 6] = ["Где-то рядом", "Слышишь этот ритм", "Он ведёт меня", "Сквозь огни домов", "До самого утра", "И дальше вперёд"];
+    const TEXTS_EN: [&str; 6] = ["Close beside me", "Can you feel the beat", "Pulls me right along", "Through the city glow", "Till the morning light", "And further ahead"];
+    let texts = match nikgob_core::i18n::locale() {
+        nikgob_core::i18n::Locale::Ru => &TEXTS_RU,
+        nikgob_core::i18n::Locale::En => &TEXTS_EN,
+    };
     // A line every 1.6 s, each move eased out over half a second.
     const STEP: f64 = 1.6;
     let size = (rect.height() / 6.0).clamp(12.0, 20.0);
@@ -215,7 +242,7 @@ pub(crate) fn edges_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     let seen = if seen.is_positive() { seen } else { rect };
     let fade = prefs.lyrics_soft_edges.then(|| Fade::of(seen, Soft::of(prefs).text(pitch, size)));
     for k in -4i64..=5 {
-        let g = fixed_layout(&painter, TEXTS[(n + k).rem_euclid(TEXTS.len() as i64) as usize], size);
+        let g = fixed_layout(&painter, texts[(n + k).rem_euclid(texts.len() as i64) as usize], size);
         let top = whole(rect.center().y - g.size().y * 0.5) + (k as f32 + 1.0 - ease) * pitch;
         let alpha = if fade.is_some() {
             1.0

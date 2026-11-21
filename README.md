@@ -27,7 +27,7 @@ Made by **[NikGob](https://github.com/NikGob)**
 > - **Spotify & SoundCloud** work, but have seen **very limited real-world testing** across different account tiers, regional restrictions, rate limits, and multi-device handoffs.
 > - **Linux builds** (`x86_64` Wayland/X11, NixOS flake, and headless `nikgobd` on `aarch64`) compile and run, but have been **tested far less** than Windows (especially PipeWire/PulseAudio device switching, WebKitGTK sign-in windows, and keyring edge cases).
 > - **Phone / Mobile UI (`crates/mobile`)** is in a **VERY early prototype stage** — currently a portrait touch layout running inside a desktop harness (`nikgob-phone`), not a packaged Android app yet.
-> - **UI language** in `0.1.0` provides runtime language switching and English localization for recommendations, generated mixes, queue contexts, track audio details, and playback/stream-login/settings error toasts; full English translation of the remaining static desktop and mobile UI screens is planned next.
+> - **UI language**: full **Russian and English** localization across both desktop and mobile UIs, with live switching in Settings.
 
 ---
 
@@ -162,18 +162,16 @@ Contributions, bug reports, and real-world testing are very welcome. Highest-imp
   - PipeWire / PulseAudio sink enumeration, hot-plugging USB DACs, and Secret Service keyring persistence (GNOME Keyring, KWallet, KeePassXC).
   - Real-world pairing, LAN blob sync, and remote playback with `nikgobd` on Raspberry Pi 4/5 (`aarch64`).
 - **UI Responsiveness & Memory (`crates/runtime`, `crates/md3e`, `crates/youtube`)**
-  - Move remaining synchronous work (`LoadHome` snapshot assembly, per-character search debounce/cancellation, cold `PlayRelease` queries) off the runtime loop.
-  - Fix transient `egui_glow` managed cover texture eviction flashes when secondary windows (Settings stage, Lyrics dialog) are open (`crates/md3e/src/covers.rs`).
-  - Cap `lyrics_cache` growth and avoid full-buffer cloning when caching YouTube range streams (`crates/youtube/src/range.rs`).
+  - Move remaining synchronous work (history writes, cold album starts) off the runtime loop and spill very long stream buffers to disk.
+  - Profile real-world RAM on very large libraries (50,000+ tracks) and smooth background analysis peaks.
 - **Downloads, Torrents & Metadata (`crates/torrent`, `crates/soulseek`, `crates/metadata`, `crates/import`)**
   - Recover or restart `librqbit` sessions cleanly when the uTP dispatcher dies (`error accepting uTP: dispatcher dead`).
-  - Guard `rustypipe` visitor-data network calls against upstream panics on offline/dropped connections.
-  - Omit out-of-range track durations (`0` or `> 3600s`) in LRCLIB requests and persist source pause/backoff state across restarts.
-  - Test the custom `nikgob-soulseek` peer client on the live Soulseek network and finish safe folder-move migration for named FLAC masters.
+  - Persist lyric-source pause/backoff state across restarts and finish safe folder-move migration for named FLAC masters.
+  - Test the custom `nikgob-soulseek` peer client and source mirrors in the wild.
 - **Recommendations & Wave (`crates/recs`, `crates/runtime/src/recs`)**
-  - Switch `Моя волна` (My Wave) ranking from heuristic weights to the trained user taste/skip model, wire `want_preview` audio pre-checks for discovery candidates, persist bandit state across restarts, and utilize the 400 `Discogs-EffNet` style activations.
-- **Mobile Shell & Localization (`crates/mobile`, `crates/md3e`)**
-  - Build out the Android host shell (Kotlin/Media3 + Rust core) around `nikgob-mobile`, refine touch gestures, and extract hardcoded Russian UI strings into a clean localization layer (English + Russian).
+  - Refine My Wave and Daily Mixes: live niche refill on dry filters, fresh releases in the wave pool, smoother artist rotation, and partial daily mix refreshes with stronger new-music balance.
+- **Mobile Shell (`crates/mobile`)**
+  - Build out the Android host shell (Kotlin/Media3 + Rust core) around `nikgob-mobile` and refine touch gestures.
 
 ---
 

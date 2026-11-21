@@ -122,6 +122,7 @@ pub(crate) fn file_label_in(loc: Locale, src: &Source) -> String {
 
 /// An offer's line in «Подтверди», saying what it improves: «FLAC вместо
 /// MP3 128 · 312 МБ · RuTracker».
+#[cfg(test)]
 pub(crate) fn offer_detail(offer: &Offer, have: Option<&str>) -> String {
     nikgob_core::i18n::status::fmt_offer_improving_in(Locale::Ru, offer, have)
 }
@@ -145,6 +146,7 @@ pub(crate) fn on_its_way(items: &[WishlistItem], album_items: &[WishlistItem]) -
 /// из 10»), `wanted` what is looked for, `next` when it looks again.
 /// `None` where the usual words say it (downloading, files in «Подтверди»,
 /// turned down).
+#[cfg(test)]
 pub(crate) fn upgrade_words(
     status: WishlistStatus,
     files_wait: bool,

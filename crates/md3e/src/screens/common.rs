@@ -20,11 +20,6 @@ pub fn fmt_time(d: Duration) -> String {
     }
 }
 
-/// "42 сек" / "47 мин" / "1 ч 12 мин".
-pub fn fmt_total(d: Duration) -> String {
-    nikgob_core::i18n::fmt_total(d)
-}
-
 /// An album's release date as [`AlbumDate`] says: «2026», «Октябрь 2026»
 /// or «23 октября 2026». What is not known falls back to what is (no day:
 /// the month and year; no month: the year); `None` without even a year.

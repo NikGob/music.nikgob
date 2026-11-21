@@ -992,6 +992,7 @@ pub fn preset_title_in(loc: Locale, a: v::presets::Area) -> &'static str {
 }
 
 /// The title of the group an area's presets head, in the active locale.
+#[cfg(test)]
 pub fn preset_title(a: v::presets::Area) -> &'static str {
     preset_title_in(nikgob_core::i18n::locale(), a)
 }

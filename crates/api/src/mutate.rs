@@ -151,7 +151,7 @@ pub fn feedback_command(action: &str, t: &Target) -> Result<Command, ApiError> {
         ("add_to_library" | "remove_from_library", Target::Album(id)) => Command::AddWholeAlbum { id: *id, on: action == "add_to_library" },
         ("add_to_library" | "remove_from_library", Target::StreamTrack(r)) => Command::StreamInLibrary { track: r.clone(), on: action == "add_to_library" },
         (
-            "like" | "unlike" | "dislike" | "undislike" | "dont_recommend" | "recommend" | "add_to_library" | "remove_from_library",
+            "dislike" | "undislike" | "dont_recommend" | "recommend" | "add_to_library" | "remove_from_library",
             _,
         ) => return Err(no()),
         _ => return Err(ApiError::bad_request("action: like, unlike, dislike, undislike, dont_recommend, recommend, add_to_library or remove_from_library")),
@@ -689,6 +689,7 @@ pub fn trash_what_in(loc: nikgob_core::i18n::Locale, tracks: usize, only_one_alb
 }
 
 /// The toast's word for what goes, in English: "Track", "Album", "12 tracks".
+#[cfg(test)]
 pub fn trash_what(tracks: usize, only_one_album: bool) -> String {
     trash_what_in(nikgob_core::i18n::Locale::En, tracks, only_one_album)
 }

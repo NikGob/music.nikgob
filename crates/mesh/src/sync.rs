@@ -546,7 +546,6 @@ pub(crate) async fn run(sh: Arc<Shared>) {
             }
             continue;
         }
-        let loc = sh.rt.state().prefs.resolved_locale();
         let library = sh.rt.state().prefs.library_dir.clone();
         // Hashing and the kept rows' retries at their own pace, not at every
         // quick turn of a long pull.

@@ -78,6 +78,7 @@ pub fn places_in(state: &ViewState, loc: Locale) -> Vec<Place> {
 
 /// This phone, then the paired devices, those in reach first, in the active
 /// process locale.
+#[cfg(test)]
 pub fn places(state: &ViewState) -> Vec<Place> {
     places_in(state, locale())
 }

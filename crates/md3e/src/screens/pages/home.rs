@@ -544,18 +544,6 @@ pub(super) fn wave_playing(state: &ViewState, preset: Option<nikgob_view::MixKey
     (ours, ours && state.player.status == Status::Playing)
 }
 
-/// What a click on the wave's chip asks: pause it while it plays, play it
-/// on when it is the queue's, else start it.
-fn wave_command(ours: bool, playing: bool, preset: Option<nikgob_view::MixKey>) -> Command {
-    if playing {
-        Command::Pause
-    } else if ours {
-        Command::TogglePlay
-    } else {
-        Command::PlayWave { preset }
-    }
-}
-
 /// The name card's height: 16 above, the question (24), 4 + 12 under it,
 /// the field's row (56), 16 below — the old 164 less the line that
 /// explained where the name goes.

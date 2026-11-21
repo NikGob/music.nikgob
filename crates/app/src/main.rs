@@ -1078,16 +1078,22 @@ fn main() -> eframe::Result {
     let geom_path = shot::window_size().is_none().then(|| paths.prefs.with_file_name("window.json"));
     #[cfg(not(feature = "dev"))]
     let geom_path = Some(paths.prefs.with_file_name("window.json"));
+    #[cfg(feature = "dev")]
+    let shot = shot::Shot::from_env().or(sweep_shot);
+    #[cfg(feature = "dev")]
+    let with_tray = !shot::offscreen() || shot.as_ref().is_some_and(shot::Shot::uses_hide);
+    #[cfg(not(feature = "dev"))]
+    let with_tray = true;
     let core = Core {
         ui,
         mesh,
         api,
         runtime,
-        desktop: desktop::Desktop::start(wake),
+        desktop: desktop::Desktop::start(wake, with_tray),
         analyzer: links.map(|l| l.analyzer),
         commands: Vec::new(),
         #[cfg(feature = "dev")]
-        shot: shot::Shot::from_env().or(sweep_shot),
+        shot,
         #[cfg(feature = "dev")]
         frames: frames::Frames::from_env(),
         quit: false,

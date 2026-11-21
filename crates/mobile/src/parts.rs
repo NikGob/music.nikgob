@@ -35,10 +35,8 @@ impl PageOut {
 
 pub const BAR_H: f32 = 64.0;
 
-/// The search bar at the top of Главная and Библиотека, and the room it
-/// takes with its margins.
+/// The search bar at the top of Главная and Библиотека.
 pub const SEARCH_H: f32 = 56.0;
-pub const SEARCH_ROOM: f32 = 8.0 + SEARCH_H + 8.0;
 
 /// Where the search bar of a page `rect` wide goes under the status bar
 /// `top` high.

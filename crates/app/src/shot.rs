@@ -212,6 +212,11 @@ impl Shot {
         self.fakes.any().then(|| self.fakes.apply(state))
     }
 
+    /// Whether this screenshot run exercises hiding to the tray (`hide:`).
+    pub fn uses_hide(&self) -> bool {
+        self.steps.iter().any(|s| s == "hide" || s.starts_with("hide:"))
+    }
+
     /// True once after `reopen`: the window closes and a new one opens,
     /// as when it is shown again from the tray.
     pub fn take_reopen(&mut self) -> bool {

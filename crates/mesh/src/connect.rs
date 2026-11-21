@@ -998,7 +998,6 @@ async fn pull(ctx: &Ctx, track: TrackId, from: &str) -> Result<PathBuf, String> 
         }
         if expected.is_none() {
             tokio::fs::write(&meta, &hash).await.map_err(|e| format!("cache: {e}"))?;
-            expected = Some(hash.clone());
         }
         receive(resp, &part, from_byte).await?;
         finish(&part, &hash, &done).await?;

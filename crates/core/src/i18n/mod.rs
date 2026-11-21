@@ -137,7 +137,7 @@ impl LangPref {
         match self {
             Self::Auto => settings_in(loc).lang_auto,
             Self::Ru => "Русский",
-            Self::En => "English (beta)",
+            Self::En => "English",
         }
     }
 }
@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(LangPref::Auto.label_in(Locale::En), "System");
         for loc in Locale::ALL {
             assert_eq!(LangPref::Ru.label_in(loc), "Русский");
-            assert_eq!(LangPref::En.label_in(loc), "English (beta)");
+            assert_eq!(LangPref::En.label_in(loc), "English");
             for pref in LangPref::ALL {
                 assert_eq!(lang_pref_label_in(loc, pref), pref.label_in(loc));
             }
